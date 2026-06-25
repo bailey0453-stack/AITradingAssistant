@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # FX / market data
     fx_api_key: Optional[str] = None
     market_data_api_key: Optional[str] = None
+    # FX provider selection + endpoint. Default targets Open Exchange Rates
+    # (https://openexchangerates.org), which returns USD-based rates.
+    fx_provider: str = "openexchangerates"
+    fx_base_url: Optional[str] = None
     # Macro indicators (e.g. FRED for DXY / treasury yields)
     fred_api_key: Optional[str] = None
     # News
@@ -43,10 +47,18 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = None
     ai_model: str = "gpt-4o-mini"
 
+    # --- HTTP ---
+    http_timeout_seconds: float = 8.0
+
     @property
     def is_mock(self) -> bool:
-        """Mock mode is forced on whenever required live keys are absent."""
+        """Global mock toggle. Mock mode is on whenever USE_MOCK_DATA is true."""
         return self.use_mock_data
+
+    @property
+    def fx_live_enabled(self) -> bool:
+        """Live FX is attempted only when mock mode is off AND a key is set."""
+        return (not self.use_mock_data) and bool(self.fx_api_key)
 
 
 @lru_cache

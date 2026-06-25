@@ -97,11 +97,42 @@ All config is environment-driven (see `.env.example`):
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `DATABASE_URL` | SQLite or Postgres connection string | `sqlite:///./aitrading.db` |
-| `USE_MOCK_DATA` | Serve mocked data (no external keys needed) | `true` |
-| `FX_API_KEY` / `MARKET_DATA_API_KEY` | FX/market feed (future) | empty |
+| `USE_MOCK_DATA` | Serve mocked data; set `false` to attempt live USD/MXN | `true` |
+| `FX_API_KEY` | FX provider key/App ID for **live USD/MXN** | empty |
+| `FX_PROVIDER` | FX provider name | `openexchangerates` |
+| `FX_BASE_URL` | Override FX endpoint (optional) | OXR `latest.json` |
+| `HTTP_TIMEOUT_SECONDS` | HTTP timeout for provider calls | `8.0` |
+| `MARKET_DATA_API_KEY` | Alternate market feed (future) | empty |
 | `FRED_API_KEY` | DXY / treasury yields (future) | empty |
 | `NEWS_API_KEY` | News + calendar (future) | empty |
 | `OPENAI_API_KEY` / `AI_MODEL` | LLM-backed analysis (future) | empty |
+
+### Live USD/MXN market data
+
+Phase 1 can fetch a **real USD/MXN spot price** while keeping everything else
+mocked (DXY, treasury yield, oil remain placeholders).
+
+1. Get a free **Open Exchange Rates** App ID: https://openexchangerates.org/signup/free
+2. In `.env`, set:
+
+   ```bash
+   USE_MOCK_DATA=false
+   FX_API_KEY=your_app_id_here
+   ```
+
+3. Restart the server. `GET /market/usdmxn` now returns a live price.
+
+The `source` field on every stored snapshot tells you where the data came from:
+
+| `source` | Meaning |
+| --- | --- |
+| `mock` | `USE_MOCK_DATA=true` — intentional mock data |
+| `live` | Real price fetched from the FX provider |
+| `fallback` | Live was requested but the key was missing or the fetch failed; mock data used so the API never breaks |
+
+Open Exchange Rates returns USD-based rates, so `USD/MXN = rates["MXN"]`. To use
+a different provider, implement a new branch/class in
+`services/market_data.py` and point `FX_BASE_URL` / `FX_PROVIDER` at it.
 
 ### Switching to Postgres
 
@@ -113,14 +144,26 @@ DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/aitrading
 
 ## Going live (plugging in real data)
 
-The mock providers implement the same interfaces as the live stubs:
+The provider interfaces are designed so live integrations drop in without
+touching routers or storage:
 
-- `services/market_data.py` → implement `LiveMarketDataProvider.get_usdmxn()`.
+- `services/market_data.py` → `LiveMarketDataProvider` (USD/MXN) is **implemented**
+  (Open Exchange Rates). Macro indicators are still mocked placeholders.
 - `services/news.py` → implement `LiveNewsProvider`.
 - `services/ai_analysis.py` → implement `OpenAIAnalyzer.analyze()`.
 
-Set the relevant API keys and `USE_MOCK_DATA=false`. Routers and storage do not
-change.
+`get_market_data()` orchestrates live-with-fallback, so the service never breaks
+if a provider is down — it returns mock data tagged `source="fallback"`.
+
+## Tests
+
+A dependency-free smoke test covers `/health`, `/market/usdmxn`,
+`/analysis/usdmxn`, and the `mock` / `live` / `fallback` source tagging:
+
+```bash
+cd backend
+./.venv/bin/python -m tests.smoke_test   # or: python -m tests.smoke_test
+```
 
 ## Next steps
 

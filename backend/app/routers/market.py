@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import MarketSnapshot
-from app.services.market_data import MarketData, get_market_provider
+from app.services.market_data import MarketData, get_market_data
 from app.services.news import get_news_provider
 
 router = APIRouter(prefix="/market", tags=["market"])
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/market", tags=["market"])
 
 def capture_market_snapshot(db: Session) -> tuple[MarketSnapshot, MarketData, list[dict]]:
     """Fetch a fresh market snapshot (+ news) and persist it."""
-    market = get_market_provider().get_usdmxn()
+    market = get_market_data()
     news_provider = get_news_provider()
     news = news_provider.get_news()
     calendar = news_provider.get_economic_calendar()
