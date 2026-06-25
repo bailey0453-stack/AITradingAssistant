@@ -114,10 +114,21 @@ class LiveMarketDataProvider(MarketDataProvider):
         if not self.settings.fx_api_key:
             raise RuntimeError("FX_API_KEY is not configured.")
 
-        params = {"app_id": self.settings.fx_api_key, "symbols": "MXN"}
-        resp = httpx.get(self.base_url, params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        data = resp.json()
+        # Send the key in the Authorization header (Open Exchange Rates supports
+        # `Token <app_id>`) so it never appears in the request URL or in any
+        # httpx error message / log line.
+        headers = {"Authorization": f"Token {self.settings.fx_api_key}"}
+        params = {"symbols": "MXN"}
+        try:
+            resp = httpx.get(
+                self.base_url, params=params, headers=headers, timeout=self.timeout
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 - re-raise scrubbed
+            raise RuntimeError(
+                f"FX request failed: {_scrub(str(exc), self.settings.fx_api_key)}"
+            ) from None
 
         # Some providers wrap errors in a 200 body.
         if isinstance(data, dict) and data.get("error"):
@@ -142,6 +153,13 @@ class LiveMarketDataProvider(MarketDataProvider):
             source=self.source,
             drivers=MockMarketDataProvider._drivers(usdmxn, macro),
         )
+
+
+def _scrub(text: str, secret: str | None) -> str:
+    """Remove the API key from any string before it is logged."""
+    if secret and secret in text:
+        return text.replace(secret, "***REDACTED***")
+    return text
 
 
 def _fallback_data() -> MarketData:
@@ -179,5 +197,8 @@ def get_market_data(settings: Settings | None = None) -> MarketData:
     try:
         return LiveMarketDataProvider(settings).get_usdmxn()
     except Exception as exc:  # noqa: BLE001 - any failure should degrade gracefully
-        logger.warning("Live FX fetch failed (%s); using fallback.", exc)
+        logger.warning(
+            "Live FX fetch failed (%s); using fallback.",
+            _scrub(str(exc), settings.fx_api_key),
+        )
         return _fallback_data()
