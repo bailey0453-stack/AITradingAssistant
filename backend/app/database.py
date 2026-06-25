@@ -3,6 +3,7 @@
 SQLite for local development; Postgres-ready by changing DATABASE_URL.
 """
 
+import os
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
@@ -12,15 +13,30 @@ from app.config import get_settings
 
 settings = get_settings()
 
+
+def _resolve_database_url(url: str) -> str:
+    """Pick a writable SQLite path on read-only serverless filesystems.
+
+    On Vercel (and similar) only `/tmp` is writable, so a relative SQLite
+    path would fail. When the `VERCEL` env var is present and SQLite is in
+    use, store the DB under `/tmp` (ephemeral per instance). For durable
+    storage in production, set `DATABASE_URL` to a Postgres URL instead.
+    Local development is unaffected.
+    """
+    if url.startswith("sqlite") and os.environ.get("VERCEL"):
+        return "sqlite:////tmp/aitrading.db"
+    return url
+
+
+DATABASE_URL = _resolve_database_url(settings.database_url)
+
 # check_same_thread is only needed for SQLite + FastAPI's threaded workers.
 _connect_args = (
-    {"check_same_thread": False}
-    if settings.database_url.startswith("sqlite")
-    else {}
+    {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 )
 
 engine = create_engine(
-    settings.database_url,
+    DATABASE_URL,
     connect_args=_connect_args,
     pool_pre_ping=True,
     future=True,

@@ -21,3 +21,10 @@ uvicorn app.main:app --reload
 ```
 
 Open http://127.0.0.1:8000/ (dashboard) or http://127.0.0.1:8000/docs (API).
+
+## Deploy
+
+The backend deploys to Vercel as a Python serverless function. Set the Vercel
+project **Root Directory to `backend`** and configure the env vars documented in
+[`backend/README.md`](backend/README.md#deploy-to-vercel) (`USE_MOCK_DATA`,
+`FX_PROVIDER`, `FX_API_KEY`).

@@ -155,6 +155,51 @@ touching routers or storage:
 `get_market_data()` orchestrates live-with-fallback, so the service never breaks
 if a provider is down — it returns mock data tagged `source="fallback"`.
 
+## Deploy to Vercel
+
+The backend ships with a Vercel config (`vercel.json` + `api/index.py`) that
+serves the FastAPI app as a Python serverless function.
+
+### One-time project setup
+
+1. Create a new Vercel project from the `AITradingAssistant` GitHub repo.
+2. **Set the project Root Directory to `backend`.** This is required so the
+   `app` package imports correctly and `requirements.txt` is detected.
+3. Add the environment variables below (Project → Settings → Environment
+   Variables), then deploy.
+
+### Required environment variables
+
+| Variable | Value | Notes |
+| --- | --- | --- |
+| `USE_MOCK_DATA` | `false` | Enables live fetches |
+| `FX_PROVIDER` | `openexchangerates` | FX provider name |
+| `FX_API_KEY` | `<your Open Exchange Rates App ID>` | **Secret** — set in Vercel, never commit |
+
+Optional: set `DATABASE_URL` to a Postgres URL for durable storage. By default
+the app uses SQLite; on Vercel it writes to `/tmp/aitrading.db`, which is
+**ephemeral per instance** (fine for Phase 1, snapshots are not shared across
+cold starts). If `FX_API_KEY` is missing or invalid, the endpoints still work
+and return `source: "fallback"` (mock data) — the service never breaks.
+
+### Verify after deploy
+
+```bash
+curl https://<your-app>.vercel.app/health
+curl https://<your-app>.vercel.app/market/usdmxn      # source: live (or fallback)
+curl https://<your-app>.vercel.app/analysis/usdmxn
+```
+
+### How it works
+
+- `api/index.py` exposes the ASGI `app` and calls `init_db()` at import, because
+  Vercel's runtime may skip ASGI lifespan startup.
+- `vercel.json` routes all paths (`/(.*)`) to the function so FastAPI sees the
+  real request path.
+- `app/database.py` redirects SQLite to `/tmp` when the `VERCEL` env var is set.
+
+Local development is unchanged — none of this affects `uvicorn app.main:app`.
+
 ## Tests
 
 A dependency-free smoke test covers `/health`, `/market/usdmxn`,
