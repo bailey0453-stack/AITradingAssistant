@@ -10,6 +10,7 @@ Endpoints:
     GET /                        simple HTML dashboard (optional)
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,10 +20,19 @@ from app.config import get_settings
 from app.database import init_db
 from app.routers import analysis, health, market
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    # Never let a DB hiccup take down the whole app — /health must stay up.
+    try:
+        init_db()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Database initialization failed at startup; continuing so /health "
+            "remains available."
+        )
     yield
 
 
