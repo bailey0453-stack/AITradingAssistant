@@ -96,6 +96,19 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
 
         if confidence_breakdown.get("value") is not None:
             result["confidence"] = confidence_breakdown["value"]
+            # Refresh the strategist brief so its confidence matches the blended
+            # headline confidence (Phase 4.5 + Phase 4 consistency).
+            try:
+                from app.services.ai_analysis import RuleBasedAnalyzer
+
+                strat = RuleBasedAnalyzer.strategist_from_result(
+                    result, market, confidence_override=confidence_breakdown["value"]
+                )
+                result["strategist"] = strat
+                for k in _STRATEGIST_FIELDS:
+                    result[k] = strat[k]
+            except Exception:  # noqa: BLE001
+                logger.exception("Strategist refresh failed; keeping signal-confidence brief.")
         result["historical_similarity"] = {
             "status": "active",
             "best_similarity": hist["best_similarity"],
@@ -117,9 +130,23 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
     return out
 
 
+_STRATEGIST_FIELDS = (
+    "executive_summary",
+    "why_this_grade",
+    "why_not_higher",
+    "why_not_lower",
+    "current_trade_view",
+    "trader_action",
+    "quote_guidance",
+    "risk_watchlist",
+    "invalidation_triggers",
+)
+
+
 def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dict:
     sb = row.signal_breakdown or {}
-    return {
+    strat = row.strategist or {}
+    payload = {
         "id": row.id,
         "pair": row.pair,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -147,6 +174,7 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "market_regime": row.market_regime,
         "opportunity_grade": row.opportunity_grade,
         "opportunity_grade_detail": row.opportunity_grade_detail,
+        "strategist": row.strategist,
         "historical": row.historical_context,
         "probabilities": row.probabilities,
         "confidence_breakdown": row.confidence_breakdown,
@@ -163,6 +191,10 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "market_snapshot_id": row.market_snapshot_id,
         "market": market,
     }
+    # Spread the strategist narrative to top-level fields for easy consumption.
+    for key in _STRATEGIST_FIELDS:
+        payload[key] = strat.get(key)
+    return payload
 
 
 @router.get("/usdmxn")
@@ -208,6 +240,7 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         historical_context=history.get("historical_context"),
         probabilities=history.get("probabilities"),
         confidence_breakdown=history.get("confidence_breakdown"),
+        strategist=result.get("strategist"),
         entry=result["entry"],
         target=result["target"],
         stretch_target=result["stretch_target"],

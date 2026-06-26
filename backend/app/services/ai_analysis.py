@@ -22,8 +22,18 @@ Analysis result schema:
     upcoming_risks: list[dict]      # high/medium events ahead that could move it
     what_would_change_my_mind: list[str]  # concrete conditions that flip the view
     market_regime: dict             # primary/secondary regime + confidence
-    opportunity_grade: str          # A+ | A | B | C | D | PASS
+    opportunity_grade: str          # A+ | A | B | C | D | PASS (PASS == NO_TRADE)
     opportunity_grade_detail: dict  # grade score + reasons + components
+    # Phase 4.5 strategist narrative (confidence = how sure; grade = how attractive)
+    executive_summary: str
+    why_this_grade: str
+    why_not_higher: str
+    why_not_lower: str
+    current_trade_view: str
+    trader_action: str
+    quote_guidance: list[str]       # Border Currency desk pricing guidance
+    risk_watchlist: list[str]
+    invalidation_triggers: list[str]
     entry: float | None
     target: float | None
     stretch_target: float | None
@@ -73,6 +83,16 @@ ANALYSIS_FIELDS = (
     "weighted_contributions",
     "conflicting_signals",
     "signal_breakdown",
+    # Phase 4.5 strategist narrative
+    "executive_summary",
+    "why_this_grade",
+    "why_not_higher",
+    "why_not_lower",
+    "current_trade_view",
+    "trader_action",
+    "quote_guidance",
+    "risk_watchlist",
+    "invalidation_triggers",
 )
 
 # Composite-score thresholds -> letter grade (highest first).
@@ -204,6 +224,12 @@ class RuleBasedAnalyzer(AIAnalyzer):
             market, signal, regime, upcoming_risks
         )
 
+        # Phase 4.5: professional FX-strategist narrative.
+        strategist = self._strategist_narrative(
+            market, signal, regime, grade, upcoming_risks, agree, disagree,
+            bullish, bearish,
+        )
+
         return {
             "direction": direction,
             "trade_score": signal["trade_score"],
@@ -233,6 +259,17 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "weighted_contributions": signal["weighted_contributions"],
             "conflicting_signals": signal["conflicting_signals"],
             "signal_breakdown": signal["signal_breakdown"],
+            # Phase 4.5 strategist narrative (also spread to top level by router).
+            "executive_summary": strategist["executive_summary"],
+            "why_this_grade": strategist["why_this_grade"],
+            "why_not_higher": strategist["why_not_higher"],
+            "why_not_lower": strategist["why_not_lower"],
+            "current_trade_view": strategist["current_trade_view"],
+            "trader_action": strategist["trader_action"],
+            "quote_guidance": strategist["quote_guidance"],
+            "risk_watchlist": strategist["risk_watchlist"],
+            "invalidation_triggers": strategist["invalidation_triggers"],
+            "strategist": strategist,
             "model": self.model_name,
         }
 
@@ -382,9 +419,12 @@ class RuleBasedAnalyzer(AIAnalyzer):
 
         direction = signal.get("direction")
         if direction == "NO_TRADE":
+            # PASS is reserved for "no trade" so the grade never conflicts with a
+            # BUY_USD / SELL_USD direction (see Phase 4.5 consistency rules).
             grade = "PASS"
         else:
-            grade = "PASS"
+            # A directional read floors at "D" — a real bias is never graded PASS.
+            grade = "D"
             for threshold, letter in _GRADE_BANDS:
                 if score >= threshold:
                     grade = letter
@@ -431,6 +471,317 @@ class RuleBasedAnalyzer(AIAnalyzer):
                 "volatility_penalty": round(vol_penalty, 2),
             },
         }
+
+    # Action guidance per grade. PASS = no trade; D/C = bias-only, low quality;
+    # B/A/A+ = increasingly actionable.
+    _ACTION_BY_GRADE = {
+        "PASS": "Stand aside — no trade. Stay flat until a catalyst confirms direction.",
+        "D": "Monitor only — directional lean exists but the setup is too weak to act.",
+        "C": "Low-quality setup — small/opportunistic exposure at most; prefer to wait.",
+        "B": "Tradeable — scale into the {dir} view on confirmation; size moderately.",
+        "A": "Actionable — take the {dir} position; manage against the stop.",
+        "A+": "High-conviction — lead with the {dir} view; press on confirmation.",
+    }
+
+    @classmethod
+    def _strategist_narrative(
+        cls,
+        market: MarketData,
+        signal: dict,
+        regime: dict,
+        grade: dict,
+        upcoming_risks: list[dict] | None,
+        agree: list[str] | None,
+        disagree: list[str] | None,
+        bullish: list[str] | None,
+        bearish: list[str] | None,
+    ) -> dict:
+        """Compose a professional FX-strategist brief.
+
+        Keeps two concepts distinct: ``confidence`` (how sure the system is in the
+        read) vs ``opportunity_grade`` (how attractive the trade is right now).
+        """
+        direction = signal.get("direction")
+        price = market.usdmxn
+        letter = grade.get("grade")
+        score = grade.get("score")
+        conf = signal.get("confidence")
+        ts = signal.get("trade_score")
+        regime_name = (regime or {}).get("primary") or "mixed"
+        agree = agree or []
+        disagree = disagree or []
+
+        dir_label = {
+            "BUY_USD": "long-USD (USD/MXN higher)",
+            "SELL_USD": "short-USD / long-MXN (USD/MXN lower)",
+            "NO_TRADE": "neutral",
+        }.get(direction, "neutral")
+        dir_word = {"BUY_USD": "long-USD", "SELL_USD": "short-USD"}.get(direction, "directional")
+
+        # --- Executive summary -------------------------------------------------
+        if direction == "NO_TRADE":
+            executive_summary = (
+                f"No actionable USD/MXN edge right now (grade PASS, confidence "
+                f"{conf}/100). Spot ~{_fmt(price)} in a {regime_name} regime with "
+                f"mixed drivers — stand aside until a catalyst confirms direction."
+            )
+        else:
+            lead = agree[0] if agree else (
+                (bullish or bearish or ["mixed drivers"])[0]
+            )
+            executive_summary = (
+                f"{letter}-grade {dir_label} setup on USD/MXN near {_fmt(price)} in a "
+                f"{regime_name} regime. Confidence {conf}/100, trade score {ts}/100. "
+                f"Lead driver: {lead}."
+            )
+
+        # --- Why this grade (separates grade vs confidence) --------------------
+        # Drop the grade's own "Confidence X/100" reason so only the headline
+        # (possibly blended) confidence number appears in the narrative.
+        grade_reasons = [
+            r for r in (grade.get("reasons") or [])
+            if not str(r).startswith("Confidence ")
+        ]
+        why_this_grade = (
+            f"Grade {letter} ({score}/100) measures how attractive the trade is now; "
+            f"confidence {conf}/100 measures how sure the system is in the read "
+            f"(trade score {ts}/100). " + " ".join(grade_reasons)
+        )
+
+        # --- Why not higher / lower -------------------------------------------
+        caps: list[str] = []
+        n_conf = len(signal.get("conflicting_signals") or [])
+        if n_conf:
+            caps.append(f"{n_conf} conflicting signal(s)")
+        if disagree:
+            caps.append(f"indicators pushing back ({', '.join(disagree)})")
+        if signal.get("risk_level") in {"elevated", "high"}:
+            caps.append(f"{signal.get('risk_level')} risk")
+        vix = market.vix
+        if vix is not None and vix > 18:
+            caps.append(f"elevated volatility (VIX {_fmt(vix)})")
+        if regime_name in _UNCERTAIN_REGIMES:
+            caps.append(f"an uncertain {regime_name} regime")
+        if (conf or 0) < 45:
+            caps.append("modest conviction")
+        if letter == "A+":
+            why_not_higher = "Already the top grade; nothing material is capping it."
+        elif caps:
+            why_not_higher = "Held back by " + "; ".join(caps) + "."
+        else:
+            why_not_higher = (
+                "Mainly the absence of a stronger, fully-aligned catalyst — the edge "
+                "is real but not yet decisive."
+            )
+
+        supports: list[str] = []
+        if agree:
+            supports.append(f"agreeing indicators ({', '.join(agree)})")
+        if (ts or 0) >= 50:
+            supports.append(f"a solid trade score ({ts}/100)")
+        if (regime or {}).get("confidence") and regime["confidence"] >= 50:
+            supports.append(f"a fairly clear {regime_name} regime ({regime['confidence']}% conf)")
+        lead_factors = (bullish if direction == "BUY_USD" else bearish) or []
+        if lead_factors:
+            supports.append(f"supportive drivers ({lead_factors[0]})")
+        if direction == "NO_TRADE":
+            why_not_lower = (
+                "There is a mild lean in places, but not enough agreement to justify "
+                "any active exposure."
+            )
+        elif supports:
+            why_not_lower = "Supported by " + "; ".join(supports) + "."
+        else:
+            why_not_lower = (
+                "A coherent directional bias keeps it above the floor even though "
+                "conviction is light."
+            )
+
+        # --- Current trade view + action --------------------------------------
+        if direction == "BUY_USD":
+            current_trade_view = (
+                f"Constructive on USD vs MXN. Spot ~{_fmt(price)}; targeting "
+                f"{_fmt(signal.get('target'))} (stretch {_fmt(signal.get('stretch_target'))}), "
+                f"stop {_fmt(signal.get('stop'))}."
+            )
+        elif direction == "SELL_USD":
+            current_trade_view = (
+                f"Constructive on MXN (USD/MXN lower). Spot ~{_fmt(price)}; targeting "
+                f"{_fmt(signal.get('target'))} (stretch {_fmt(signal.get('stretch_target'))}), "
+                f"stop {_fmt(signal.get('stop'))}."
+            )
+        else:
+            current_trade_view = (
+                f"Neutral / flat. Spot ~{_fmt(price)}; no directional conviction — "
+                f"drivers are mixed."
+            )
+        trader_action = cls._ACTION_BY_GRADE.get(letter, "Monitor.").format(dir=dir_word)
+
+        # --- Quote guidance for Border Currency operations --------------------
+        quote_guidance = cls._quote_guidance(
+            market, signal, regime, grade, upcoming_risks
+        )
+
+        # --- Risk watchlist ----------------------------------------------------
+        risk_watchlist: list[str] = []
+        for ev in (upcoming_risks or [])[:3]:
+            when = f"~{ev['hours_away']}h" if ev.get("hours_away") is not None else "soon"
+            risk_watchlist.append(
+                f"{ev.get('event')} ({ev.get('importance')} impact, {when})"
+            )
+        for c in (signal.get("conflicting_signals") or [])[:2]:
+            risk_watchlist.append(f"Conflict: {c.get('label')} ({c.get('detail')})")
+        if vix is not None and vix > 20:
+            risk_watchlist.append(f"Elevated volatility (VIX {_fmt(vix)})")
+        if regime_name in _UNCERTAIN_REGIMES:
+            risk_watchlist.append(f"Headline-driven {regime_name} regime")
+        if not risk_watchlist:
+            risk_watchlist.append("No major scheduled catalysts in the immediate window.")
+
+        # --- Invalidation triggers --------------------------------------------
+        invalidation_triggers: list[str] = []
+        if direction != "NO_TRADE" and signal.get("stop") is not None:
+            side = "above" if direction == "SELL_USD" else "below"
+            invalidation_triggers.append(
+                f"USD/MXN trades {side} the stop at {_fmt(signal['stop'])}."
+            )
+        if direction != "NO_TRADE" and disagree:
+            invalidation_triggers.append(
+                f"Pushback indicators ({', '.join(disagree)}) take over the tape."
+            )
+        for ev in (upcoming_risks or []):
+            if ev.get("importance") == "high":
+                when = f"~{ev['hours_away']}h" if ev.get("hours_away") is not None else "soon"
+                invalidation_triggers.append(
+                    f"A surprise in {ev.get('event')} ({when}) resets the bias."
+                )
+                break
+        if regime_name and regime_name != "mixed":
+            invalidation_triggers.append(
+                f"A shift out of the {regime_name} regime changes the playbook."
+            )
+        if direction == "NO_TRADE":
+            invalidation_triggers.append(
+                "A decisive, agreeing move in DXY/yields would create a directional edge."
+            )
+
+        return {
+            "executive_summary": executive_summary,
+            "why_this_grade": why_this_grade,
+            "why_not_higher": why_not_higher,
+            "why_not_lower": why_not_lower,
+            "current_trade_view": current_trade_view,
+            "trader_action": trader_action,
+            "quote_guidance": quote_guidance,
+            "risk_watchlist": risk_watchlist[:6],
+            "invalidation_triggers": invalidation_triggers[:6],
+        }
+
+    @classmethod
+    def strategist_from_result(
+        cls,
+        result: dict,
+        market: MarketData,
+        confidence_override: float | None = None,
+    ) -> dict:
+        """Rebuild the strategist brief from an analysis ``result``.
+
+        Used by the analysis endpoint to refresh the narrative *after* Phase 4
+        blends historical/regime/volatility into a final ``confidence``, so the
+        brief and the top-level ``confidence`` field always agree.
+        """
+        direction = result.get("direction")
+        conf = (
+            confidence_override
+            if confidence_override is not None
+            else result.get("confidence")
+        )
+        signal_like = {
+            "direction": direction,
+            "confidence": conf,
+            "trade_score": result.get("trade_score"),
+            "conflicting_signals": result.get("conflicting_signals"),
+            "risk_level": result.get("risk_level"),
+            "target": result.get("target"),
+            "stretch_target": result.get("stretch_target"),
+            "stop": result.get("stop"),
+        }
+        agree, disagree = cls._indicator_agreement(
+            result.get("market_drivers") or [], direction
+        )
+        return cls._strategist_narrative(
+            market,
+            signal_like,
+            result.get("market_regime") or {},
+            result.get("opportunity_grade_detail") or {},
+            result.get("upcoming_risks") or [],
+            agree,
+            disagree,
+            result.get("bullish_factors") or [],
+            result.get("bearish_factors") or [],
+        )
+
+    @staticmethod
+    def _quote_guidance(
+        market: MarketData,
+        signal: dict,
+        regime: dict,
+        grade: dict,
+        upcoming_risks: list[dict] | None,
+    ) -> list[str]:
+        """Operational pricing guidance for Border Currency desk operators."""
+        out: list[str] = []
+        price = market.usdmxn
+        vix = market.vix if market.vix is not None else 15.0
+        risk = signal.get("risk_level")
+        regime_name = (regime or {}).get("primary")
+        direction = signal.get("direction")
+
+        # Imminent high-impact event (within 24h)?
+        soon_event = None
+        for ev in upcoming_risks or []:
+            if ev.get("importance") == "high":
+                h = ev.get("hours_away")
+                if h is None or h <= 24:
+                    soon_event = ev
+                    break
+
+        volatile = vix > 20 or regime_name in {"High Volatility", "Trade War", "Risk Off"}
+
+        if soon_event:
+            when = (
+                f"~{soon_event['hours_away']}h"
+                if soon_event.get("hours_away") is not None
+                else "soon"
+            )
+            out.append(
+                f"Avoid aggressive pricing before high-impact event "
+                f"({soon_event.get('event')}, {when})."
+            )
+            out.append("Keep quote validity short until the event clears.")
+        if volatile:
+            out.append("Widen spread slightly to account for elevated volatility.")
+        if price:
+            threshold = round(price * (0.005 if volatile else 0.003), 4)
+            out.append(
+                f"Requote if USD/MXN moves beyond ±{threshold} from {_fmt(price)}."
+            )
+        if direction != "NO_TRADE" and grade.get("grade") in {"A", "A+", "B"}:
+            lean = "USD strength" if direction == "BUY_USD" else "peso strength"
+            out.append(
+                f"Bias favors {lean}; pricing can lean accordingly but avoid overcommitting."
+            )
+        if not soon_event and not volatile:
+            out.insert(0, "Quote normally; conditions are orderly.")
+
+        # De-dupe, preserve order.
+        seen: set[str] = set()
+        deduped = []
+        for line in out:
+            if line.lower() not in seen:
+                seen.add(line.lower())
+                deduped.append(line)
+        return deduped
 
     @staticmethod
     def _what_would_change_my_mind(

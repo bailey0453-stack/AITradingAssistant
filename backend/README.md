@@ -1,4 +1,4 @@
-# AI Trading Assistant — Backend (Phase 4)
+# AI Trading Assistant — Backend (Phase 4.5)
 
 Backend-only **USD/MXN market intelligence engine**. It collects market + macro
 inputs, **live news**, and a **live economic calendar**, builds a structured
@@ -54,6 +54,15 @@ dataset) and exposes a JSON API plus a dashboard.
   from signal agreement, regime, risk, confidence and volatility, and a
   **`what_would_change_my_mind`** list of concrete, falsifiable invalidation
   conditions.
+- **Strategist narrative** (Phase 4.5): every analysis also reads like a
+  professional FX strategist — `executive_summary`, `current_trade_view`,
+  `trader_action`, `why_this_grade` / `why_not_higher` / `why_not_lower`,
+  `quote_guidance` (Border Currency desk pricing), `risk_watchlist`, and
+  `invalidation_triggers`. It keeps two concepts distinct: **confidence** (how
+  sure the system is) vs **opportunity_grade** (how attractive the trade is). The
+  grade is consistent with direction: **PASS ⇔ NO_TRADE**, a directional read
+  floors at `D`, `C`/`D` are bias-only (low quality), and `B`/`A`/`A+` support an
+  active recommendation.
 - **Historical intelligence engine** (Phase 4, `services/history/`): backfills a
   historical dataset (sample data out of the box, paid providers optional),
   measures USD/MXN reactions after each event over fixed windows (15m/1h/4h/1d/

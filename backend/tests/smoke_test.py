@@ -137,6 +137,15 @@ def test_endpoints():
             assert body["opportunity_grade"] in {"A+", "A", "B", "C", "D", "PASS"}
             gd = body["opportunity_grade_detail"]
             assert "score" in gd and isinstance(gd["reasons"], list)
+            # Phase 4.5 strategist narrative
+            for k in ("executive_summary", "why_this_grade", "why_not_higher",
+                      "why_not_lower", "current_trade_view", "trader_action"):
+                assert isinstance(body.get(k), str) and body[k], f"missing narrative {k}"
+            for k in ("quote_guidance", "risk_watchlist", "invalidation_triggers"):
+                assert isinstance(body.get(k), list) and body[k], f"missing list {k}"
+            # PASS must mean NO_TRADE and never coexist with a direction.
+            grade, direction = body["opportunity_grade"], body["direction"]
+            assert (grade == "PASS") == (direction == "NO_TRADE"), (grade, direction)
             # Phase 4 historical layer
             for k in ("historical", "probabilities", "confidence_breakdown"):
                 assert k in body, f"analysis missing {k}"
@@ -552,6 +561,57 @@ def test_reasoning_engine():
     check("grade: strong signal earns a letter grade", grade_letters_on_strong_signal)
 
 
+def test_strategist_narrative():
+    from app.services.ai_analysis import RuleBasedAnalyzer
+    from app.services.market_data import MockMarketDataProvider
+
+    analyzer = RuleBasedAnalyzer()
+
+    def narrative_fields_and_consistency():
+        # Run several mock snapshots so we hit both NO_TRADE and directional cases.
+        seen_grades = set()
+        for _ in range(12):
+            market = MockMarketDataProvider().get_usdmxn()
+            r = analyzer.analyze(market)
+            for k in ("executive_summary", "why_this_grade", "why_not_higher",
+                      "why_not_lower", "current_trade_view", "trader_action"):
+                assert isinstance(r[k], str) and r[k], k
+            for k in ("quote_guidance", "risk_watchlist", "invalidation_triggers"):
+                assert isinstance(r[k], list) and r[k], k
+            grade, direction = r["opportunity_grade"], r["direction"]
+            # Core consistency rule: PASS iff NO_TRADE.
+            assert (grade == "PASS") == (direction == "NO_TRADE"), (grade, direction)
+            # Directional reads never grade PASS; they floor at D.
+            if direction != "NO_TRADE":
+                assert grade in {"A+", "A", "B", "C", "D"}, grade
+            seen_grades.add(grade)
+        assert seen_grades, "no analysis produced"
+
+    def quote_guidance_event_aware():
+        # A high-impact event within 24h should trigger cautious pricing guidance.
+        from app.services.market_regime import detect_regime
+        from app.services.signals import compute_signal
+
+        market = MockMarketDataProvider().get_usdmxn()
+        soon = [{
+            "event": "US CPI", "country": "US", "importance": "high",
+            "release_time": None, "hours_away": 6.0, "note": "",
+        }]
+        signal = compute_signal(market)
+        regime = detect_regime(market)
+        gd = analyzer._opportunity_grade(signal, regime, market)
+        brief = analyzer._strategist_narrative(
+            market, signal, {"primary": "Fed Driven", "confidence": 55},
+            gd, soon, [], [], [], [],
+        )
+        joined = " ".join(brief["quote_guidance"]).lower()
+        assert "high-impact" in joined or "validity short" in joined, brief["quote_guidance"]
+        assert any("cpi" in r.lower() for r in brief["risk_watchlist"]), brief["risk_watchlist"]
+
+    check("narrative fields present + PASS==NO_TRADE consistency", narrative_fields_and_consistency)
+    check("quote guidance reacts to imminent high-impact event", quote_guidance_event_aware)
+
+
 def test_history_engine():
     from app.services.history import historical_statistics as hs
     from app.services.history import similarity_engine as sim
@@ -651,6 +711,7 @@ def main():
     test_calendar_provider()
     test_signal_weighting()
     test_reasoning_engine()
+    test_strategist_narrative()
     test_history_engine()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")

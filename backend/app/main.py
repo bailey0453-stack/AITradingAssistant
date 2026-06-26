@@ -40,10 +40,10 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.4.0",
+    version="0.4.5",
     description=(
         "Backend-only USD/MXN market intelligence assistant "
-        "(Phase 4 · historical intelligence engine)."
+        "(Phase 4.5 · strategist narrative)."
     ),
     lifespan=lifespan,
 )
@@ -114,7 +114,7 @@ DASHBOARD_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 4 · historical intelligence)</span></h1>
+    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 4.5 · strategist narrative)</span></h1>
     <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
   </header>
   <main>
@@ -129,6 +129,41 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Oil</div><div class="v" id="oil">—</div></div>
         <div class="stat"><div class="k">Gold</div><div class="v" id="gold">—</div></div>
         <div class="stat"><div class="k">VIX</div><div class="v" id="vix">—</div></div>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #2b6cb0">
+      <h2>Strategist brief
+        <span class="muted" id="sb_dir">—</span>
+        <span class="grade grade-PASS" id="sb_grade" style="font-size:14px; padding:2px 8px; vertical-align:middle">—</span>
+        <span class="muted" id="sb_conf">—</span>
+      </h2>
+      <p id="sb_exec" style="font-size:15px"></p>
+      <div class="grid2">
+        <div>
+          <div class="k muted">Trader action</div>
+          <p id="sb_action" style="font-weight:600"></p>
+          <div class="k muted">Current trade view</div>
+          <p id="sb_view"></p>
+        </div>
+        <div>
+          <div class="k muted">Why this grade</div>
+          <p id="sb_whygrade"></p>
+          <div class="k muted">Why not higher</div>
+          <p id="sb_whyhigher" class="muted"></p>
+          <div class="k muted">Why not lower</div>
+          <p id="sb_whylower" class="muted"></p>
+        </div>
+      </div>
+      <div class="grid2">
+        <div>
+          <div class="k muted">Quote guidance (Border Currency ops)</div>
+          <ul id="sb_quote"></ul>
+        </div>
+        <div>
+          <div class="k muted">What would change my mind</div>
+          <ul id="sb_wwcm"></ul>
+        </div>
       </div>
     </div>
 
@@ -350,6 +385,21 @@ DASHBOARD_HTML = """<!doctype html>
         if (!(arr||[]).length) el.innerHTML = '<li class="muted">'+empty+'</li>';
       };
       listIntoEl('gradereasons', gd.reasons, 'No grading detail.');
+
+      // Strategist brief (Phase 4.5)
+      $('sb_dir').textContent = d.direction || '—';
+      const sbg = $('sb_grade');
+      sbg.textContent = grade;
+      sbg.className = 'grade grade-' + (grade === 'A+' ? 'Aplus' : grade);
+      $('sb_conf').textContent = (d.confidence != null) ? ('confidence ' + d.confidence + '/100') : '';
+      $('sb_exec').textContent = d.executive_summary || '—';
+      $('sb_action').textContent = d.trader_action || '—';
+      $('sb_view').textContent = d.current_trade_view || '—';
+      $('sb_whygrade').textContent = d.why_this_grade || '—';
+      $('sb_whyhigher').textContent = d.why_not_higher || '—';
+      $('sb_whylower').textContent = d.why_not_lower || '—';
+      listIntoEl('sb_quote', d.quote_guidance, 'No specific guidance.');
+      listIntoEl('sb_wwcm', d.what_would_change_my_mind, 'No invalidation conditions identified.');
 
       const reg = d.market_regime || {};
       $('regprimary').textContent = reg.primary || '—';

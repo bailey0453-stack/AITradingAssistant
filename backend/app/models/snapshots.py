@@ -120,6 +120,9 @@ class AnalysisSnapshot(Base):
     probabilities: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     confidence_breakdown: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Strategist narrative (Phase 4.5) — the 9 narrative fields as one JSON blob.
+    strategist: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Trade levels
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

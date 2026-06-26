@@ -106,6 +106,24 @@ Original design: [`PHASE4_HISTORICAL_EVENT_ENGINE.md`](PHASE4_HISTORICAL_EVENT_E
 - [ ] Wire a real provider (Polygon intraday / FRED / yfinance) to replace the
       sample dataset.
 
+## Phase 4.5 — Strategist narrative (built)
+
+Goal: make every analysis read like a professional FX strategist and give the
+Border Currency desk actionable pricing guidance — without new data sources.
+
+- [x] Strategist fields on `/analysis/usdmxn`: `executive_summary`,
+      `current_trade_view`, `trader_action`, `why_this_grade`,
+      `why_not_higher`, `why_not_lower`, `quote_guidance`, `risk_watchlist`,
+      `invalidation_triggers`.
+- [x] Concept separation: `confidence` (how sure) vs `opportunity_grade` (how
+      attractive). Grade ↔ direction made consistent: **PASS ⇔ NO_TRADE**,
+      directional reads floor at `D`, `C`/`D` are bias-only, `B`/`A`/`A+` are
+      actionable.
+- [x] Quote guidance for desk ops (quote normally / short validity / widen
+      spread / avoid aggressive pricing pre-event / requote-beyond-threshold).
+- [x] Dashboard "Strategist brief" card; narrative confidence reconciled with the
+      Phase 4 blended confidence.
+
 ## Phase 5 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
