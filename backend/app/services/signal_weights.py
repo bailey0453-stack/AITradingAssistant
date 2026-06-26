@@ -333,4 +333,5 @@ def score_signals(
         "conflicting_signals": conflicting_signals,
         "weights_version": WEIGHTS_VERSION,
         "trade_threshold": TRADE_THRESHOLD,
+        "weights": dict(weights),
     }

@@ -20,7 +20,9 @@ from app.main import app
 from app.services import calendar as calendar_svc
 from app.services import market_data
 from app.services import news as news_svc
+from app.services import market_regime as market_regime_svc
 from app.services import signal_weights as sw
+from app.services.ai_analysis import RuleBasedAnalyzer
 from app.services.market_data import MarketData
 from app.services.secrets import scrub
 
@@ -108,6 +110,10 @@ def test_endpoints():
                 "weighted_contributions",
                 "conflicting_signals",
                 "signal_breakdown",
+                "what_would_change_my_mind",
+                "market_regime",
+                "opportunity_grade",
+                "opportunity_grade_detail",
             ):
                 assert key in body, f"analysis missing {key}"
             assert body["market"]["source"] in {"mock", "live", "fallback"}
@@ -121,7 +127,16 @@ def test_endpoints():
             sb = body["signal_breakdown"]
             for k in ("usd_score", "mxn_score", "net_score", "trade_threshold", "weights_version"):
                 assert k in sb, f"signal_breakdown missing {k}"
+            assert "weights" in sb, "signal_breakdown should persist active weights"
             assert "released_last_24h" in body["context"]
+            # Phase 3.5 reasoning layer
+            assert isinstance(body["what_would_change_my_mind"], list)
+            reg = body["market_regime"]
+            assert reg and reg["primary"] in market_regime_svc.REGIMES, reg
+            assert 0 <= reg["confidence"] <= 100
+            assert body["opportunity_grade"] in {"A+", "A", "B", "C", "D", "PASS"}
+            gd = body["opportunity_grade_detail"]
+            assert "score" in gd and isinstance(gd["reasons"], list)
 
         def news_ok():
             r = c.get("/news/recent")
@@ -449,6 +464,57 @@ def test_signal_weighting():
     check("weights are configurable (change the score)", weights_actually_change_score)
 
 
+def test_reasoning_engine():
+    def regime_high_vol_risk_off():
+        # Spiking VIX + falling equities -> High/Low Volatility + Risk Off in play.
+        m = _market(vix_delta=4.0, sp_delta=-50.0)
+        m.vix = 26.0
+        reg = market_regime_svc.detect_regime(m)
+        assert reg["primary"] in market_regime_svc.REGIMES
+        assert reg["primary"] in {"High Volatility", "Risk Off"}, reg["primary"]
+        assert 0 <= reg["confidence"] <= 100
+        assert reg["scores"], "expected non-empty regime scores"
+
+    def regime_fed_driven_from_calendar():
+        m = _market()
+        cal = [{"event": "FOMC Rate Decision", "importance": "high", "status": "upcoming"}]
+        reg = market_regime_svc.detect_regime(m, calendar=cal)
+        assert "Fed Driven" in reg["scores"], reg["scores"]
+
+    def regime_defaults_range_bound():
+        # No deltas, calm VIX -> nothing dominant -> range bound.
+        m = _market()
+        m.vix = 15.0
+        reg = market_regime_svc.detect_regime(m)
+        assert reg["primary"] in {"Range Bound", "Low Volatility"}, reg["primary"]
+
+    def grade_pass_on_no_trade():
+        analyzer = RuleBasedAnalyzer()
+        m = _market()  # flat -> NO_TRADE
+        out = analyzer.analyze(m)
+        assert out["direction"] == "NO_TRADE"
+        assert out["opportunity_grade"] == "PASS", out["opportunity_grade"]
+        assert out["what_would_change_my_mind"], "should suggest what creates an edge"
+
+    def grade_letters_on_strong_signal():
+        analyzer = RuleBasedAnalyzer()
+        m = _market(
+            dxy_delta=0.6, yield_delta=0.08, us2y_delta=0.08, oil_delta=-2.5,
+            gold_delta=-25.0, sp_delta=-40.0, vix_delta=2.0,
+        )
+        out = analyzer.analyze(m)
+        assert out["direction"] == "BUY_USD", out["direction"]
+        assert out["opportunity_grade"] in {"A+", "A", "B", "C", "D"}
+        assert out["opportunity_grade_detail"]["score"] is not None
+        assert out["market_regime"]["primary"] in market_regime_svc.REGIMES
+
+    check("regime: high VIX + risk-off classified", regime_high_vol_risk_off)
+    check("regime: Fed event drives Fed Driven", regime_fed_driven_from_calendar)
+    check("regime: calm tape -> range bound", regime_defaults_range_bound)
+    check("grade: NO_TRADE -> PASS + WWCM populated", grade_pass_on_no_trade)
+    check("grade: strong signal earns a letter grade", grade_letters_on_strong_signal)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -469,6 +535,7 @@ def main():
     test_news_provider()
     test_calendar_provider()
     test_signal_weighting()
+    test_reasoning_engine()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

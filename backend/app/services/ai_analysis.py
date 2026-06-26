@@ -18,7 +18,12 @@ Analysis result schema:
     market_drivers: list[dict]      # per-indicator value + USD+/MXN+/neutral lean
     bullish_factors: list[str]      # what supports USD strength
     bearish_factors: list[str]      # what supports MXN strength / USD weakness
+    conflicting_signals: list[dict] # signals pushing against the net bias
     upcoming_risks: list[dict]      # high/medium events ahead that could move it
+    what_would_change_my_mind: list[str]  # concrete conditions that flip the view
+    market_regime: dict             # primary/secondary regime + confidence
+    opportunity_grade: str          # A+ | A | B | C | D | PASS
+    opportunity_grade_detail: dict  # grade score + reasons + components
     entry: float | None
     target: float | None
     stretch_target: float | None
@@ -36,6 +41,7 @@ from datetime import datetime, timezone
 
 from app.config import Settings, get_settings
 from app.services.market_data import MarketData
+from app.services.market_regime import detect_regime
 from app.services.signals import compute_signal
 
 ANALYSIS_FIELDS = (
@@ -52,6 +58,10 @@ ANALYSIS_FIELDS = (
     "bullish_factors",
     "bearish_factors",
     "upcoming_risks",
+    "what_would_change_my_mind",
+    "market_regime",
+    "opportunity_grade",
+    "opportunity_grade_detail",
     "entry",
     "target",
     "stretch_target",
@@ -64,6 +74,17 @@ ANALYSIS_FIELDS = (
     "conflicting_signals",
     "signal_breakdown",
 )
+
+# Composite-score thresholds -> letter grade (highest first).
+_GRADE_BANDS = (
+    (85.0, "A+"),
+    (74.0, "A"),
+    (60.0, "B"),
+    (46.0, "C"),
+    (32.0, "D"),
+)
+# Regimes where conviction should be capped (uncertain / headline-driven tape).
+_UNCERTAIN_REGIMES = {"High Volatility", "Political Risk", "Trade War", "Risk Off"}
 
 _RISK_RANK = {"low": 0, "elevated": 1, "high": 2}
 
@@ -170,6 +191,19 @@ class RuleBasedAnalyzer(AIAnalyzer):
         agree, disagree = self._indicator_agreement(market_drivers, direction)
         upcoming_risks = self._upcoming_risks(upcoming)
 
+        # Phase 3.5 reasoning layer: regime, grade, and what would flip the view.
+        regime = detect_regime(
+            market,
+            news=news,
+            calendar=calendar,
+            momentum=context.get("momentum"),
+            signal=signal,
+        )
+        grade = self._opportunity_grade(signal, regime, market)
+        wwcm = self._what_would_change_my_mind(
+            market, signal, regime, upcoming_risks
+        )
+
         return {
             "direction": direction,
             "trade_score": signal["trade_score"],
@@ -184,6 +218,10 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "bullish_factors": bullish,
             "bearish_factors": bearish,
             "upcoming_risks": upcoming_risks,
+            "what_would_change_my_mind": wwcm,
+            "market_regime": regime,
+            "opportunity_grade": grade["grade"],
+            "opportunity_grade_detail": grade,
             "entry": signal["entry"],
             "target": signal["target"],
             "stretch_target": signal["stretch_target"],
@@ -315,6 +353,144 @@ class RuleBasedAnalyzer(AIAnalyzer):
         agree = [d["name"] for d in market_drivers if d["lean"] == favored]
         disagree = [d["name"] for d in market_drivers if d["lean"] == opposed]
         return agree, disagree
+
+    @staticmethod
+    def _opportunity_grade(signal: dict, regime: dict, market: MarketData) -> dict:
+        """Grade the setup A+..PASS from agreement, regime, risk, conf & volatility.
+
+        Composite score (0..100) blends conviction and confidence, then deducts
+        penalties for risk, conflicting signals and high volatility. Uncertain
+        regimes cap the top grade. NO_TRADE always grades PASS.
+        """
+        sb = signal.get("signal_breakdown") or {}
+        total = float(sb.get("total_score") or 0.0)
+        net = abs(float(sb.get("net_score") or 0.0))
+        agreement = (net / total) if total else 0.0           # 0..1 conviction
+        confidence = float(signal.get("confidence") or 0.0) / 100.0
+        trade = float(signal.get("trade_score") or 0.0) / 100.0
+
+        risk_penalty = {"low": 0.0, "elevated": 8.0, "high": 18.0}.get(
+            signal.get("risk_level"), 8.0
+        )
+        n_conflicts = len(signal.get("conflicting_signals") or [])
+        conflict_penalty = min(20.0, n_conflicts * 5.0)
+        vix = market.vix if market.vix is not None else 15.0
+        vol_penalty = max(0.0, (vix - 18.0)) * 1.5            # historical-vol proxy
+
+        base = 100.0 * (0.4 * trade + 0.3 * agreement + 0.3 * confidence)
+        score = round(base - risk_penalty - conflict_penalty - vol_penalty, 1)
+
+        direction = signal.get("direction")
+        if direction == "NO_TRADE":
+            grade = "PASS"
+        else:
+            grade = "PASS"
+            for threshold, letter in _GRADE_BANDS:
+                if score >= threshold:
+                    grade = letter
+                    break
+            # Don't hand out an A+ when the regime itself is uncertain.
+            if grade == "A+" and regime.get("primary") in _UNCERTAIN_REGIMES:
+                grade = "A"
+
+        reasons: list[str] = []
+        reasons.append(
+            f"Signal agreement {round(agreement * 100)}% "
+            f"(net {sb.get('net_score')} of {sb.get('total_score')} total weight)."
+        )
+        reasons.append(
+            f"Confidence {signal.get('confidence')}/100, trade score "
+            f"{signal.get('trade_score')}/100."
+        )
+        reasons.append(
+            f"Regime: {regime.get('primary')} "
+            f"({regime.get('confidence')}% conf)."
+        )
+        if risk_penalty:
+            reasons.append(f"Risk {signal.get('risk_level')} (-{risk_penalty:g}).")
+        if conflict_penalty:
+            reasons.append(
+                f"{n_conflicts} conflicting signal(s) (-{conflict_penalty:g})."
+            )
+        if vol_penalty:
+            reasons.append(f"Elevated volatility VIX {vix} (-{round(vol_penalty, 1)}).")
+        if direction == "NO_TRADE":
+            reasons.append("No directional edge -> PASS.")
+
+        return {
+            "grade": grade,
+            "score": score,
+            "reasons": reasons,
+            "components": {
+                "agreement": round(agreement, 3),
+                "confidence": round(confidence, 3),
+                "trade_score": round(trade, 3),
+                "regime_confidence": regime.get("confidence"),
+                "risk_penalty": risk_penalty,
+                "conflict_penalty": conflict_penalty,
+                "volatility_penalty": round(vol_penalty, 2),
+            },
+        }
+
+    @staticmethod
+    def _what_would_change_my_mind(
+        market: MarketData,
+        signal: dict,
+        regime: dict,
+        upcoming_risks: list[dict] | None,
+    ) -> list[str]:
+        """Concrete, falsifiable conditions that would weaken or flip the view."""
+        out: list[str] = []
+        direction = signal.get("direction")
+
+        if direction != "NO_TRADE" and signal.get("stop") is not None:
+            side = "above" if direction == "SELL_USD" else "below"
+            out.append(
+                f"USD/MXN trading {side} the stop at {signal['stop']} "
+                f"would invalidate the {direction} view."
+            )
+
+        # Top opposing signals: if they strengthen, the net bias erodes.
+        for c in (signal.get("conflicting_signals") or [])[:2]:
+            out.append(
+                f"If {c.get('label')} strengthens further ({c.get('detail')}), "
+                f"the net bias weakens or flips."
+            )
+
+        # Imminent high-impact catalysts.
+        for ev in upcoming_risks or []:
+            if ev.get("importance") == "high":
+                when = (
+                    f"~{ev['hours_away']}h"
+                    if ev.get("hours_away") is not None
+                    else "soon"
+                )
+                out.append(
+                    f"A surprise in {ev.get('event')} ({when}) could reset the bias."
+                )
+                break
+
+        if direction == "NO_TRADE":
+            out.append(
+                "A decisive, agreeing move in DXY/yields or a high-impact data "
+                "surprise would create a directional edge."
+            )
+
+        # A regime shift changes the whole playbook.
+        if regime.get("primary"):
+            out.append(
+                f"A shift out of the '{regime['primary']}' regime would change "
+                f"how these signals should be traded."
+            )
+
+        # De-dupe while preserving order, cap the list.
+        seen: set[str] = set()
+        deduped = []
+        for line in out:
+            if line.lower() not in seen:
+                seen.add(line.lower())
+                deduped.append(line)
+        return deduped[:6]
 
     @staticmethod
     def _upcoming_risks(upcoming: list[dict] | None) -> list[dict]:

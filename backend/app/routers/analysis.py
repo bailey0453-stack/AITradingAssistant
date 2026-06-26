@@ -16,6 +16,7 @@ router = APIRouter(prefix="/analysis", tags=["analysis"])
 
 
 def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dict:
+    sb = row.signal_breakdown or {}
     return {
         "id": row.id,
         "pair": row.pair,
@@ -24,6 +25,10 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "trade_score": row.trade_score,
         "market_bias": row.market_bias,
         "confidence": row.confidence,
+        # Top-level convenience copies of the weighted scores (also in signal_breakdown).
+        "usd_score": sb.get("usd_score"),
+        "mxn_score": sb.get("mxn_score"),
+        "net_bias": sb.get("net_score"),
         "momentum_status": row.momentum_status,
         "historical_similarity": row.historical_similarity,
         "risk_level": row.risk_level,
@@ -36,6 +41,10 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "weighted_contributions": row.weighted_contributions,
         "conflicting_signals": row.conflicting_signals,
         "signal_breakdown": row.signal_breakdown,
+        "what_would_change_my_mind": row.what_would_change_my_mind,
+        "market_regime": row.market_regime,
+        "opportunity_grade": row.opportunity_grade,
+        "opportunity_grade_detail": row.opportunity_grade_detail,
         "entry": row.entry,
         "target": row.target,
         "stretch_target": row.stretch_target,
@@ -84,6 +93,10 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         weighted_contributions=result["weighted_contributions"],
         conflicting_signals=result["conflicting_signals"],
         signal_breakdown=result["signal_breakdown"],
+        market_regime=result["market_regime"],
+        opportunity_grade=result["opportunity_grade"],
+        opportunity_grade_detail=result["opportunity_grade_detail"],
+        what_would_change_my_mind=result["what_would_change_my_mind"],
         entry=result["entry"],
         target=result["target"],
         stretch_target=result["stretch_target"],

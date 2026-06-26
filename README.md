@@ -2,10 +2,13 @@
 
 A USD/MXN market intelligence engine (backend-only). It collects market + macro
 inputs, **live news** (NewsAPI), and a **live economic calendar** (Trading
-Economics), builds context, runs an analysis engine that explains *why* it sees
-an edge (market drivers, bullish/bearish factors, upcoming risks), persists
-market/news/recommendation snapshots, and serves a JSON API plus a dashboard.
-Every live provider falls back to mock data so the API never breaks.
+Economics), builds context, and runs an **explainable reasoning engine** that
+detects the **market regime**, scores **configurable weighted signals**, assigns
+an **opportunity grade** (A+..PASS), and explains *why* it sees an edge (market
+drivers, bullish/bearish/conflicting factors, upcoming risks, and what would
+change its mind). It persists market/news/recommendation snapshots and serves a
+JSON API plus a dashboard. Every live provider falls back to mock data so the API
+never breaks.
 
 Endpoints: `/health`, `/market/usdmxn`, `/analysis/usdmxn`, `/news/recent`,
 `/calendar/upcoming`, `/timeline/usdmxn`.

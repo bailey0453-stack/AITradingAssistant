@@ -93,5 +93,6 @@ def compute_signal(
             "total_score": scored["total_score"],
             "trade_threshold": scored["trade_threshold"],
             "weights_version": scored["weights_version"],
+            "weights": scored["weights"],
         },
     }

@@ -1,10 +1,12 @@
-# AI Trading Assistant — Backend (Phase 3)
+# AI Trading Assistant — Backend (Phase 3.5)
 
 Backend-only **USD/MXN market intelligence engine**. It collects market + macro
 inputs, **live news**, and a **live economic calendar**, builds a structured
-context, runs an analysis engine that explains *why* it sees an edge, persists
-everything (market snapshots, news, and full recommendation snapshots), and
-exposes a JSON API plus a dashboard.
+context, runs an **explainable reasoning engine** that classifies the market
+regime, scores weighted USD-vs-MXN evidence, grades the opportunity, and explains
+*why* it sees an edge (and what would change its mind), persists everything
+(market snapshots, news, and full recommendation snapshots), and exposes a JSON
+API plus a dashboard.
 
 > Scope: **no iPhone app, no SaaS billing, no auto-trading.** This is a
 > read-only intelligence service that produces a directional view, not orders.
@@ -39,12 +41,20 @@ exposes a JSON API plus a dashboard.
   USD-vs-MXN evidence — it does **not** treat inputs equally — and returns the
   `weighted_contributions`, `conflicting_signals`, and a `signal_breakdown`
   (USD/MXN/net scores) for debugging. Tune via the file or `SIGNAL_WEIGHTS`.
+- **Explainable reasoning engine** (Phase 3.5): on top of the weighted signal it
+  adds **market regime detection** (`market_regime.py` → primary/secondary regime
+  + confidence), an **opportunity grade** (`A+ | A | B | C | D | PASS`) derived
+  from signal agreement, regime, risk, confidence and volatility, and a
+  **`what_would_change_my_mind`** list of concrete, falsifiable invalidation
+  conditions.
 - **Richer analysis**: direction, trade_score, market_bias, confidence,
   momentum, historical_similarity (placeholder), risk_level, summary (now
   explains which indicators confirm vs push back), key_drivers, **market_drivers**
   (per-indicator USD+/MXN+ lean), **bullish_factors**, **bearish_factors**,
-  **upcoming_risks**, entry/target/stretch/stop, expected_move,
-  expected_duration, invalidation_level, risk_notes — plus an **event timeline**.
+  **conflicting_signals**, **upcoming_risks**, **what_would_change_my_mind**,
+  **market_regime**, **opportunity_grade**, top-level **usd_score / mxn_score /
+  net_bias**, entry/target/stretch/stop, expected_move, expected_duration,
+  invalidation_level, risk_notes — plus an **event timeline**.
 - **Recommendation store**: every analysis persists market + news + calendar
   context + the recommendation — the future backtesting / similarity dataset.
 - Modular provider layer with **mock fallback** everywhere; SQLite by default,
@@ -62,8 +72,9 @@ services/
   news.py          news provider (mock | live NewsAPI | fallback; Finnhub/FMP stubs)
   calendar.py      economic calendar provider (mock | live Trading Economics | fallback)
   signal_weights.py  configurable weighting engine (the only place weights live)
+  market_regime.py   regime detection (Risk On/Off, Fed/Banxico/Inflation/Oil-driven, ...)
   signals.py       directional view + trade levels (delegates scoring to weights)
-  ai_analysis.py   analyzer composing the recommendation + explanation (rule-based | OpenAI stub)
+  ai_analysis.py   analyzer: recommendation + regime + opportunity grade + explanation
   context_builder.py  gathers context + builds the event timeline
   secrets.py       scrubs API keys out of any log/error string
 models/          MarketSnapshot, NewsItem, AnalysisSnapshot (SQLAlchemy)
@@ -125,7 +136,38 @@ SIGNAL_WEIGHTS='{"dxy": 9, "oil": 6, "us_cpi": 10}'
 
 `GET /analysis/usdmxn` returns `weighted_contributions` (sorted strongest-first),
 `conflicting_signals`, and `signal_breakdown` (`usd_score`, `mxn_score`,
-`net_score`, `trade_threshold`, `weights_version`) for debugging and tuning.
+`net_score`, `trade_threshold`, `weights_version`, and the active `weights`) for
+debugging and tuning. The USD/MXN scores are also surfaced at the top level as
+`usd_score`, `mxn_score`, and `net_bias`.
+
+## Reasoning engine (Phase 3.5)
+
+The analyzer turns the weighted score into an *explainable* read. It does not
+replace the rules engine — it layers on top of it.
+
+**Market regime** (`app/services/market_regime.py`) re-reads the same evidence
+(volatility, equities/gold, oil, calendar events, news categories, momentum) and
+classifies the tape. Each regime accumulates a transparent score from named
+pieces of evidence; the strongest two become `primary`/`secondary` with a
+`confidence` (0–100) and a short `rationale`. Possible regimes: *Risk On, Risk
+Off, Fed Driven, Banxico Driven, Inflation Driven, Oil Driven, Trade War,
+Political Risk, Low/High Volatility, Range Bound, Trending.*
+
+**Opportunity grade** (`A+ | A | B | C | D | PASS`) blends signal agreement
+(net vs total weight), confidence, and trade score into a 0–100 composite, then
+deducts penalties for risk level, conflicting signals, and elevated volatility
+(a historical-volatility proxy). Uncertain regimes cap the top grade, and a
+`NO_TRADE` direction always grades `PASS`. The full breakdown (`score`,
+`reasons`, `components`) is returned as `opportunity_grade_detail`.
+
+**`what_would_change_my_mind`** lists concrete, falsifiable conditions that would
+weaken or flip the view — e.g. price through the stop, an opposing signal
+strengthening, an imminent high-impact release, or a regime shift.
+
+All of the above (`market_regime`, `opportunity_grade`,
+`opportunity_grade_detail`, `what_would_change_my_mind`) plus the persisted
+`signal_breakdown` (including the active weights) are stored on every
+`AnalysisSnapshot`.
 
 ## Project layout
 
@@ -190,6 +232,11 @@ Then open:
   "confidence": 62.4,
   "momentum_status": "Bullish USD",
   "risk_level": "elevated",
+  "usd_score": 24.1, "mxn_score": 8.0, "net_bias": 16.1,
+  "market_regime": { "primary": "Fed Driven", "secondary": "Risk Off", "confidence": 41.2, "scores": { "Fed Driven": 1.4, "Risk Off": 1.0 }, "rationale": ["Fed event in focus: FOMC Rate Decision"] },
+  "opportunity_grade": "B",
+  "opportunity_grade_detail": { "grade": "B", "score": 64.8, "reasons": ["Signal agreement 50% ...", "Regime: Fed Driven (41.2% conf)."], "components": { "agreement": 0.5, "confidence": 0.624, "trade_score": 0.712, "risk_penalty": 8.0 } },
+  "what_would_change_my_mind": ["USD/MXN trading below the stop at 17.86 would invalidate the BUY_USD view.", "If S&P Futures strengthens further (S&P fut 5467), the net bias weakens or flips."],
   "historical_similarity": { "status": "placeholder", "score": null, "sample_size": 4 },
   "summary": "Bias favors USD strength vs MXN. Spot ~17.93 ... Confirming: DXY, US 10Y yield. Pushing back: S&P futures. ...",
   "key_drivers": ["DXY firmer (104.6)", "US 10Y yield up (4.38%)"],
@@ -358,9 +405,11 @@ Local development is unchanged — none of this affects `uvicorn app.main:app`.
 A dependency-free smoke test covers all endpoints, the expanded analysis schema
 (`market_drivers`, `bullish_factors`, `bearish_factors`, `upcoming_risks`,
 `weighted_contributions`, `conflicting_signals`, `signal_breakdown`), the
-weighting engine (defaults, env override, USD/MXN scoring, conflicts), the
-`mock` / `live` / `fallback` source tagging for market **and** news **and**
-calendar, and asserts that **API keys are scrubbed from error messages**:
+reasoning engine (`market_regime` classification, `opportunity_grade` A+..PASS,
+`what_would_change_my_mind`), the weighting engine (defaults, env override,
+USD/MXN scoring, conflicts), the `mock` / `live` / `fallback` source tagging for
+market **and** news **and** calendar, and asserts that **API keys are scrubbed
+from error messages**:
 
 ```bash
 cd backend

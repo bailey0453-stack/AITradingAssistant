@@ -40,8 +40,11 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.3.0",
-    description="Backend-only USD/MXN market intelligence assistant (Phase 3).",
+    version="0.3.5",
+    description=(
+        "Backend-only USD/MXN market intelligence assistant "
+        "(Phase 3.5 · explainable reasoning engine)."
+    ),
     lifespan=lifespan,
 )
 
@@ -99,11 +102,18 @@ DASHBOARD_HTML = """<!doctype html>
     .fac-bear li { color:#ffb3c6; }
     a { color:#7aa7ff; text-decoration:none; }
     a:hover { text-decoration:underline; }
+    .grade { font-size:34px; font-weight:800; letter-spacing:.02em; }
+    .grade-Aplus, .grade-A { color:#5be3a0; }
+    .grade-B { color:#9be7c0; }
+    .grade-C { color:#ffd98a; }
+    .grade-D { color:#ffb3c6; }
+    .grade-PASS { color:#9fb3d9; }
+    .regime { font-size:20px; font-weight:700; }
   </style>
 </head>
 <body>
   <header>
-    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 3 · live market intelligence)</span></h1>
+    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 3.5 · explainable reasoning engine)</span></h1>
     <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
   </header>
   <main>
@@ -118,6 +128,46 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Oil</div><div class="v" id="oil">—</div></div>
         <div class="stat"><div class="k">Gold</div><div class="v" id="gold">—</div></div>
         <div class="stat"><div class="k">VIX</div><div class="v" id="vix">—</div></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Opportunity grade</h2>
+        <div class="row" style="align-items:center">
+          <div class="stat" style="flex:0; min-width:90px">
+            <div class="grade grade-PASS" id="grade">—</div>
+            <div class="k muted" id="gradescore">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">USD score</div><div class="v lean-usd" id="usdsc2">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">MXN score</div><div class="v lean-mxn" id="mxnsc2">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">Net bias</div><div class="v" id="netsc2">—</div>
+          </div>
+        </div>
+        <div class="k muted" style="margin-top:10px">Why this grade</div>
+        <ul id="gradereasons"></ul>
+      </div>
+
+      <div class="card">
+        <h2>Market regime</h2>
+        <div class="row" style="align-items:flex-start">
+          <div class="stat">
+            <div class="k">Primary</div><div class="regime" id="regprimary">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">Secondary</div><div class="v" id="regsecondary" style="font-size:15px">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">Confidence</div><div class="v" id="regconf">—</div>
+          </div>
+        </div>
+        <div class="k muted" style="margin-top:10px">Read</div>
+        <ul id="regrationale"></ul>
       </div>
     </div>
 
@@ -180,6 +230,11 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card">
       <h2>Key risks (upcoming)</h2>
       <ul id="risks"></ul>
+    </div>
+
+    <div class="card">
+      <h2>What would change my mind</h2>
+      <ul id="wwcm"></ul>
     </div>
 
     <div class="card">
@@ -252,6 +307,30 @@ DASHBOARD_HTML = """<!doctype html>
       $('risknotes').textContent = d.risk_notes || '';
 
       const leanClass = l => (l||'').startsWith('USD') ? 'lean-usd' : ((l||'').startsWith('MXN') ? 'lean-mxn' : 'lean-neutral');
+
+      // Opportunity grade + regime (Phase 3.5 reasoning layer)
+      const gd = d.opportunity_grade_detail || {};
+      const grade = d.opportunity_grade || 'PASS';
+      const gEl = $('grade');
+      gEl.textContent = grade;
+      gEl.className = 'grade grade-' + (grade === 'A+' ? 'Aplus' : grade);
+      fill('gradescore', gd.score, '/100');
+      const sb0 = d.signal_breakdown || {};
+      fill('usdsc2', sb0.usd_score); fill('mxnsc2', sb0.mxn_score); fill('netsc2', sb0.net_score);
+      const listIntoEl = (id, arr, empty) => {
+        const el=$(id); el.innerHTML='';
+        (arr||[]).forEach(x => { const li=document.createElement('li'); li.textContent=x; el.appendChild(li); });
+        if (!(arr||[]).length) el.innerHTML = '<li class="muted">'+empty+'</li>';
+      };
+      listIntoEl('gradereasons', gd.reasons, 'No grading detail.');
+
+      const reg = d.market_regime || {};
+      $('regprimary').textContent = reg.primary || '—';
+      $('regsecondary').textContent = reg.secondary || '—';
+      fill('regconf', reg.confidence, '%');
+      listIntoEl('regrationale', reg.rationale, 'No dominant regime read.');
+
+      listIntoEl('wwcm', d.what_would_change_my_mind, 'No invalidation conditions identified.');
       const md = $('mdrivers'); md.innerHTML = '';
       (d.market_drivers || []).forEach(x => {
         const tr=document.createElement('tr');

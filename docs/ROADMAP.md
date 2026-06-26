@@ -56,6 +56,25 @@ and make the analysis explain itself.
 - [x] Secret hygiene: keys sent via headers where possible and scrubbed from all
       error strings; smoke tests assert no key leaks.
 
+## Phase 3.5 — Explainable reasoning engine
+
+Goal: upgrade the analysis from a rules engine into an explainable analyst,
+building on (not replacing) the existing architecture.
+
+- [x] **Market regime detection** (`market_regime.py`): primary/secondary regime
+      + confidence across Risk On/Off, Fed/Banxico/Inflation/Oil-driven, Trade
+      War, Political Risk, Low/High Volatility, Range Bound, Trending.
+- [x] **Opportunity grade** (`A+ | A | B | C | D | PASS`) from signal agreement,
+      regime, risk, confidence and (volatility-proxied) historical volatility.
+- [x] **Explainability**: `what_would_change_my_mind` plus existing
+      market_drivers / bullish / bearish / conflicting / upcoming_risks.
+- [x] Top-level `usd_score` / `mxn_score` / `net_bias`; active weights persisted
+      in `signal_breakdown`.
+- [x] Persist regime, grade, grade detail, and reasoning on every snapshot.
+- [x] Dashboard cards: Opportunity Grade, Market Regime, What Would Change My
+      Mind (alongside the existing weighting/factors cards).
+- [x] Smoke tests for regime classification and grading; docs updated.
+
 ### Phase 3 follow-ups
 
 - [ ] Real sentiment scoring for news (currently a placeholder lean).

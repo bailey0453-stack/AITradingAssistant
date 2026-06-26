@@ -109,6 +109,12 @@ class AnalysisSnapshot(Base):
     conflicting_signals: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     signal_breakdown: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Reasoning engine output (Phase 3.5)
+    market_regime: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    opportunity_grade: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    opportunity_grade_detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    what_would_change_my_mind: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # Trade levels
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
