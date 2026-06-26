@@ -1,6 +1,28 @@
 # Phase 4 — Historical Event Engine (Design)
 
-> **Status: design only. No code in this commit.** This document specifies the
+> **Status: IMPLEMENTED (sample data).** The engine shipped in
+> `app/services/history/` with a working mock/sample importer; this document is
+> the original design. A few names changed in the build — see the note below.
+
+> **Implementation notes (what actually shipped):**
+> - Tables use explicit names instead of the `hist_*` prefix:
+>   `historical_market_snapshots`, `historical_events`,
+>   `historical_event_reactions`, and a derived `similarity_matches` cache.
+> - Code lives in `app/services/history/`: `importers.py` (modular backfill with
+>   a working `MockSampleImporter` + CSV/Yahoo/FRED/Alpha Vantage/Polygon stubs),
+>   `historical_prices.py` (reaction-window math), `historical_events.py`
+>   (DB access + idempotent seeding), `similarity_engine.py` (feature vectors +
+>   weighted scoring), `historical_statistics.py` (aggregate stats, probability
+>   forecast, configurable confidence blend).
+> - Endpoints: `GET /history/events`, `/history/similar`, `/history/statistics`,
+>   `/history/probabilities`; the history block also feeds `/analysis/usdmxn`.
+> - Reaction windows shipped as **15m/1h/4h/1d/3d/5d** (added 5d).
+> - Weights are configurable via `SIMILARITY_WEIGHTS` and `CONFIDENCE_WEIGHTS`.
+>
+> The original design below is retained for context and for the future real-data
+> backfill.
+
+> **Original goal.** This document specifies the
 > tables, provider interfaces, backfill workflow, reaction math, and similarity
 > scoring so we can **backfill years of history immediately** instead of waiting
 > for the live service to accumulate data organically.

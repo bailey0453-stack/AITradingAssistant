@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 
 from app.config import get_settings
 from app.database import init_db
-from app.routers import analysis, calendar, health, market, news, timeline
+from app.routers import analysis, calendar, health, history, market, news, timeline
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,10 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.3.5",
+    version="0.4.0",
     description=(
         "Backend-only USD/MXN market intelligence assistant "
-        "(Phase 3.5 · explainable reasoning engine)."
+        "(Phase 4 · historical intelligence engine)."
     ),
     lifespan=lifespan,
 )
@@ -54,6 +54,7 @@ app.include_router(analysis.router)
 app.include_router(news.router)
 app.include_router(calendar.router)
 app.include_router(timeline.router)
+app.include_router(history.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -113,7 +114,7 @@ DASHBOARD_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 3.5 · explainable reasoning engine)</span></h1>
+    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 4 · historical intelligence)</span></h1>
     <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
   </header>
   <main>
@@ -238,6 +239,32 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
+      <h2>Historical intelligence <span class="muted" id="histsrc">(sample data)</span></h2>
+      <div class="row">
+        <div class="stat"><div class="k">Historical similarity</div><div class="v" id="hsim">—</div></div>
+        <div class="stat"><div class="k">Comparable events</div><div class="v" id="hcount">—</div></div>
+        <div class="stat"><div class="k">Win rate</div><div class="v" id="hwin">—</div></div>
+        <div class="stat"><div class="k">Avg move</div><div class="v" id="havg">—</div></div>
+        <div class="stat"><div class="k">Median move</div><div class="v" id="hmed">—</div></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div class="stat"><div class="k">Expected holding</div><div class="v" id="hdur" style="font-size:15px">—</div></div>
+        <div class="stat"><div class="k">Typical MFE</div><div class="v lean-usd" id="hmfe">—</div></div>
+        <div class="stat"><div class="k">Typical MAE</div><div class="v lean-mxn" id="hmae">—</div></div>
+        <div class="stat"><div class="k">Expected range</div><div class="v" id="hrange" style="font-size:15px">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:12px">Best historical match</div>
+      <p id="hbest" class="muted"></p>
+      <div class="k muted" style="margin-top:6px">Probability distribution</div>
+      <table style="margin-top:6px">
+        <thead><tr><th>Outcome</th><th>Level</th><th>Probability</th></tr></thead>
+        <tbody id="hprob"></tbody>
+      </table>
+      <div class="k muted" style="margin-top:12px">Confidence blend</div>
+      <ul id="hconf"></ul>
+    </div>
+
+    <div class="card">
       <h2>Signal weighting (debug)</h2>
       <div class="row">
         <div class="stat"><div class="k">USD score</div><div class="v lean-usd" id="usdsc">—</div></div>
@@ -331,6 +358,55 @@ DASHBOARD_HTML = """<!doctype html>
       listIntoEl('regrationale', reg.rationale, 'No dominant regime read.');
 
       listIntoEl('wwcm', d.what_would_change_my_mind, 'No invalidation conditions identified.');
+
+      // Historical intelligence (Phase 4)
+      const h = d.historical || {};
+      const hstats = h.statistics || {};
+      const pct = v => (v === null || v === undefined) ? '—' : ((v>0?'+':'') + v + '%');
+      $('hsim').textContent = (h.best_similarity != null) ? Math.round(h.best_similarity*100)+'%' : '—';
+      fill('hcount', h.sample_size);
+      $('hwin').textContent = (hstats.win_rate != null) ? hstats.win_rate+'%' : '—';
+      $('havg').textContent = pct(hstats.average_move);
+      $('hmed').textContent = pct(hstats.median_move);
+      $('hdur').textContent = hstats.expected_duration || '—';
+      $('hmfe').textContent = pct(hstats.typical_MFE);
+      $('hmae').textContent = (hstats.typical_MAE != null) ? ('-'+hstats.typical_MAE+'%') : '—';
+      const er = hstats.expected_range;
+      $('hrange').textContent = er ? (pct(er.low_pct)+' … '+pct(er.high_pct) + (er.low_price?(' ('+er.low_price+'–'+er.high_price+')'):'')) : '—';
+      const bm = (h.top_matches || [])[0];
+      $('hbest').textContent = bm ? ((bm.event_name||bm.event_type)+' · '+(bm.release_time||'').slice(0,10)+
+        ' · similarity '+Math.round((bm.similarity_score||0)*100)+'% · 1d '+pct((bm.windows||{})['1d'])+
+        ' · '+(bm.reversal_behavior||'')) : 'No comparable events yet.';
+
+      const hp = $('hprob'); hp.innerHTML='';
+      const probs = (d.probabilities || {}).levels || {};
+      const targets = (d.probabilities || {}).targets || {};
+      const probRows = [
+        ['Reaches target 1', targets.target_1, probs.probability_reaches_target_1],
+        ['Reaches target 2', targets.target_2, probs.probability_reaches_target_2],
+        ['Reaches stretch', targets.stretch, probs.probability_reaches_stretch],
+        ['Hits stop', targets.stop, probs.probability_hits_stop],
+      ];
+      probRows.forEach(([label, lvl, p]) => {
+        if (p == null && lvl == null) return;
+        const tr=document.createElement('tr');
+        tr.innerHTML = '<td>'+label+'</td><td>'+(lvl ?? '—')+'</td><td>'+(p != null ? p+'%' : '—')+'</td>';
+        hp.appendChild(tr);
+      });
+      if (!hp.children.length) hp.innerHTML = '<tr><td colspan="3" class="muted">No probability data.</td></tr>';
+
+      const cb = (d.confidence_breakdown || {});
+      const cc = cb.components || {};
+      const labelMap = {signal:'Weighted signal', historical:'Historical similarity', regime:'Market regime', volatility:'Volatility quality', data_quality:'News/calendar quality'};
+      const hc = $('hconf'); hc.innerHTML='';
+      Object.keys(labelMap).forEach(k => {
+        if (cc[k] == null) return;
+        const li=document.createElement('li');
+        li.textContent = labelMap[k]+': '+cc[k]+'/100';
+        hc.appendChild(li);
+      });
+      if (cb.value != null) { const li=document.createElement('li'); li.innerHTML='<b>Blended confidence: '+cb.value+'/100</b>'; hc.appendChild(li); }
+      if (!hc.children.length) hc.innerHTML = '<li class="muted">Confidence uses the weighted signal only.</li>';
       const md = $('mdrivers'); md.innerHTML = '';
       (d.market_drivers || []).forEach(x => {
         const tr=document.createElement('tr');

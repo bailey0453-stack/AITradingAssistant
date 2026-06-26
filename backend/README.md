@@ -1,12 +1,15 @@
-# AI Trading Assistant — Backend (Phase 3.5)
+# AI Trading Assistant — Backend (Phase 4)
 
 Backend-only **USD/MXN market intelligence engine**. It collects market + macro
 inputs, **live news**, and a **live economic calendar**, builds a structured
 context, runs an **explainable reasoning engine** that classifies the market
 regime, scores weighted USD-vs-MXN evidence, grades the opportunity, and explains
-*why* it sees an edge (and what would change its mind), persists everything
-(market snapshots, news, and full recommendation snapshots), and exposes a JSON
-API plus a dashboard.
+*why* it sees an edge (and what would change its mind). The **historical
+intelligence engine** then answers *"have we seen conditions like this before,
+and what usually happened next?"* — ranking past events by similarity and
+producing aggregate stats + probabilities. It persists everything (market
+snapshots, news, full recommendation snapshots, and a backfilled historical
+dataset) and exposes a JSON API plus a dashboard.
 
 > Scope: **no iPhone app, no SaaS billing, no auto-trading.** This is a
 > read-only intelligence service that produces a directional view, not orders.
@@ -20,6 +23,10 @@ API plus a dashboard.
   - `GET /news/recent` — structured recent news (stored).
   - `GET /calendar/upcoming` — upcoming tracked economic events.
   - `GET /timeline/usdmxn` — recent event/market/signal timeline (read-only).
+  - `GET /history/events` — backfilled historical events.
+  - `GET /history/similar` — past events most like the current context.
+  - `GET /history/statistics` — aggregate stats over the similar events.
+  - `GET /history/probabilities` — probability of hitting target/stop levels.
   - (`/market/usdmxn/history`, `/analysis/usdmxn/history`, `/calendar/released`.)
 - **Expanded market snapshot**: USD/MXN, inverse, DXY, US 2Y, US 10Y, WTI oil,
   gold, S&P futures, VIX, provider, source, timestamp.
@@ -47,6 +54,14 @@ API plus a dashboard.
   from signal agreement, regime, risk, confidence and volatility, and a
   **`what_would_change_my_mind`** list of concrete, falsifiable invalidation
   conditions.
+- **Historical intelligence engine** (Phase 4, `services/history/`): backfills a
+  historical dataset (sample data out of the box, paid providers optional),
+  measures USD/MXN reactions after each event over fixed windows (15m/1h/4h/1d/
+  3d/5d, plus MFE/MAE/time-to-peak/reversal), and ranks past events by similarity
+  to the current context. Returns aggregate stats (avg/median move, win rate,
+  expected range/duration, typical MFE/MAE), a **probability forecast** for
+  hitting target/stop levels, and feeds a **configurable blended confidence**
+  (signal + historical + regime + volatility + data quality).
 - **Richer analysis**: direction, trade_score, market_bias, confidence,
   momentum, historical_similarity (placeholder), risk_level, summary (now
   explains which indicators confirm vs push back), key_drivers, **market_drivers**
@@ -76,9 +91,29 @@ services/
   signals.py       directional view + trade levels (delegates scoring to weights)
   ai_analysis.py   analyzer: recommendation + regime + opportunity grade + explanation
   context_builder.py  gathers context + builds the event timeline
+  history/         historical intelligence engine (Phase 4)
+    importers.py          modular backfill (mock/sample + CSV/Yahoo/FRED/AV/Polygon stubs)
+    historical_prices.py  reaction-window math (15m..5d, MFE/MAE, reversal)
+    historical_events.py  read/seed events + reactions from the DB
+    similarity_engine.py  feature vectors + weighted similarity + ranking
+    historical_statistics.py  aggregate stats, probability forecast, confidence blend
   secrets.py       scrubs API keys out of any log/error string
-models/          MarketSnapshot, NewsItem, AnalysisSnapshot (SQLAlchemy)
+models/          MarketSnapshot, NewsItem, AnalysisSnapshot (snapshots.py);
+                 HistoricalMarketSnapshot, HistoricalEvent, HistoricalEventReaction,
+                 SimilarityMatch (history.py)
 ```
+
+### Data separation (kept in distinct tables)
+
+| Dataset | Table(s) | Nature |
+| --- | --- | --- |
+| Public historical backfill | `historical_market_snapshots`, `historical_events`, `historical_event_reactions` | Public/free, re-importable |
+| Derived similarity cache | `similarity_matches` | Derived; links public events ↔ (optional) a recommendation |
+| Proprietary live recommendations | `analysis_snapshots` | The live AI history |
+| Future Border Currency trade outcomes | *(not modeled here)* | Kept out by design |
+
+These are never merged into one table — the similarity cache references the
+others by id only.
 
 Flow for `GET /analysis/usdmxn`: capture market snapshot + news (stored) →
 `build_context` (DB news/analyses + calendar provider) → `build_timeline` →
@@ -169,6 +204,93 @@ All of the above (`market_regime`, `opportunity_grade`,
 `signal_breakdown` (including the active weights) are stored on every
 `AnalysisSnapshot`.
 
+## Historical intelligence engine (Phase 4)
+
+Answers *"have we seen conditions like this before, and what usually happened
+next?"* It works with **mock/sample data out of the box** — no paid provider
+required — and the same code path accepts real data later.
+
+### Historical database
+
+Four new tables (kept separate from the live recommendation history):
+
+- `historical_market_snapshots` — backfilled USD/MXN + macro time series.
+- `historical_events` — economic events with `forecast/actual/surprise(_z)`.
+- `historical_event_reactions` — how USD/MXN reacted after each event
+  (windowed returns 15m/1h/4h/1d/3d/5d, max favorable/adverse excursion, time to
+  peak, reversal behavior, data completeness) **plus the pre-event market
+  context** (the similarity feature vector).
+- `similarity_matches` — a cache of "events like now" comparisons; references
+  public events and, optionally, the proprietary recommendation that triggered
+  them. The datasets are never mixed into one table.
+
+Every row records `source` + `source_quality` so a reconstructed sample path is
+never confused with a vendor's real intraday tick.
+
+### Reaction-window math (`historical_prices.py`)
+
+Pure functions over a price *path* (hours-after-event → price): windowed percent
+returns, max favorable/adverse excursion **relative to the net reaction
+direction**, time-to-peak, reversal classification (`continuation | fade |
+reversal`), and data completeness. Driven by synthetic sample paths today and
+real intraday bars later — only the importer changes.
+
+### Similarity scoring (`similarity_engine.py`)
+
+A query feature vector is built from the current context (regime, DXY, 2Y/10Y,
+oil, gold, VIX, S&P, USD/MXN momentum, dominant event type, news tags) and scored
+against every stored reaction. Categorical features (regime, event type) match
+exactly; numeric features use a Gaussian `exp(-(Δ/scale)²)`; news tags use
+Jaccard overlap. The final score is a **configurable weighted average**
+(`SIMILARITY_WEIGHTS`) over features present on both sides.
+
+### Probability model (`historical_statistics.py`)
+
+From the top matches we report aggregate stats (similarity-weighted average move,
+median move, win rate vs the trade direction, p25–p75 expected range, expected
+holding time, typical MFE/MAE). The probability forecast estimates, for the
+current trade direction and price, the fraction of similar events whose favorable
+excursion reached each level and whose adverse excursion hit the stop:
+
+```
+probability_reaches_target_1 / target_2 / stretch
+probability_hits_stop
+```
+
+(Targets come from the live signal; when the signal is `NO_TRADE` there are no
+levels, so these are `null`.)
+
+### Blended, configurable confidence
+
+`blend_confidence` combines five 0–100 components with configurable weights
+(`CONFIDENCE_WEIGHTS`): current weighted **signal**, **historical** similarity
+quality, **regime** confidence, **volatility** quality, and news/calendar **data
+quality**. Missing components (e.g. no historical matches) are dropped and the
+weights renormalized, so absent data never *lowers* confidence. The blended value
+becomes the recommendation's `confidence`, with the full breakdown in
+`confidence_breakdown`.
+
+### Backfill workflow
+
+Importers share one interface (`fetch_events` + `fetch_price_path`); the base
+`run()` persists events, the reaction price path, and computed reactions
+idempotently. `ensure_history_seeded(db)` seeds the sample dataset once (skipped
+if events already exist) and is called lazily by the history + analysis
+endpoints, so the system is always populated.
+
+- **Free / now:** `MockSampleImporter` (built in). Future free options: CSV,
+  Yahoo Finance (yfinance, daily only), FRED (macro), Alpha Vantage (rate-limited).
+- **Paid (optional):** Polygon.io for true intraday FX bars; Trading Economics /
+  Finnhub for richer event history. Selected via `HISTORY_IMPORTER`.
+
+### Limitations of the sample data
+
+The sample dataset is a small, deterministic, **synthetic** reconstruction for
+building and testing — its reaction paths are generated from each event's
+surprise, not observed ticks. Treat similarity/probabilities as a *framework
+demo* until a real provider is wired in. Free daily sources also can't support
+true 15m/1h windows; those become meaningful only with intraday (paid) data.
+
 ## Project layout
 
 ```
@@ -237,7 +359,10 @@ Then open:
   "opportunity_grade": "B",
   "opportunity_grade_detail": { "grade": "B", "score": 64.8, "reasons": ["Signal agreement 50% ...", "Regime: Fed Driven (41.2% conf)."], "components": { "agreement": 0.5, "confidence": 0.624, "trade_score": 0.712, "risk_penalty": 8.0 } },
   "what_would_change_my_mind": ["USD/MXN trading below the stop at 17.86 would invalidate the BUY_USD view.", "If S&P Futures strengthens further (S&P fut 5467), the net bias weakens or flips."],
-  "historical_similarity": { "status": "placeholder", "score": null, "sample_size": 4 },
+  "historical_similarity": { "status": "active", "best_similarity": 0.87, "sample_size": 8, "win_rate": 75.0, "average_move": 0.18, "median_move": 0.23 },
+  "historical": { "best_similarity": 0.87, "sample_size": 8, "statistics": { "average_move": 0.18, "median_move": 0.23, "win_rate": 75.0, "expected_range": { "low_pct": 0.05, "high_pct": 0.41 }, "expected_duration": "3-5 days", "typical_MFE": 0.42, "typical_MAE": 0.0 }, "top_matches": [ { "event_type": "fed_rate_decision", "release_time": "2024-03-20T18:30:00+00:00", "similarity_score": 0.87, "windows": { "1d": 0.31 }, "reversal_behavior": "continuation" } ] },
+  "probabilities": { "sample_size": 8, "levels": { "probability_reaches_target_1": 62.5, "probability_reaches_target_2": 50.0, "probability_reaches_stretch": 25.0, "probability_hits_stop": 12.5 }, "targets": { "target_1": 18.02, "stretch": 18.13, "stop": 17.86 } },
+  "confidence_breakdown": { "value": 64.0, "components": { "signal": 62.4, "historical": 86.6, "regime": 41.2, "volatility": 79.6, "data_quality": 78.0 }, "weights_used": { "signal": 0.4, "historical": 0.25, "regime": 0.15, "volatility": 0.1, "data_quality": 0.1 } },
   "summary": "Bias favors USD strength vs MXN. Spot ~17.93 ... Confirming: DXY, US 10Y yield. Pushing back: S&P futures. ...",
   "key_drivers": ["DXY firmer (104.6)", "US 10Y yield up (4.38%)"],
   "market_drivers": [ { "name": "DXY", "value": 104.6, "lean": "USD+", "note": "US dollar index vs recent baseline" } ],
@@ -275,6 +400,9 @@ All config is environment-driven (see `.env.example`):
 | `CALENDAR_BASE_URL` | Override the calendar endpoint (optional) | Trading Economics |
 | `HTTP_TIMEOUT_SECONDS` | HTTP timeout for provider calls | `8.0` |
 | `SIGNAL_WEIGHTS` | JSON override of signal weights (see below) | unset (uses defaults) |
+| `SIMILARITY_WEIGHTS` | JSON override of history similarity feature weights | unset (uses defaults) |
+| `CONFIDENCE_WEIGHTS` | JSON override of blended-confidence weights | unset (uses defaults) |
+| `HISTORY_IMPORTER` | Backfill source (`mock` \| `csv` \| `yahoo` \| `fred` \| `alphavantage` \| `polygon`) | `mock` |
 | `MARKET_DATA_API_KEY` | Alternate market feed (future) | empty |
 | `FRED_API_KEY` | DXY / treasury yields (future) | empty |
 | `OPENAI_API_KEY` / `AI_MODEL` | LLM-backed analysis (future) | empty |
@@ -406,10 +534,12 @@ A dependency-free smoke test covers all endpoints, the expanded analysis schema
 (`market_drivers`, `bullish_factors`, `bearish_factors`, `upcoming_risks`,
 `weighted_contributions`, `conflicting_signals`, `signal_breakdown`), the
 reasoning engine (`market_regime` classification, `opportunity_grade` A+..PASS,
-`what_would_change_my_mind`), the weighting engine (defaults, env override,
-USD/MXN scoring, conflicts), the `mock` / `live` / `fallback` source tagging for
-market **and** news **and** calendar, and asserts that **API keys are scrubbed
-from error messages**:
+`what_would_change_my_mind`), the **historical intelligence engine**
+(`/history/*` endpoints, reaction-window math, similarity ranking, directional
+probability forecast, configurable confidence blend), the weighting engine
+(defaults, env override, USD/MXN scoring, conflicts), the `mock` / `live` /
+`fallback` source tagging for market **and** news **and** calendar, and asserts
+that **API keys are scrubbed from error messages**:
 
 ```bash
 cd backend

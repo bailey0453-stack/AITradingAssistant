@@ -115,6 +115,11 @@ class AnalysisSnapshot(Base):
     opportunity_grade_detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     what_would_change_my_mind: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # Historical intelligence (Phase 4) — derived from the public history tables.
+    historical_context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    probabilities: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    confidence_breakdown: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Trade levels
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

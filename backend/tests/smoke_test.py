@@ -137,6 +137,14 @@ def test_endpoints():
             assert body["opportunity_grade"] in {"A+", "A", "B", "C", "D", "PASS"}
             gd = body["opportunity_grade_detail"]
             assert "score" in gd and isinstance(gd["reasons"], list)
+            # Phase 4 historical layer
+            for k in ("historical", "probabilities", "confidence_breakdown"):
+                assert k in body, f"analysis missing {k}"
+            hist = body["historical"] or {}
+            assert "statistics" in hist, "historical missing statistics"
+            assert (body.get("historical_similarity") or {}).get("status") == "active"
+            cb = body["confidence_breakdown"] or {}
+            assert "components" in cb and "signal" in cb["components"]
 
         def news_ok():
             r = c.get("/news/recent")
@@ -181,12 +189,41 @@ def test_endpoints():
             assert body["pair"] == "USDMXN"
             assert isinstance(body["timeline"], list)
 
+        def history_endpoints_ok():
+            re = c.get("/history/events")
+            assert re.status_code == 200, re.status_code
+            assert re.json()["count"] >= 1, "expected seeded sample events"
+
+            rs = c.get("/history/similar")
+            assert rs.status_code == 200, rs.status_code
+            sb = rs.json()
+            assert "top_matches" in sb and isinstance(sb["top_matches"], list)
+            assert sb["considered"] >= 1
+            if sb["top_matches"]:
+                m = sb["top_matches"][0]
+                assert "similarity_score" in m and "windows" in m
+
+            rst = c.get("/history/statistics")
+            assert rst.status_code == 200, rst.status_code
+            stats = rst.json()["statistics"]
+            for k in ("sample_size", "average_move", "win_rate", "typical_MFE",
+                      "typical_MAE", "expected_duration"):
+                assert k in stats, f"statistics missing {k}"
+
+            rp = c.get("/history/probabilities")
+            assert rp.status_code == 200, rp.status_code
+            lvls = rp.json()["probabilities"].get("levels", {})
+            for k in ("probability_reaches_target_1", "probability_reaches_stretch",
+                      "probability_hits_stop"):
+                assert k in lvls, f"probabilities missing {k}"
+
         check("/health returns ok", health_ok)
         check("/market/usdmxn returns expanded data", market_ok)
-        check("/analysis/usdmxn returns full Phase 3 schema", analysis_ok)
+        check("/analysis/usdmxn returns full Phase 4 schema", analysis_ok)
         check("/news/recent returns structured news", news_ok)
         check("/calendar/upcoming returns events", calendar_ok)
         check("/timeline/usdmxn returns timeline", timeline_ok)
+        check("/history/* endpoints return valid data", history_endpoints_ok)
 
 
 def test_source_tagging():
@@ -515,6 +552,84 @@ def test_reasoning_engine():
     check("grade: strong signal earns a letter grade", grade_letters_on_strong_signal)
 
 
+def test_history_engine():
+    from app.services.history import historical_statistics as hs
+    from app.services.history import similarity_engine as sim
+    from app.services.history.historical_prices import compute_reaction_windows
+
+    def reaction_windows_math():
+        # USD/MXN rises ~1% then settles; baseline 18.0.
+        baseline = 18.0
+        path = [(0.0, 18.0), (1.0, 18.09), (4.0, 18.18), (24.0, 18.22),
+                (72.0, 18.16), (120.0, 18.12)]
+        out = compute_reaction_windows(path, baseline)
+        assert out["ret_1h"] is not None and out["ret_1h"] > 0
+        assert out["ret_5d"] is not None
+        # Peak (18.22) is above the 5d close -> MFE should exceed final return.
+        assert out["max_favorable_excursion"] >= out["ret_5d"]
+        assert out["data_completeness"] == 1.0
+        assert out["reversal_behavior"] in {"continuation", "fade", "reversal"}
+
+    def similarity_prefers_closer_context():
+        query = {"regime": "Fed Driven", "event_type": "fed_rate_decision",
+                 "dxy": 104.0, "vix": 14.0, "us2y": 4.6, "us10y": 4.2,
+                 "oil": 80.0, "gold": 2000.0, "sp_futures": 5200.0,
+                 "momentum": 0.0, "news_tags": ["fed", "rates"]}
+        near = {"event_type": "fed_rate_decision", "context": {
+            "regime": "Fed Driven", "dxy": 104.2, "vix": 14.5, "us2y": 4.6,
+            "us10y": 4.2, "oil": 81.0, "gold": 2010.0, "sp_futures": 5210.0,
+            "momentum": 0.0, "news_tags": ["fed", "rates"]}}
+        far = {"event_type": "us_nfp", "context": {
+            "regime": "High Volatility", "dxy": 99.0, "vix": 30.0, "us2y": 3.2,
+            "us10y": 3.0, "oil": 60.0, "gold": 2500.0, "sp_futures": 4500.0,
+            "momentum": 0.2, "news_tags": ["jobs"]}}
+        w = sim.get_similarity_weights()
+        s_near = sim.score_reaction(query, near, w)
+        s_far = sim.score_reaction(query, far, w)
+        assert s_near > s_far, (s_near, s_far)
+        assert 0.0 <= s_far <= s_near <= 1.0
+
+    def probability_forecast_directional():
+        # Two matches that moved +0.5% and +0.9% favorably for a BUY_USD trade.
+        matches = [
+            {"windows": {"1h": 0.2, "1d": 0.5, "5d": 0.45}},
+            {"windows": {"1h": 0.3, "1d": 0.9, "5d": 0.8}},
+        ]
+        targets = {"target_1": 100.5, "target_2": 100.7, "stretch": 101.0, "stop": 99.6}
+        out = hs.probability_forecast(matches, current_price=100.0,
+                                      direction="BUY_USD", targets=targets)
+        lv = out["levels"]
+        # Both reach +0.5%; only one reaches +0.9% (stretch +1.0% none).
+        assert lv["probability_reaches_target_1"] == 100.0, lv
+        assert lv["probability_reaches_stretch"] == 0.0, lv
+
+    def confidence_blend_renormalizes():
+        # Missing historical component should not drag confidence down.
+        full = hs.blend_confidence({"signal": 80, "historical": 80, "regime": 80,
+                                    "volatility": 80, "data_quality": 80})
+        partial = hs.blend_confidence({"signal": 80, "historical": None,
+                                       "regime": 80, "volatility": 80,
+                                       "data_quality": 80})
+        assert full["value"] == 80.0
+        assert partial["value"] == 80.0  # renormalized, not penalized
+        assert "historical" not in partial["weights_used"]
+
+    def confidence_weights_configurable():
+        from app.config import Settings
+        s = Settings(confidence_weights={"signal": 1.0, "historical": 0.0,
+                                         "regime": 0.0, "volatility": 0.0,
+                                         "data_quality": 0.0})
+        out = hs.blend_confidence({"signal": 70, "historical": 10, "regime": 10,
+                                   "volatility": 10, "data_quality": 10}, settings=s)
+        assert out["value"] == 70.0, out  # only signal counts
+
+    check("reaction window math (MFE/returns/completeness)", reaction_windows_math)
+    check("similarity ranks closer context higher", similarity_prefers_closer_context)
+    check("probability forecast is directional", probability_forecast_directional)
+    check("confidence blend renormalizes missing parts", confidence_blend_renormalizes)
+    check("confidence weights are configurable", confidence_weights_configurable)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -536,6 +651,7 @@ def main():
     test_calendar_provider()
     test_signal_weighting()
     test_reasoning_engine()
+    test_history_engine()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

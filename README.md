@@ -6,12 +6,16 @@ Economics), builds context, and runs an **explainable reasoning engine** that
 detects the **market regime**, scores **configurable weighted signals**, assigns
 an **opportunity grade** (A+..PASS), and explains *why* it sees an edge (market
 drivers, bullish/bearish/conflicting factors, upcoming risks, and what would
-change its mind). It persists market/news/recommendation snapshots and serves a
-JSON API plus a dashboard. Every live provider falls back to mock data so the API
-never breaks.
+change its mind). A **historical intelligence engine** then asks *"have we seen
+conditions like this before, and what usually happened next?"* — ranking past
+events by similarity and producing aggregate stats + probabilities (sample data
+out of the box, paid providers optional). It persists market/news/recommendation
+snapshots plus a backfilled historical dataset and serves a JSON API plus a
+dashboard. Every live provider falls back to mock data so the API never breaks.
 
 Endpoints: `/health`, `/market/usdmxn`, `/analysis/usdmxn`, `/news/recent`,
-`/calendar/upcoming`, `/timeline/usdmxn`.
+`/calendar/upcoming`, `/timeline/usdmxn`, `/history/events`, `/history/similar`,
+`/history/statistics`, `/history/probabilities`.
 
 Not in scope: iPhone app, SaaS billing, auto-trading.
 

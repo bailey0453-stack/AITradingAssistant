@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     # keys are ignored. Defaults live in services/signal_weights.py.
     signal_weights: Optional[Dict[str, float]] = None
 
+    # --- Historical intelligence engine (Phase 4) ---
+    # Optional JSON overrides; unknown keys ignored. Defaults live in the history
+    # services. SIMILARITY_WEIGHTS tunes feature importance for "find events like
+    # this"; CONFIDENCE_WEIGHTS tunes how signal/historical/regime/volatility/
+    # data-quality combine into blended confidence.
+    similarity_weights: Optional[Dict[str, float]] = None
+    confidence_weights: Optional[Dict[str, float]] = None
+    # Which importer seeds historical backfill (mock | csv | yahoo | fred | ...).
+    history_importer: str = "mock"
+
     @property
     def is_mock(self) -> bool:
         """Global mock toggle. Mock mode is on whenever USE_MOCK_DATA is true."""

@@ -82,20 +82,29 @@ building on (not replacing) the existing architecture.
 - [ ] Scheduled background polling to build a real time series.
 - [ ] Caching + rate-limit handling for providers.
 
-## Phase 4 — Historical event engine (designed; not yet built)
+## Phase 4 — Historical intelligence engine (built; sample data)
 
-Goal: backfill years of market data + economic events immediately, measure how
-USD/MXN reacted after each event, and make reactions searchable ("find events
-like this one") to replace the placeholder `historical_similarity`.
+Goal: backfill market data + economic events, measure how USD/MXN reacted after
+each event, and make reactions searchable ("find events like this one") to
+replace the placeholder `historical_similarity`. Ships with mock/sample data; no
+paid provider required.
 
-Full design: [`PHASE4_HISTORICAL_EVENT_ENGINE.md`](PHASE4_HISTORICAL_EVENT_ENGINE.md).
+Original design: [`PHASE4_HISTORICAL_EVENT_ENGINE.md`](PHASE4_HISTORICAL_EVENT_ENGINE.md)
+(table names in the shipped build: `historical_market_snapshots`,
+`historical_events`, `historical_event_reactions`, `similarity_matches`).
 
-- [ ] `hist_*` tables (price bars, events, reactions, features) — public backfill
-      kept separate from proprietary `analysis_snapshots`.
-- [ ] Modular history providers (price/event/headline) with `Sample*` fallback;
-      free sources first (FRED, Stooq/yfinance, GDELT), paid optional.
-- [ ] Idempotent backfill workflow + reaction windows (15m/1h/4h/1d/3d).
-- [ ] Similarity search service + read-only `GET /history/similar`.
+- [x] History tables — public backfill (`historical_*`) + derived
+      `similarity_matches`, kept separate from proprietary `analysis_snapshots`.
+- [x] Modular import framework (`services/history/importers.py`): working
+      `MockSampleImporter` + CSV/Yahoo/FRED/Alpha Vantage/Polygon stubs.
+- [x] Reaction windows (15m/1h/4h/1d/3d/5d) + MFE/MAE/time-to-peak/reversal.
+- [x] Similarity engine (configurable `SIMILARITY_WEIGHTS`) + read-only
+      `/history/similar`, `/history/statistics`, `/history/events`,
+      `/history/probabilities`.
+- [x] Probability forecast (target/stretch/stop) + configurable blended
+      confidence (`CONFIDENCE_WEIGHTS`) feeding `/analysis/usdmxn`.
+- [ ] Wire a real provider (Polygon intraday / FRED / yfinance) to replace the
+      sample dataset.
 
 ## Phase 5 — Smarter analysis
 
