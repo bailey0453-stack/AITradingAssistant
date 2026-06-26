@@ -475,9 +475,18 @@ class RuleBasedAnalyzer(AIAnalyzer):
     # Action guidance per grade. PASS = no trade; D/C = bias-only, low quality;
     # B/A/A+ = increasingly actionable.
     _ACTION_BY_GRADE = {
-        "PASS": "Stand aside — no trade. Stay flat until a catalyst confirms direction.",
-        "D": "Monitor only — directional lean exists but the setup is too weak to act.",
-        "C": "Low-quality setup — small/opportunistic exposure at most; prefer to wait.",
+        "PASS": (
+            "Do not initiate a trade — no directional edge. Stand aside until a "
+            "catalyst confirms direction."
+        ),
+        "D": (
+            "Do not initiate a speculative trade — a directional lean exists but the "
+            "setup is too weak; only act on operational need."
+        ),
+        "C": (
+            "Low-quality setup — only trade if an operational need exists; otherwise "
+            "wait. Keep size small and opportunistic."
+        ),
         "B": "Tradeable — scale into the {dir} view on confirmation; size moderately.",
         "A": "Actionable — take the {dir} position; manage against the stop.",
         "A+": "High-conviction — lead with the {dir} view; press on confirmation.",

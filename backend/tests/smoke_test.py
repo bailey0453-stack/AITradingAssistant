@@ -608,8 +608,40 @@ def test_strategist_narrative():
         assert "high-impact" in joined or "validity short" in joined, brief["quote_guidance"]
         assert any("cpi" in r.lower() for r in brief["risk_watchlist"]), brief["risk_watchlist"]
 
+    def grade_direction_action_rule():
+        # Encode the full PASS/C/B/A consistency rule across many mock snapshots.
+        for _ in range(40):
+            market = MockMarketDataProvider().get_usdmxn()
+            r = analyzer.analyze(market)
+            grade, direction = r["opportunity_grade"], r["direction"]
+            action = (r["trader_action"] or "").lower()
+
+            if grade == "PASS":
+                assert direction == "NO_TRADE", (grade, direction)
+                assert "do not initiate" in action, action
+                # Trade plan must be blank / not applicable.
+                assert r["target"] is None and r["stretch_target"] is None and r["stop"] is None, r
+            elif grade == "C":
+                assert direction in {"BUY_USD", "SELL_USD"}, (grade, direction)
+                assert "low-quality setup" in action and "operational need" in action, action
+            elif grade in {"B", "A", "A+"}:
+                assert direction in {"BUY_USD", "SELL_USD"}, (grade, direction)
+            elif grade == "D":
+                assert direction in {"BUY_USD", "SELL_USD"}, (grade, direction)
+
+    def action_wording_is_correct():
+        # Deterministic regardless of mock randomness.
+        amap = analyzer._ACTION_BY_GRADE
+        assert "do not initiate" in amap["PASS"].lower()
+        c = amap["C"].lower()
+        assert "low-quality setup" in c and "operational need" in c, c
+        for g in ("B", "A", "A+"):
+            assert amap[g], g
+
     check("narrative fields present + PASS==NO_TRADE consistency", narrative_fields_and_consistency)
+    check("trader_action wording satisfies PASS/C rule", action_wording_is_correct)
     check("quote guidance reacts to imminent high-impact event", quote_guidance_event_aware)
+    check("PASS/C/B/A grade-direction-action rule holds", grade_direction_action_rule)
 
 
 def test_history_engine():
