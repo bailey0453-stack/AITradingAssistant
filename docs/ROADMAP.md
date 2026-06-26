@@ -63,7 +63,22 @@ and make the analysis explain itself.
 - [ ] Scheduled background polling to build a real time series.
 - [ ] Caching + rate-limit handling for providers.
 
-## Phase 4 — Smarter analysis
+## Phase 4 — Historical event engine (designed; not yet built)
+
+Goal: backfill years of market data + economic events immediately, measure how
+USD/MXN reacted after each event, and make reactions searchable ("find events
+like this one") to replace the placeholder `historical_similarity`.
+
+Full design: [`PHASE4_HISTORICAL_EVENT_ENGINE.md`](PHASE4_HISTORICAL_EVENT_ENGINE.md).
+
+- [ ] `hist_*` tables (price bars, events, reactions, features) — public backfill
+      kept separate from proprietary `analysis_snapshots`.
+- [ ] Modular history providers (price/event/headline) with `Sample*` fallback;
+      free sources first (FRED, Stooq/yfinance, GDELT), paid optional.
+- [ ] Idempotent backfill workflow + reaction windows (15m/1h/4h/1d/3d).
+- [ ] Similarity search service + read-only `GET /history/similar`.
+
+## Phase 5 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
 - [ ] Real historical_similarity scoring over stored snapshots.
@@ -71,7 +86,7 @@ and make the analysis explain itself.
 - [ ] Backtesting harness against stored recommendation snapshots.
 - [ ] Confidence calibration.
 
-## Phase 5 — Delivery & access
+## Phase 6 — Delivery & access
 
 - [ ] Auth (API keys / sessions).
 - [ ] Alerts (email / push / WhatsApp) on signal changes.
