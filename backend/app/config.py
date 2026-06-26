@@ -43,8 +43,15 @@ class Settings(BaseSettings):
     fred_api_key: Optional[str] = None
     # News
     news_api_key: Optional[str] = None
+    # News provider selection + endpoint. Default targets NewsAPI.org; the
+    # provider layer also leaves room for Finnhub / Financial Modeling Prep.
+    news_provider: str = "newsapi"
+    news_base_url: Optional[str] = None
     # Economic calendar
     calendar_api_key: Optional[str] = None
+    # Calendar provider selection + endpoint. Default targets Trading Economics.
+    calendar_provider: str = "tradingeconomics"
+    calendar_base_url: Optional[str] = None
     # AI model (e.g. OpenAI) for narrative analysis
     openai_api_key: Optional[str] = None
     ai_model: str = "gpt-4o-mini"
@@ -61,6 +68,16 @@ class Settings(BaseSettings):
     def fx_live_enabled(self) -> bool:
         """Live FX is attempted only when mock mode is off AND a key is set."""
         return (not self.use_mock_data) and bool(self.fx_api_key)
+
+    @property
+    def news_live_enabled(self) -> bool:
+        """Live news is attempted only when mock mode is off AND a key is set."""
+        return (not self.use_mock_data) and bool(self.news_api_key)
+
+    @property
+    def calendar_live_enabled(self) -> bool:
+        """Live calendar is attempted only when mock mode off AND a key is set."""
+        return (not self.use_mock_data) and bool(self.calendar_api_key)
 
 
 @lru_cache

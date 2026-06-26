@@ -98,6 +98,12 @@ class AnalysisSnapshot(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     key_drivers: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # Explanatory breakdown (Phase 3)
+    market_drivers: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    bullish_factors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    bearish_factors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    upcoming_risks: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # Trade levels
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

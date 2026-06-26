@@ -1,8 +1,6 @@
 """Economic calendar provider system.
 
-Tracks the macro events that move USD/MXN. Mock provider is active by default;
-implement `LiveCalendarProvider` (e.g. an economic-calendar API) and set
-`CALENDAR_API_KEY` to go live. Output schema per event:
+Tracks the macro events that move USD/MXN. Output schema per event:
 
     event (name), country, release_time (ISO), forecast, previous, actual,
     importance ("high" | "medium" | "low"),
@@ -10,13 +8,31 @@ implement `LiveCalendarProvider` (e.g. an economic-calendar API) and set
     status ("upcoming" | "released")
 
 Tracked events: US CPI, US PPI, NFP / jobs, GDP, Retail Sales, FOMC, Fed
-speeches, Banxico, Mexico CPI, Mexico GDP, Mexico employment, Treasury auctions.
+speeches, Treasury auctions, Banxico, Mexico CPI, Mexico GDP, Mexico employment.
+
+Providers
+---------
+- ``MockCalendarProvider``           — realistic offline data; default + fallback.
+- ``TradingEconomicsCalendarProvider`` — live (initial implementation).
+- ``ResilientCalendarProvider``      — tries live, falls back to mock.
+
+Selection (``get_calendar_provider``):
+- ``USE_MOCK_DATA=true`` or no ``CALENDAR_API_KEY`` -> mock (source "mock").
+- otherwise resilient live (source "live" on success, "fallback" on error).
 """
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
+
+import httpx
+
+from app.config import Settings, get_settings
+from app.services.secrets import scrub
+
+logger = logging.getLogger(__name__)
 
 
 def _iso(dt: datetime) -> str:
@@ -176,21 +192,164 @@ class MockCalendarProvider(CalendarProvider):
         ]
 
 
-class LiveCalendarProvider(CalendarProvider):  # pragma: no cover - stub
-    source = "live"
+class TradingEconomicsCalendarProvider(CalendarProvider):
+    """Live economic calendar via Trading Economics.
 
-    def __init__(self, settings) -> None:
+    Fetches a US + Mexico window (recent past through near future) and maps it
+    to the shared schema. The API key is passed as the ``c`` query parameter
+    (Trading Economics' scheme); it is kept out of logs by scrubbing every
+    outbound error string. Raises on any failure so the resilient wrapper can
+    fall back to mock data.
+    """
+
+    source = "tradingeconomics"
+    DEFAULT_BASE_URL = "https://api.tradingeconomics.com/calendar/country/united states,mexico"
+    _IMPORTANCE = {3: "high", 2: "medium", 1: "low"}
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.base_url = settings.calendar_base_url or self.DEFAULT_BASE_URL
+        self.timeout = settings.http_timeout_seconds
+
+    def get_events(self) -> list[dict]:
+        if not self.settings.calendar_api_key:
+            raise RuntimeError("CALENDAR_API_KEY is not configured.")
+
+        now = datetime.now(timezone.utc)
+        params = {
+            "c": self.settings.calendar_api_key,
+            "f": "json",
+            "d1": (now - timedelta(days=3)).strftime("%Y-%m-%d"),
+            "d2": (now + timedelta(days=21)).strftime("%Y-%m-%d"),
+        }
+        try:
+            resp = httpx.get(self.base_url, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 - re-raise scrubbed
+            raise RuntimeError(
+                f"Calendar request failed: "
+                f"{scrub(str(exc), self.settings.calendar_api_key)}"
+            ) from None
+
+        if not isinstance(data, list):
+            raise RuntimeError("Calendar provider returned an unexpected payload.")
+
+        events = [self._map_event(row, now) for row in data]
+        events = [e for e in events if e]
+        if not events:
+            raise RuntimeError("Calendar provider returned no usable events.")
+        return events
+
+    def _map_event(self, row: dict, now: datetime) -> dict | None:
+        if not isinstance(row, dict):
+            return None
+        name = (row.get("Event") or row.get("Category") or "").strip()
+        if not name:
+            return None
+        country = (row.get("Country") or "").strip()
+        currency_impact = "MXN" if country.lower() == "mexico" else "USD"
+
+        raw_date = row.get("Date")
+        release_time = self._parse_dt(raw_date)
+        actual = _clean(row.get("Actual"))
+        status = "released" if actual not in (None, "") else "upcoming"
+
+        return {
+            "event": name,
+            "country": "MX" if currency_impact == "MXN" else "US",
+            "release_time": release_time,
+            "forecast": _clean(row.get("Forecast")) or _clean(row.get("TEForecast")),
+            "previous": _clean(row.get("Previous")),
+            "actual": actual,
+            "importance": self._IMPORTANCE.get(_as_int(row.get("Importance")), "low"),
+            "currency_impact": currency_impact,
+            "status": status,
+        }
+
+    @staticmethod
+    def _parse_dt(raw) -> str | None:
+        if not raw:
+            return None
+        text = str(raw).replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return _iso(dt)
+        except ValueError:
+            return str(raw)
+
+
+class FinnhubCalendarProvider(CalendarProvider):  # pragma: no cover - future stub
+    source = "finnhub"
+
+    def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
     def get_events(self) -> list[dict]:
-        # TODO: call an economic-calendar API and normalize to the schema above.
-        raise NotImplementedError("LiveCalendarProvider not implemented yet.")
+        raise NotImplementedError("Finnhub calendar provider not implemented yet.")
 
 
-def get_calendar_provider(settings=None) -> CalendarProvider:
-    from app.config import get_settings
+def _clean(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
+
+def _as_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
+# Registry so new providers plug in via CALENDAR_PROVIDER without touching callers.
+_LIVE_CALENDAR_PROVIDERS = {
+    "tradingeconomics": TradingEconomicsCalendarProvider,
+    "finnhub": FinnhubCalendarProvider,
+}
+
+
+class ResilientCalendarProvider(CalendarProvider):
+    """Wraps a live provider with mock fallback and dynamic source tagging.
+
+    ``.source`` is ``"live"`` after a successful fetch, otherwise ``"fallback"``.
+    Results are cached for the life of the instance so repeated
+    ``get_upcoming`` / ``get_recent_released`` calls only fetch once.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.source = "fallback"
+        live_cls = _LIVE_CALENDAR_PROVIDERS.get(
+            (settings.calendar_provider or "tradingeconomics").lower(),
+            TradingEconomicsCalendarProvider,
+        )
+        self._live = live_cls(settings)
+        self._mock = MockCalendarProvider()
+        self._cache: list[dict] | None = None
+
+    def get_events(self) -> list[dict]:
+        if self._cache is not None:
+            return self._cache
+        try:
+            events = self._live.get_events()
+            self.source = "live"
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully
+            logger.warning(
+                "Live calendar fetch failed (%s); using mock fallback.",
+                scrub(str(exc), self.settings.calendar_api_key),
+            )
+            self.source = "fallback"
+            events = self._mock.get_events()
+        self._cache = events
+        return events
+
+
+def get_calendar_provider(settings: Settings | None = None) -> CalendarProvider:
     settings = settings or get_settings()
     if settings.is_mock or not settings.calendar_api_key:
         return MockCalendarProvider()
-    return LiveCalendarProvider(settings)
+    return ResilientCalendarProvider(settings)

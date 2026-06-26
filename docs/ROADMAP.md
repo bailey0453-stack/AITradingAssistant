@@ -32,15 +32,34 @@ context, richer analysis, a timeline, and a stored recommendation dataset.
 - [x] Endpoints: `/news/recent`, `/calendar/upcoming`, `/calendar/released`,
       `/timeline/usdmxn`; expanded dashboard.
 
-### Phase 2 follow-ups (live providers)
+## Phase 3 — Live market intelligence (current)
 
-- [ ] Implement `LiveNewsProvider` (real news API → schema + sentiment tagging).
-- [ ] Implement `LiveCalendarProvider` (real economic-calendar API).
+Goal: replace mock news and calendar with live providers (mock fallback intact)
+and make the analysis explain itself.
+
+- [x] Live news provider interface + **NewsAPI.org** implementation; Finnhub /
+      FMP interface stubs selectable via `NEWS_PROVIDER`. Topic-filtered to
+      USD/MXN drivers; items classified + stored; mock fallback on error/no key.
+- [x] Live economic calendar interface + **Trading Economics** implementation;
+      Finnhub stub via `CALENDAR_PROVIDER`. Mock fallback on error/no key.
+- [x] Context builder adds events released in the **last 24h**.
+- [x] Analysis explains itself: `market_drivers` (per-indicator USD+/MXN+ lean),
+      `bullish_factors`, `bearish_factors`, `upcoming_risks`, and a summary that
+      names confirming vs opposing indicators.
+- [x] Persist the new explanatory fields (backtesting dataset grows).
+- [x] Dashboard sections: Market Drivers, Latest News, Upcoming Events, Recent
+      Releases (24h), Key Risks.
+- [x] Secret hygiene: keys sent via headers where possible and scrubbed from all
+      error strings; smoke tests assert no key leaks.
+
+### Phase 3 follow-ups
+
+- [ ] Real sentiment scoring for news (currently a placeholder lean).
 - [ ] Live macro (FRED for DXY/2Y/10Y; oil/gold/VIX/S&P feeds) — currently mocked.
 - [ ] Scheduled background polling to build a real time series.
 - [ ] Caching + rate-limit handling for providers.
 
-## Phase 3 — Smarter analysis
+## Phase 4 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
 - [ ] Real historical_similarity scoring over stored snapshots.
@@ -48,7 +67,7 @@ context, richer analysis, a timeline, and a stored recommendation dataset.
 - [ ] Backtesting harness against stored recommendation snapshots.
 - [ ] Confidence calibration.
 
-## Phase 4 — Delivery & access
+## Phase 5 — Delivery & access
 
 - [ ] Auth (API keys / sessions).
 - [ ] Alerts (email / push / WhatsApp) on signal changes.

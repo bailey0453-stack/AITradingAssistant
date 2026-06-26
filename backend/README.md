@@ -1,9 +1,10 @@
-# AI Trading Assistant — Backend (Phase 2)
+# AI Trading Assistant — Backend (Phase 3)
 
 Backend-only **USD/MXN market intelligence engine**. It collects market + macro
-inputs, news, and an economic calendar, builds a structured context, runs an
-analysis engine, persists everything (market snapshots, news, and full
-recommendation snapshots), and exposes a JSON API plus a dashboard.
+inputs, **live news**, and a **live economic calendar**, builds a structured
+context, runs an analysis engine that explains *why* it sees an edge, persists
+everything (market snapshots, news, and full recommendation snapshots), and
+exposes a JSON API plus a dashboard.
 
 > Scope: **no iPhone app, no SaaS billing, no auto-trading.** This is a
 > read-only intelligence service that produces a directional view, not orders.
@@ -20,18 +21,24 @@ recommendation snapshots), and exposes a JSON API plus a dashboard.
   - (`/market/usdmxn/history`, `/analysis/usdmxn/history`, `/calendar/released`.)
 - **Expanded market snapshot**: USD/MXN, inverse, DXY, US 2Y, US 10Y, WTI oil,
   gold, S&P futures, VIX, provider, source, timestamp.
-- **News ingestion**: modular provider; items carry headline, summary, source,
-  url, published_at, sentiment, affected_currencies, importance, tags. Stored in
-  the DB (deduplicated).
-- **Economic calendar**: tracks US CPI/PPI/NFP/GDP/Retail Sales/FOMC/Fed
+- **News ingestion (live)**: modular provider; **NewsAPI.org** is the initial
+  live implementation (Finnhub / FMP are interface stubs). Items carry headline,
+  summary, source, url, published_at, sentiment *(placeholder)*,
+  affected_currencies, importance, tags. Filtered to USD/MXN-moving topics and
+  stored in the DB (deduplicated). Falls back to mock news if no key or on error.
+- **Economic calendar (live)**: modular provider; **Trading Economics** is the
+  initial live implementation. Tracks US CPI/PPI/NFP/GDP/Retail Sales/FOMC/Fed
   speeches/Treasury auctions and Banxico/Mexico CPI/GDP/employment. Events carry
   forecast/previous/actual/importance/currency impact and `upcoming|released`.
-- **Context builder** assembles market + recent news + upcoming/released events
-  + recent analyses into one object for the analyzer.
+  Falls back to mock events if no key or on error.
+- **Context builder** assembles market + recent news + upcoming events + events
+  released in the **last 24h** + recent analyses into one object for the analyzer.
 - **Richer analysis**: direction, trade_score, market_bias, confidence,
-  momentum, historical_similarity (placeholder), risk_level, summary,
-  key_drivers, entry/target/stretch/stop, expected_move, expected_duration,
-  invalidation_level, risk_notes — plus an **event timeline**.
+  momentum, historical_similarity (placeholder), risk_level, summary (now
+  explains which indicators confirm vs push back), key_drivers, **market_drivers**
+  (per-indicator USD+/MXN+ lean), **bullish_factors**, **bearish_factors**,
+  **upcoming_risks**, entry/target/stretch/stop, expected_move,
+  expected_duration, invalidation_level, risk_notes — plus an **event timeline**.
 - **Recommendation store**: every analysis persists market + news + calendar
   context + the recommendation — the future backtesting / similarity dataset.
 - Modular provider layer with **mock fallback** everywhere; SQLite by default,
@@ -46,11 +53,12 @@ request → router → services → models (DB)
 routers/         thin HTTP layer (market, analysis, news, calendar, timeline, health)
 services/
   market_data.py   USD/MXN + macro providers (mock | live OXR | fallback)
-  news.py          news provider (mock | live stub)
-  calendar.py      economic calendar provider (mock | live stub)
+  news.py          news provider (mock | live NewsAPI | fallback; Finnhub/FMP stubs)
+  calendar.py      economic calendar provider (mock | live Trading Economics | fallback)
   signals.py       pure directional heuristics (deterministic, testable)
-  ai_analysis.py   analyzer composing the recommendation (rule-based | OpenAI stub)
+  ai_analysis.py   analyzer composing the recommendation + explanation (rule-based | OpenAI stub)
   context_builder.py  gathers context + builds the event timeline
+  secrets.py       scrubs API keys out of any log/error string
 models/          MarketSnapshot, NewsItem, AnalysisSnapshot (SQLAlchemy)
 ```
 
@@ -66,14 +74,17 @@ Each external dependency sits behind an interface + factory, selected by config:
 | Service | Factory | Live when | Else |
 | --- | --- | --- | --- |
 | Market (USD/MXN) | `get_market_data()` | `USE_MOCK_DATA=false` **and** `FX_API_KEY` set | `mock`; `fallback` on error |
-| News | `get_news_provider()` | `USE_MOCK_DATA=false` **and** `NEWS_API_KEY` set | mock |
-| Calendar | `get_calendar_provider()` | `USE_MOCK_DATA=false` **and** `CALENDAR_API_KEY` set | mock |
+| News | `get_news_provider()` | `USE_MOCK_DATA=false` **and** `NEWS_API_KEY` set | mock; `fallback` on error |
+| Calendar | `get_calendar_provider()` | `USE_MOCK_DATA=false` **and** `CALENDAR_API_KEY` set | mock; `fallback` on error |
 | Analyzer | `get_analyzer()` | `USE_MOCK_DATA=false` **and** `OPENAI_API_KEY` set | rule-based |
 
-Live market data degrades safely: if the FX fetch fails or the key is missing,
-the snapshot is mock data tagged `source="fallback"` and the API never breaks.
-API keys are never written to logs (the key is sent via the `Authorization`
-header and scrubbed from any error message).
+Every live provider degrades safely: if a fetch fails or the key is missing,
+the service returns mock data (tagged `source="fallback"` for market) and never
+breaks. **API keys are never written to logs** — keys are sent via request
+headers (FX `Authorization`, NewsAPI `X-Api-Key`) or, where a provider requires
+a query param (Trading Economics), scrubbed from every outbound error string via
+`services/secrets.py`. Choose the live implementation with `NEWS_PROVIDER` /
+`CALENDAR_PROVIDER`.
 
 ## Project layout
 
@@ -139,8 +150,12 @@ Then open:
   "momentum_status": "Bullish USD",
   "risk_level": "elevated",
   "historical_similarity": { "status": "placeholder", "score": null, "sample_size": 4 },
-  "summary": "Bias favors USD strength vs MXN. Spot ~17.93 ...",
+  "summary": "Bias favors USD strength vs MXN. Spot ~17.93 ... Confirming: DXY, US 10Y yield. Pushing back: S&P futures. ...",
   "key_drivers": ["DXY firmer (104.6)", "US 10Y yield up (4.38%)"],
+  "market_drivers": [ { "name": "DXY", "value": 104.6, "lean": "USD+", "note": "US dollar index vs recent baseline" } ],
+  "bullish_factors": ["DXY 104.6 → supports USD", "Data: US CPI (MoM) beat forecast (USD-positive)"],
+  "bearish_factors": ["S&P futures 5467 → supports MXN"],
+  "upcoming_risks": [ { "event": "US Retail Sales (MoM)", "importance": "high", "hours_away": 48.0, "note": "Could trigger volatility / invalidate the view" } ],
   "entry": 17.93,
   "target": 18.02, "stretch_target": 18.13, "stop": 17.86,
   "expected_move": "+0.50% (spot 17.93 -> 18.02)",
@@ -149,7 +164,7 @@ Then open:
   "risk_notes": "Mocked data in use; ... High-impact event(s) within 48h: ...",
   "timeline": [ { "type": "event", "label": "US CPI (MoM) released", "detail": "actual 0.4% vs forecast 0.3%" } ],
   "market": { "usdmxn": 17.93, "inverse_usdmxn": 0.05577, "dxy": 104.6, "us2y": 4.71, "us10y": 4.38, "oil": 75.1, "gold": 2381.2, "vix": 15.1, "provider": "mock", "source": "mock" },
-  "context": { "upcoming_events": [], "released_events": [], "recent_news": [] }
+  "context": { "upcoming_events": [], "released_events": [], "released_last_24h": [], "recent_news": [] }
 }
 ```
 
@@ -164,8 +179,12 @@ All config is environment-driven (see `.env.example`):
 | `FX_API_KEY` | FX provider key/App ID for **live USD/MXN** | empty |
 | `FX_PROVIDER` | FX provider name | `openexchangerates` |
 | `FX_BASE_URL` | Override FX endpoint (optional) | OXR `latest.json` |
-| `NEWS_API_KEY` | News provider key for **live news** | empty |
-| `CALENDAR_API_KEY` | Economic calendar provider key | empty |
+| `NEWS_API_KEY` | News provider key for **live news** (NewsAPI.org) | empty |
+| `NEWS_PROVIDER` | Live news implementation (`newsapi` \| `finnhub` \| `fmp`) | `newsapi` |
+| `NEWS_BASE_URL` | Override the news endpoint (optional) | NewsAPI `/v2/everything` |
+| `CALENDAR_API_KEY` | Economic calendar provider key (Trading Economics) | empty |
+| `CALENDAR_PROVIDER` | Live calendar implementation (`tradingeconomics` \| `finnhub`) | `tradingeconomics` |
+| `CALENDAR_BASE_URL` | Override the calendar endpoint (optional) | Trading Economics |
 | `HTTP_TIMEOUT_SECONDS` | HTTP timeout for provider calls | `8.0` |
 | `MARKET_DATA_API_KEY` | Alternate market feed (future) | empty |
 | `FRED_API_KEY` | DXY / treasury yields (future) | empty |
@@ -206,6 +225,24 @@ DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/aitrading
 
 (Install a driver, e.g. `pip install "psycopg[binary]"`.)
 
+### Live news (NewsAPI.org)
+
+1. Get a free key: https://newsapi.org/register
+2. In `.env` set `USE_MOCK_DATA=false` and `NEWS_API_KEY=your_key`.
+3. `GET /news/recent` now returns live, topic-filtered headlines; items are
+   classified (affected currencies, importance, tags) and stored. Sentiment is a
+   **placeholder** (defaults to neutral) until a real scorer lands.
+
+### Live economic calendar (Trading Economics)
+
+1. Get an API key: https://tradingeconomics.com/api/
+2. In `.env` set `USE_MOCK_DATA=false` and `CALENDAR_API_KEY=your_key`.
+3. `GET /calendar/upcoming` / `/calendar/released` now return live US + Mexico
+   events mapped to the shared schema.
+
+If either key is missing or a fetch fails, the service automatically falls back
+to mock data so the API never breaks.
+
 ## Going live (plugging in real data)
 
 The provider interfaces are designed so live integrations drop in without
@@ -213,11 +250,14 @@ touching routers or storage:
 
 - `services/market_data.py` → `LiveMarketDataProvider` (USD/MXN) is **implemented**
   (Open Exchange Rates). Macro indicators are still mocked placeholders.
-- `services/news.py` → implement `LiveNewsProvider`.
+- `services/news.py` → `NewsAPIProvider` is **implemented**; `FinnhubNewsProvider`
+  / `FMPNewsProvider` are stubs selectable via `NEWS_PROVIDER`.
+- `services/calendar.py` → `TradingEconomicsCalendarProvider` is **implemented**;
+  `FinnhubCalendarProvider` is a stub selectable via `CALENDAR_PROVIDER`.
 - `services/ai_analysis.py` → implement `OpenAIAnalyzer.analyze()`.
 
-`get_market_data()` orchestrates live-with-fallback, so the service never breaks
-if a provider is down — it returns mock data tagged `source="fallback"`.
+Each orchestrator runs live-with-fallback, so the service never breaks if a
+provider is down — it returns mock data (market is tagged `source="fallback"`).
 
 ## Deploy to Vercel
 
@@ -239,6 +279,13 @@ serves the FastAPI app as a Python serverless function.
 | `USE_MOCK_DATA` | `false` | Enables live fetches |
 | `FX_PROVIDER` | `openexchangerates` | FX provider name |
 | `FX_API_KEY` | `<your Open Exchange Rates App ID>` | **Secret** — set in Vercel, never commit |
+
+Optional live providers (omit to keep mock news/calendar):
+
+| Variable | Value | Notes |
+| --- | --- | --- |
+| `NEWS_API_KEY` | `<NewsAPI.org key>` | **Secret** — enables live news |
+| `CALENDAR_API_KEY` | `<Trading Economics key>` | **Secret** — enables live calendar |
 
 Optional: set `DATABASE_URL` to a Postgres URL for durable storage. By default
 the app uses SQLite; on Vercel it writes to `/tmp/aitrading.db`, which is
@@ -266,8 +313,10 @@ Local development is unchanged — none of this affects `uvicorn app.main:app`.
 
 ## Tests
 
-A dependency-free smoke test covers `/health`, `/market/usdmxn`,
-`/analysis/usdmxn`, and the `mock` / `live` / `fallback` source tagging:
+A dependency-free smoke test covers all endpoints, the expanded analysis schema
+(`market_drivers`, `bullish_factors`, `bearish_factors`, `upcoming_risks`), the
+`mock` / `live` / `fallback` source tagging for market **and** news **and**
+calendar, and asserts that **API keys are scrubbed from error messages**:
 
 ```bash
 cd backend

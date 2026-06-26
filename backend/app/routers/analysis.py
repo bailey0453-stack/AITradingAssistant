@@ -29,6 +29,10 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "risk_level": row.risk_level,
         "summary": row.summary,
         "key_drivers": row.key_drivers,
+        "market_drivers": row.market_drivers,
+        "bullish_factors": row.bullish_factors,
+        "bearish_factors": row.bearish_factors,
+        "upcoming_risks": row.upcoming_risks,
         "entry": row.entry,
         "target": row.target,
         "stretch_target": row.stretch_target,
@@ -57,6 +61,7 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         news=context["recent_news"],
         calendar=context["upcoming_events"] + context["released_events"],
         recent_analyses=context["recent_analyses"],
+        context=context,
     )
 
     analysis = AnalysisSnapshot(
@@ -69,6 +74,10 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         risk_level=result["risk_level"],
         summary=result["summary"],
         key_drivers=result["key_drivers"],
+        market_drivers=result["market_drivers"],
+        bullish_factors=result["bullish_factors"],
+        bearish_factors=result["bearish_factors"],
+        upcoming_risks=result["upcoming_risks"],
         entry=result["entry"],
         target=result["target"],
         stretch_target=result["stretch_target"],
@@ -82,6 +91,8 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         calendar_context={
             "upcoming": context["upcoming_events"],
             "released": context["released_events"],
+            "released_last_24h": context.get("released_last_24h", []),
+            "source": context.get("calendar_source", "mock"),
         },
         timeline=timeline,
         model=result.get("model", "mock-rules-v1"),
@@ -95,6 +106,7 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
     payload["context"] = {
         "upcoming_events": context["upcoming_events"],
         "released_events": context["released_events"],
+        "released_last_24h": context.get("released_last_24h", []),
         "recent_news": context["recent_news"],
     }
     return payload

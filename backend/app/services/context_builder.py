@@ -12,6 +12,7 @@ analysis endpoint never breaks.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -100,10 +101,11 @@ def build_context(
     cal = get_calendar_provider(settings)
 
     upcoming = _safe(lambda: cal.get_upcoming(limit=8), [])
-    released = _safe(lambda: cal.get_recent_released(limit=6), [])
+    released = _safe(lambda: cal.get_recent_released(limit=8), [])
+    released_24h = _within_last_24h(released)
 
-    db_news = [serialize_news_row(r) for r in recent_news_rows(db, limit=8)]
-    recent_news = db_news or list(fresh_news or [])
+    db_news = [serialize_news_row(r) for r in recent_news_rows(db, limit=16)]
+    recent_news = _dedupe_news(db_news or list(fresh_news or []))[:8]
     recent_analyses = [_brief_analysis(r) for r in recent_analyses_rows(db, limit=5)]
 
     return {
@@ -111,8 +113,42 @@ def build_context(
         "recent_news": recent_news,
         "upcoming_events": upcoming,
         "released_events": released,
+        "released_last_24h": released_24h,
         "recent_analyses": recent_analyses,
+        "calendar_source": getattr(cal, "source", "mock"),
     }
+
+
+def _dedupe_news(items: list[dict]) -> list[dict]:
+    """Drop repeated headlines (mock re-runs restamp published_at each call)."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for item in items or []:
+        key = (item.get("headline") or "").strip().lower()
+        if key and key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _within_last_24h(events: list[dict]) -> list[dict]:
+    """Filter released events to those within the last 24 hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    out: list[dict] = []
+    for ev in events or []:
+        rt = ev.get("release_time")
+        if not rt:
+            continue
+        try:
+            when = datetime.fromisoformat(str(rt).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when >= cutoff:
+            out.append(ev)
+    return out
 
 
 def build_timeline(db: Session, context: dict) -> list[dict]:

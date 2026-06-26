@@ -17,7 +17,10 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import app
+from app.services import calendar as calendar_svc
 from app.services import market_data
+from app.services import news as news_svc
+from app.services.secrets import scrub
 
 _passed = 0
 _failed = 0
@@ -96,10 +99,19 @@ def test_endpoints():
                 "invalidation_level",
                 "risk_notes",
                 "timeline",
+                "market_drivers",
+                "bullish_factors",
+                "bearish_factors",
+                "upcoming_risks",
             ):
                 assert key in body, f"analysis missing {key}"
             assert body["market"]["source"] in {"mock", "live", "fallback"}
             assert isinstance(body["timeline"], list)
+            assert isinstance(body["market_drivers"], list)
+            assert isinstance(body["bullish_factors"], list)
+            assert isinstance(body["bearish_factors"], list)
+            assert isinstance(body["upcoming_risks"], list)
+            assert "released_last_24h" in body["context"]
 
         def news_ok():
             r = c.get("/news/recent")
@@ -146,7 +158,7 @@ def test_endpoints():
 
         check("/health returns ok", health_ok)
         check("/market/usdmxn returns expanded data", market_ok)
-        check("/analysis/usdmxn returns full Phase 2 schema", analysis_ok)
+        check("/analysis/usdmxn returns full Phase 3 schema", analysis_ok)
         check("/news/recent returns structured news", news_ok)
         check("/calendar/upcoming returns events", calendar_ok)
         check("/timeline/usdmxn returns timeline", timeline_ok)
@@ -197,10 +209,190 @@ def test_source_tagging():
     check("source=fallback when fetch raises", source_fallback_on_error)
 
 
+def test_news_provider():
+    SECRET = "news-secret-key-123"
+
+    def news_mock_when_no_key():
+        p = news_svc.get_news_provider(Settings(use_mock_data=False, news_api_key=None))
+        assert isinstance(p, news_svc.MockNewsProvider), type(p)
+        assert p.source == "mock"
+
+    def news_live_ok():
+        articles = {
+            "status": "ok",
+            "articles": [
+                {
+                    "title": "Fed signals higher-for-longer as CPI runs hot",
+                    "description": "Treasury yields climbed after inflation data.",
+                    "source": {"name": "Reuters"},
+                    "url": "https://example.com/a",
+                    "publishedAt": "2026-06-25T12:00:00Z",
+                }
+            ],
+        }
+        original = news_svc.httpx.get
+        news_svc.httpx.get = lambda *a, **k: _FakeResponse(articles)
+        try:
+            p = news_svc.get_news_provider(
+                Settings(use_mock_data=False, news_api_key=SECRET)
+            )
+            items = p.get_news()
+            assert p.source == "live", p.source
+            assert items and items[0]["headline"].startswith("Fed signals")
+            assert items[0]["importance"] == "high"  # CPI/Fed -> high
+            for key in ("sentiment", "affected_currencies", "importance", "tags"):
+                assert key in items[0]
+        finally:
+            news_svc.httpx.get = original
+
+    def news_fallback_on_error():
+        def boom(*a, **k):
+            raise RuntimeError(f"network blew up with {SECRET} in the message")
+
+        original = news_svc.httpx.get
+        news_svc.httpx.get = boom
+        try:
+            p = news_svc.get_news_provider(
+                Settings(use_mock_data=False, news_api_key=SECRET)
+            )
+            items = p.get_news()
+            assert p.source == "fallback", p.source
+            assert items, "fallback should still return mock news"
+        finally:
+            news_svc.httpx.get = original
+
+    def news_provider_scrubs_secret():
+        def boom(*a, **k):
+            raise RuntimeError(f"boom url contains app_id={SECRET}")
+
+        original = news_svc.httpx.get
+        news_svc.httpx.get = boom
+        try:
+            prov = news_svc.NewsAPIProvider(
+                Settings(use_mock_data=False, news_api_key=SECRET)
+            )
+            try:
+                prov.get_news()
+                raise AssertionError("expected RuntimeError")
+            except RuntimeError as exc:
+                assert SECRET not in str(exc), "secret leaked into error message"
+        finally:
+            news_svc.httpx.get = original
+
+    check("news mock when live wanted but no key", news_mock_when_no_key)
+    check("news source=live on successful fetch", news_live_ok)
+    check("news source=fallback when fetch raises", news_fallback_on_error)
+    check("news provider scrubs secret from errors", news_provider_scrubs_secret)
+
+
+def test_calendar_provider():
+    SECRET = "cal-secret-key-456"
+
+    def cal_mock_when_no_key():
+        p = calendar_svc.get_calendar_provider(
+            Settings(use_mock_data=False, calendar_api_key=None)
+        )
+        assert isinstance(p, calendar_svc.MockCalendarProvider), type(p)
+        assert p.source == "mock"
+
+    def cal_live_ok():
+        rows = [
+            {
+                "Country": "United States",
+                "Event": "Inflation Rate YoY",
+                "Date": "2026-06-25T12:30:00",
+                "Actual": "3.4%",
+                "Forecast": "3.3%",
+                "Previous": "3.5%",
+                "Importance": 3,
+            },
+            {
+                "Country": "Mexico",
+                "Event": "GDP Growth Rate QoQ",
+                "Date": "2026-06-28T12:00:00",
+                "Actual": "",
+                "Forecast": "0.3%",
+                "Previous": "0.2%",
+                "Importance": 2,
+            },
+        ]
+        original = calendar_svc.httpx.get
+        calendar_svc.httpx.get = lambda *a, **k: _FakeResponse(rows)
+        try:
+            p = calendar_svc.get_calendar_provider(
+                Settings(use_mock_data=False, calendar_api_key=SECRET)
+            )
+            events = p.get_events()
+            assert p.source == "live", p.source
+            us = [e for e in events if e["country"] == "US"][0]
+            assert us["importance"] == "high"
+            assert us["status"] == "released"
+            mx = [e for e in events if e["country"] == "MX"][0]
+            assert mx["currency_impact"] == "MXN"
+            assert mx["status"] == "upcoming"
+        finally:
+            calendar_svc.httpx.get = original
+
+    def cal_fallback_on_error():
+        def boom(*a, **k):
+            raise RuntimeError(f"calendar down ({SECRET})")
+
+        original = calendar_svc.httpx.get
+        calendar_svc.httpx.get = boom
+        try:
+            p = calendar_svc.get_calendar_provider(
+                Settings(use_mock_data=False, calendar_api_key=SECRET)
+            )
+            events = p.get_events()
+            assert p.source == "fallback", p.source
+            assert events, "fallback should return mock events"
+        finally:
+            calendar_svc.httpx.get = original
+
+    def cal_provider_scrubs_secret():
+        def boom(*a, **k):
+            raise RuntimeError(f"fail c={SECRET}")
+
+        original = calendar_svc.httpx.get
+        calendar_svc.httpx.get = boom
+        try:
+            prov = calendar_svc.TradingEconomicsCalendarProvider(
+                Settings(use_mock_data=False, calendar_api_key=SECRET)
+            )
+            try:
+                prov.get_events()
+                raise AssertionError("expected RuntimeError")
+            except RuntimeError as exc:
+                assert SECRET not in str(exc), "secret leaked into error message"
+        finally:
+            calendar_svc.httpx.get = original
+
+    check("calendar mock when live wanted but no key", cal_mock_when_no_key)
+    check("calendar source=live on successful fetch", cal_live_ok)
+    check("calendar source=fallback when fetch raises", cal_fallback_on_error)
+    check("calendar provider scrubs secret from errors", cal_provider_scrubs_secret)
+
+
+def test_scrub():
+    def scrubs():
+        out = scrub("token=abc123 failed", "abc123")
+        assert "abc123" not in out
+        assert "***REDACTED***" in out
+
+    def scrubs_noop_without_secret():
+        assert scrub("nothing secret here", None) == "nothing secret here"
+
+    check("scrub redacts secret", scrubs)
+    check("scrub is a no-op without a secret", scrubs_noop_without_secret)
+
+
 def main():
     print("Running AI Trading Assistant smoke tests...")
     test_endpoints()
     test_source_tagging()
+    test_news_provider()
+    test_calendar_provider()
+    test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
 

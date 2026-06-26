@@ -40,8 +40,8 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.1.0",
-    description="Backend-only USD/MXN market intelligence assistant (Phase 1).",
+    version="0.3.0",
+    description="Backend-only USD/MXN market intelligence assistant (Phase 3).",
     lifespan=lifespan,
 )
 
@@ -88,12 +88,23 @@ DASHBOARD_HTML = """<!doctype html>
     .tl .item { margin-bottom:12px; }
     .tl .label { font-weight:600; }
     .src { font-size:11px; padding:2px 7px; border-radius:6px; background:#1b2542; color:#9fb3d9; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #1d2740; }
+    th { color:#8aa0c6; font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:.04em; }
+    .lean { font-weight:700; }
+    .lean-usd { color:#5be3a0; }
+    .lean-mxn { color:#ff9bb5; }
+    .lean-neutral { color:#9fb3d9; }
+    .fac-bull li { color:#9be7c0; }
+    .fac-bear li { color:#ffb3c6; }
+    a { color:#7aa7ff; text-decoration:none; }
+    a:hover { text-decoration:underline; }
   </style>
 </head>
 <body>
   <header>
-    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 2 · intelligence engine)</span></h1>
-    <div><span id="src" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
+    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 3 · live market intelligence)</span></h1>
+    <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
   </header>
   <main>
     <div class="card">
@@ -147,16 +158,49 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="muted" id="risknotes" style="margin-top:12px"></p>
     </div>
 
+    <div class="card">
+      <h2>Market drivers</h2>
+      <table>
+        <thead><tr><th>Indicator</th><th>Value</th><th>Lean</th><th>Why it matters</th></tr></thead>
+        <tbody id="mdrivers"></tbody>
+      </table>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Bullish factors (USD)</h2>
+        <ul id="bull" class="fac-bull"></ul>
+      </div>
+      <div class="card">
+        <h2>Bearish factors (MXN)</h2>
+        <ul id="bear" class="fac-bear"></ul>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Key risks (upcoming)</h2>
+      <ul id="risks"></ul>
+    </div>
+
     <div class="grid2">
       <div class="card">
         <h2>Event timeline</h2>
         <div class="tl" id="timeline"></div>
       </div>
       <div class="card">
-        <h2>News &amp; upcoming events</h2>
+        <h2>Latest news</h2>
         <ul id="news"></ul>
-        <div class="k muted" style="margin-top:8px">Upcoming</div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Upcoming events</h2>
         <ul id="events"></ul>
+      </div>
+      <div class="card">
+        <h2>Recent releases (24h)</h2>
+        <ul id="releases"></ul>
       </div>
     </div>
     <p class="muted" id="ts"></p>
@@ -190,6 +234,35 @@ DASHBOARD_HTML = """<!doctype html>
       (d.key_drivers || []).forEach(x => { const li=document.createElement('li'); li.textContent=x; ul.appendChild(li); });
       $('risknotes').textContent = d.risk_notes || '';
 
+      const leanClass = l => l === 'USD+' ? 'lean-usd' : (l === 'MXN+' ? 'lean-mxn' : 'lean-neutral');
+      const md = $('mdrivers'); md.innerHTML = '';
+      (d.market_drivers || []).forEach(x => {
+        const tr=document.createElement('tr');
+        tr.innerHTML = '<td>'+(x.name||'')+'</td><td>'+(x.value ?? '—')+'</td>'+
+          '<td class="lean '+leanClass(x.lean)+'">'+(x.lean||'neutral')+'</td>'+
+          '<td class="muted">'+(x.note||'')+'</td>';
+        md.appendChild(tr);
+      });
+      if (!(d.market_drivers||[]).length) md.innerHTML = '<tr><td colspan="4" class="muted">No driver data.</td></tr>';
+
+      const listInto = (id, arr, empty) => {
+        const el=$(id); el.innerHTML='';
+        (arr||[]).forEach(x => { const li=document.createElement('li'); li.textContent=x; el.appendChild(li); });
+        if (!(arr||[]).length) el.innerHTML = '<li class="muted">'+empty+'</li>';
+      };
+      listInto('bull', d.bullish_factors, 'No USD-supportive factors right now.');
+      listInto('bear', d.bearish_factors, 'No MXN-supportive factors right now.');
+
+      const rk = $('risks'); rk.innerHTML='';
+      (d.upcoming_risks || []).forEach(r => {
+        const li=document.createElement('li');
+        const when = r.hours_away != null ? (' · ~'+r.hours_away+'h') : '';
+        li.innerHTML = (r.event||'') + ' <span class="pill '+(r.importance||'')+'">'+(r.importance||'')+'</span>'+
+          ' <span class="muted">('+(r.country||'')+when+') — '+(r.note||'')+'</span>';
+        rk.appendChild(li);
+      });
+      if (!(d.upcoming_risks||[]).length) rk.innerHTML = '<li class="muted">No high-impact events flagged.</li>';
+
       const tl = $('timeline'); tl.innerHTML = '';
       (d.timeline || []).forEach(e => {
         const div=document.createElement('div'); div.className='item';
@@ -200,17 +273,34 @@ DASHBOARD_HTML = """<!doctype html>
 
       const ctx = d.context || {};
       const nu = $('news'); nu.innerHTML='';
-      (ctx.recent_news||[]).slice(0,5).forEach(n => {
+      (ctx.recent_news||[]).slice(0,6).forEach(n => {
         const li=document.createElement('li');
-        li.innerHTML = (n.headline||'') + ' <span class="pill '+(n.importance||'')+'">'+(n.importance||'')+'</span>';
+        const head = n.url ? '<a href="'+n.url+'" target="_blank" rel="noopener">'+(n.headline||'')+'</a>' : (n.headline||'');
+        li.innerHTML = head + ' <span class="pill '+(n.importance||'')+'">'+(n.importance||'')+'</span>'+
+          ' <span class="muted">'+(n.source||'')+'</span>';
         nu.appendChild(li);
       });
+      if (!(ctx.recent_news||[]).length) nu.innerHTML = '<li class="muted">No recent news.</li>';
+
       const ev = $('events'); ev.innerHTML='';
-      (ctx.upcoming_events||[]).slice(0,5).forEach(e => {
+      (ctx.upcoming_events||[]).slice(0,8).forEach(e => {
         const li=document.createElement('li');
-        li.innerHTML = (e.event||'') + ' <span class="muted">('+(e.country||'')+', '+(e.importance||'')+')</span>';
+        li.innerHTML = (e.event||'') + ' <span class="muted">('+(e.country||'')+', '+(e.importance||'')+
+          ', fc '+(e.forecast ?? 'n/a')+')</span>';
         ev.appendChild(li);
       });
+      if (!(ctx.upcoming_events||[]).length) ev.innerHTML = '<li class="muted">No upcoming events.</li>';
+
+      const rel = $('releases'); rel.innerHTML='';
+      (ctx.released_last_24h||[]).forEach(e => {
+        const li=document.createElement('li');
+        li.innerHTML = (e.event||'') + ' <span class="muted">(act '+(e.actual ?? 'n/a')+
+          ' vs fc '+(e.forecast ?? 'n/a')+')</span>';
+        rel.appendChild(li);
+      });
+      if (!(ctx.released_last_24h||[]).length) rel.innerHTML = '<li class="muted">No releases in the last 24h.</li>';
+
+      $('newssrc').textContent = 'news items: ' + (ctx.recent_news||[]).length;
       $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
     }
     refresh();
