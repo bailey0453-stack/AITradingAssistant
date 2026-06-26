@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     fred_api_key: Optional[str] = None
     # News
     news_api_key: Optional[str] = None
+    # Economic calendar
+    calendar_api_key: Optional[str] = None
     # AI model (e.g. OpenAI) for narrative analysis
     openai_api_key: Optional[str] = None
     ai_model: str = "gpt-4o-mini"

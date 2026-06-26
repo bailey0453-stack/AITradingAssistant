@@ -1,10 +1,14 @@
 # AI Trading Assistant
 
-A USD/MXN market intelligence assistant. **Phase 1 is backend-only**: collect
-market + macro inputs, run an analysis engine, persist snapshots, and serve a
-small JSON API (plus an optional dashboard).
+A USD/MXN market intelligence engine (backend-only). It collects market + macro
+inputs, news, and an economic calendar, builds context, runs an analysis engine,
+persists market/news/recommendation snapshots, and serves a JSON API plus a
+dashboard.
 
-Not in Phase 1: iPhone app, SaaS billing, auto-trading.
+Endpoints: `/health`, `/market/usdmxn`, `/analysis/usdmxn`, `/news/recent`,
+`/calendar/upcoming`, `/timeline/usdmxn`.
+
+Not in scope: iPhone app, SaaS billing, auto-trading.
 
 ## Repository layout
 

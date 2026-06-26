@@ -1,25 +1,79 @@
-# AI Trading Assistant — Backend (Phase 1)
+# AI Trading Assistant — Backend (Phase 2)
 
-Backend-only **USD/MXN market intelligence assistant**. It collects market +
-macro inputs (mocked for now), runs an analysis engine, persists snapshots, and
-exposes a small JSON API plus an optional dashboard.
+Backend-only **USD/MXN market intelligence engine**. It collects market + macro
+inputs, news, and an economic calendar, builds a structured context, runs an
+analysis engine, persists everything (market snapshots, news, and full
+recommendation snapshots), and exposes a JSON API plus a dashboard.
 
-> Phase 1 scope: **no iPhone app, no SaaS billing, no auto-trading.** This is a
+> Scope: **no iPhone app, no SaaS billing, no auto-trading.** This is a
 > read-only intelligence service that produces a directional view, not orders.
 
 ## Features
 
-- FastAPI service with three core endpoints:
+- FastAPI service. Endpoints:
   - `GET /health` — service status.
-  - `GET /market/usdmxn` — current USD/MXN snapshot + macro drivers (stored).
-  - `GET /analysis/usdmxn` — AI analysis of the latest snapshot (stored).
-- Persists **market snapshots** and **AI analysis snapshots** (SQLite by
-  default; Postgres-ready via `DATABASE_URL`).
-- Tracks: USD/MXN price, **DXY**, **US Treasury yield**, **Oil**, **News**, and
-  **Economic calendar** (placeholders, all mockable).
-- Modular provider layer — drop in real data/LLM providers without touching the
-  routers.
-- Optional HTML dashboard at `/`.
+  - `GET /market/usdmxn` — expanded market snapshot (stored).
+  - `GET /analysis/usdmxn` — full recommendation + context + timeline (stored).
+  - `GET /news/recent` — structured recent news (stored).
+  - `GET /calendar/upcoming` — upcoming tracked economic events.
+  - `GET /timeline/usdmxn` — recent event/market/signal timeline (read-only).
+  - (`/market/usdmxn/history`, `/analysis/usdmxn/history`, `/calendar/released`.)
+- **Expanded market snapshot**: USD/MXN, inverse, DXY, US 2Y, US 10Y, WTI oil,
+  gold, S&P futures, VIX, provider, source, timestamp.
+- **News ingestion**: modular provider; items carry headline, summary, source,
+  url, published_at, sentiment, affected_currencies, importance, tags. Stored in
+  the DB (deduplicated).
+- **Economic calendar**: tracks US CPI/PPI/NFP/GDP/Retail Sales/FOMC/Fed
+  speeches/Treasury auctions and Banxico/Mexico CPI/GDP/employment. Events carry
+  forecast/previous/actual/importance/currency impact and `upcoming|released`.
+- **Context builder** assembles market + recent news + upcoming/released events
+  + recent analyses into one object for the analyzer.
+- **Richer analysis**: direction, trade_score, market_bias, confidence,
+  momentum, historical_similarity (placeholder), risk_level, summary,
+  key_drivers, entry/target/stretch/stop, expected_move, expected_duration,
+  invalidation_level, risk_notes — plus an **event timeline**.
+- **Recommendation store**: every analysis persists market + news + calendar
+  context + the recommendation — the future backtesting / similarity dataset.
+- Modular provider layer with **mock fallback** everywhere; SQLite by default,
+  Postgres-ready via `DATABASE_URL`.
+- HTML dashboard at `/`.
+
+## Architecture
+
+```
+request → router → services → models (DB)
+
+routers/         thin HTTP layer (market, analysis, news, calendar, timeline, health)
+services/
+  market_data.py   USD/MXN + macro providers (mock | live OXR | fallback)
+  news.py          news provider (mock | live stub)
+  calendar.py      economic calendar provider (mock | live stub)
+  signals.py       pure directional heuristics (deterministic, testable)
+  ai_analysis.py   analyzer composing the recommendation (rule-based | OpenAI stub)
+  context_builder.py  gathers context + builds the event timeline
+models/          MarketSnapshot, NewsItem, AnalysisSnapshot (SQLAlchemy)
+```
+
+Flow for `GET /analysis/usdmxn`: capture market snapshot + news (stored) →
+`build_context` (DB news/analyses + calendar provider) → `build_timeline` →
+`analyzer.analyze(market, news, calendar, recent_analyses)` → store
+`AnalysisSnapshot` with context + timeline → return.
+
+## Provider system & mock fallback
+
+Each external dependency sits behind an interface + factory, selected by config:
+
+| Service | Factory | Live when | Else |
+| --- | --- | --- | --- |
+| Market (USD/MXN) | `get_market_data()` | `USE_MOCK_DATA=false` **and** `FX_API_KEY` set | `mock`; `fallback` on error |
+| News | `get_news_provider()` | `USE_MOCK_DATA=false` **and** `NEWS_API_KEY` set | mock |
+| Calendar | `get_calendar_provider()` | `USE_MOCK_DATA=false` **and** `CALENDAR_API_KEY` set | mock |
+| Analyzer | `get_analyzer()` | `USE_MOCK_DATA=false` **and** `OPENAI_API_KEY` set | rule-based |
+
+Live market data degrades safely: if the FX fetch fails or the key is missing,
+the snapshot is mock data tagged `source="fallback"` and the API never breaks.
+API keys are never written to logs (the key is sent via the `Authorization`
+header and scrubbed from any error message).
 
 ## Project layout
 
@@ -27,19 +81,21 @@ exposes a small JSON API plus an optional dashboard.
 AITradingAssistant/
   backend/
     app/
-      main.py            # FastAPI app + optional dashboard
+      main.py            # FastAPI app + dashboard
       config.py          # env-driven settings
-      database.py        # SQLAlchemy engine/session (SQLite/Postgres)
-      models/            # MarketSnapshot, AnalysisSnapshot
+      database.py        # SQLAlchemy engine/session (SQLite/Postgres, /tmp on serverless)
+      models/            # MarketSnapshot, NewsItem, AnalysisSnapshot
       services/
-        market_data.py   # USD/MXN + macro providers (mock + live stub)
-        news.py          # news + economic calendar providers (mock + live stub)
+        market_data.py   # USD/MXN + macro providers (mock | live | fallback)
+        news.py          # news provider (mock + live stub)
+        calendar.py      # economic calendar provider (mock + live stub)
         signals.py       # pure directional heuristics
         ai_analysis.py   # analyzer (rule-based default; OpenAI stub)
+        context_builder.py  # context assembly + event timeline
       routers/
-        health.py
-        market.py
-        analysis.py
+        health.py  market.py  analysis.py  news.py  calendar.py  timeline.py
+    api/index.py         # Vercel serverless entrypoint
+    vercel.json
     requirements.txt
     README.md
   docs/
@@ -72,21 +128,28 @@ Then open:
 
 ## Example responses
 
-`GET /analysis/usdmxn`:
+`GET /analysis/usdmxn` (abridged):
 
 ```json
 {
   "direction": "BUY_USD",
+  "trade_score": 71.2,
+  "market_bias": "USD bullish",
   "confidence": 62.4,
+  "momentum_status": "Bullish USD",
+  "risk_level": "elevated",
+  "historical_similarity": { "status": "placeholder", "score": null, "sample_size": 4 },
   "summary": "Bias favors USD strength vs MXN. Spot ~17.93 ...",
   "key_drivers": ["DXY firmer (104.6)", "US 10Y yield up (4.38%)"],
-  "target": 18.02,
-  "stretch_target": 18.13,
-  "stop": 17.86,
-  "momentum_status": "Bullish USD",
-  "risk_notes": "Mocked data in use; not investment advice. ...",
-  "model": "mock-rules-v1",
-  "market": { "usdmxn": 17.93, "dxy": 104.6, "treasury_yield": 4.38, "oil": 75.1 }
+  "entry": 17.93,
+  "target": 18.02, "stretch_target": 18.13, "stop": 17.86,
+  "expected_move": "+0.50% (spot 17.93 -> 18.02)",
+  "expected_duration": "1-2 days",
+  "invalidation_level": 17.86,
+  "risk_notes": "Mocked data in use; ... High-impact event(s) within 48h: ...",
+  "timeline": [ { "type": "event", "label": "US CPI (MoM) released", "detail": "actual 0.4% vs forecast 0.3%" } ],
+  "market": { "usdmxn": 17.93, "inverse_usdmxn": 0.05577, "dxy": 104.6, "us2y": 4.71, "us10y": 4.38, "oil": 75.1, "gold": 2381.2, "vix": 15.1, "provider": "mock", "source": "mock" },
+  "context": { "upcoming_events": [], "released_events": [], "recent_news": [] }
 }
 ```
 
@@ -101,10 +164,11 @@ All config is environment-driven (see `.env.example`):
 | `FX_API_KEY` | FX provider key/App ID for **live USD/MXN** | empty |
 | `FX_PROVIDER` | FX provider name | `openexchangerates` |
 | `FX_BASE_URL` | Override FX endpoint (optional) | OXR `latest.json` |
+| `NEWS_API_KEY` | News provider key for **live news** | empty |
+| `CALENDAR_API_KEY` | Economic calendar provider key | empty |
 | `HTTP_TIMEOUT_SECONDS` | HTTP timeout for provider calls | `8.0` |
 | `MARKET_DATA_API_KEY` | Alternate market feed (future) | empty |
 | `FRED_API_KEY` | DXY / treasury yields (future) | empty |
-| `NEWS_API_KEY` | News + calendar (future) | empty |
 | `OPENAI_API_KEY` / `AI_MODEL` | LLM-backed analysis (future) | empty |
 
 ### Live USD/MXN market data

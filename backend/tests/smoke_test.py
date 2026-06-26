@@ -60,6 +60,18 @@ def test_endpoints():
             assert body["pair"] == "USDMXN"
             assert body["usdmxn"] is not None
             assert body["source"] in {"mock", "live", "fallback"}
+            for key in (
+                "inverse_usdmxn",
+                "dxy",
+                "us2y",
+                "us10y",
+                "oil",
+                "gold",
+                "sp_futures",
+                "vix",
+                "provider",
+            ):
+                assert key in body, f"market missing {key}"
 
         def analysis_ok():
             r = c.get("/analysis/usdmxn")
@@ -67,21 +79,77 @@ def test_endpoints():
             body = r.json()
             assert body["direction"] in {"BUY_USD", "SELL_USD", "NO_TRADE"}
             for key in (
+                "trade_score",
+                "market_bias",
                 "confidence",
+                "momentum_status",
+                "historical_similarity",
+                "risk_level",
                 "summary",
                 "key_drivers",
+                "entry",
                 "target",
                 "stretch_target",
                 "stop",
-                "momentum_status",
+                "expected_move",
+                "expected_duration",
+                "invalidation_level",
                 "risk_notes",
+                "timeline",
             ):
-                assert key in body, f"missing {key}"
+                assert key in body, f"analysis missing {key}"
             assert body["market"]["source"] in {"mock", "live", "fallback"}
+            assert isinstance(body["timeline"], list)
+
+        def news_ok():
+            r = c.get("/news/recent")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            assert body["count"] >= 1
+            item = body["news"][0]
+            for key in (
+                "headline",
+                "summary",
+                "source",
+                "url",
+                "published_at",
+                "sentiment",
+                "affected_currencies",
+                "importance",
+                "tags",
+            ):
+                assert key in item, f"news item missing {key}"
+
+        def calendar_ok():
+            r = c.get("/calendar/upcoming")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            assert body["count"] >= 1
+            ev = body["events"][0]
+            for key in (
+                "event",
+                "country",
+                "release_time",
+                "importance",
+                "currency_impact",
+                "status",
+            ):
+                assert key in ev, f"calendar event missing {key}"
+            assert ev["status"] == "upcoming"
+
+        def timeline_ok():
+            r = c.get("/timeline/usdmxn")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            assert body["pair"] == "USDMXN"
+            assert isinstance(body["timeline"], list)
 
         check("/health returns ok", health_ok)
-        check("/market/usdmxn returns data", market_ok)
-        check("/analysis/usdmxn returns full schema", analysis_ok)
+        check("/market/usdmxn returns expanded data", market_ok)
+        check("/analysis/usdmxn returns full Phase 2 schema", analysis_ok)
+        check("/news/recent returns structured news", news_ok)
+        check("/calendar/upcoming returns events", calendar_ok)
+        check("/timeline/usdmxn returns timeline", timeline_ok)
 
 
 def test_source_tagging():

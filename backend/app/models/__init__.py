@@ -1,5 +1,5 @@
 """ORM models."""
 
-from app.models.snapshots import AnalysisSnapshot, MarketSnapshot
+from app.models.snapshots import AnalysisSnapshot, MarketSnapshot, NewsItem
 
-__all__ = ["MarketSnapshot", "AnalysisSnapshot"]
+__all__ = ["MarketSnapshot", "AnalysisSnapshot", "NewsItem"]

@@ -19,6 +19,7 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 
 import httpx
 
@@ -27,14 +28,26 @@ from app.config import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @dataclass
 class MarketData:
     pair: str = "USDMXN"
     usdmxn: float | None = None
+    inverse_usdmxn: float | None = None
     dxy: float | None = None  # US Dollar Index (placeholder)
-    treasury_yield: float | None = None  # US 10Y yield % (placeholder)
+    us2y: float | None = None  # US 2Y yield % (placeholder)
+    us10y: float | None = None  # US 10Y yield % (placeholder)
+    treasury_yield: float | None = None  # legacy alias of us10y
     oil: float | None = None  # WTI crude USD/bbl (placeholder)
+    gold: float | None = None  # USD/oz (placeholder)
+    sp_futures: float | None = None  # S&P 500 futures (placeholder)
+    vix: float | None = None  # volatility index (placeholder)
+    provider: str = "mock"  # provider name, e.g. openexchangerates / mock
     source: str = "mock"  # one of: mock | live | fallback
+    timestamp: str | None = None  # ISO 8601
     drivers: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -50,35 +63,65 @@ class MarketDataProvider(ABC):
         raise NotImplementedError
 
 
+def _inverse(usdmxn: float | None) -> float | None:
+    if not usdmxn:
+        return None
+    return round(1.0 / usdmxn, 6)
+
+
 class MockMarketDataProvider(MarketDataProvider):
     """Deterministic-ish but lively mocked data, good enough to build against."""
 
     source = "mock"
+    provider = "mock"
 
     # Rough, realistic baselines around which we jitter.
     BASE_USDMXN = 17.85
     BASE_DXY = 104.2
-    BASE_YIELD = 4.32
+    BASE_US2Y = 4.70
+    BASE_US10Y = 4.32
     BASE_OIL = 76.5
+    BASE_GOLD = 2380.0
+    BASE_SP = 5450.0
+    BASE_VIX = 14.5
 
     def _macro(self) -> dict:
         """Mocked macro placeholders shared by mock + live providers."""
-        dxy = round(self.BASE_DXY + random.uniform(-0.6, 0.6), 2)
-        treasury_yield = round(self.BASE_YIELD + random.uniform(-0.08, 0.08), 3)
-        oil = round(self.BASE_OIL + random.uniform(-2.5, 2.5), 2)
-        return {"dxy": dxy, "treasury_yield": treasury_yield, "oil": oil}
+        us10y = round(self.BASE_US10Y + random.uniform(-0.08, 0.08), 3)
+        return {
+            "dxy": round(self.BASE_DXY + random.uniform(-0.6, 0.6), 2),
+            "us2y": round(self.BASE_US2Y + random.uniform(-0.07, 0.07), 3),
+            "us10y": us10y,
+            "treasury_yield": us10y,  # legacy alias
+            "oil": round(self.BASE_OIL + random.uniform(-2.5, 2.5), 2),
+            "gold": round(self.BASE_GOLD + random.uniform(-25, 25), 2),
+            "sp_futures": round(self.BASE_SP + random.uniform(-40, 40), 2),
+            "vix": round(self.BASE_VIX + random.uniform(-2.5, 4.0), 2),
+        }
 
     def get_usdmxn(self) -> MarketData:
         usdmxn = round(self.BASE_USDMXN + random.uniform(-0.25, 0.25), 4)
         macro = self._macro()
+        return self._assemble(usdmxn, macro, provider=self.provider, source=self.source)
+
+    @classmethod
+    def _assemble(cls, usdmxn: float, macro: dict, provider: str, source: str) -> MarketData:
         return MarketData(
             pair="USDMXN",
             usdmxn=usdmxn,
+            inverse_usdmxn=_inverse(usdmxn),
             dxy=macro["dxy"],
+            us2y=macro["us2y"],
+            us10y=macro["us10y"],
             treasury_yield=macro["treasury_yield"],
             oil=macro["oil"],
-            source=self.source,
-            drivers=self._drivers(usdmxn, macro),
+            gold=macro["gold"],
+            sp_futures=macro["sp_futures"],
+            vix=macro["vix"],
+            provider=provider,
+            source=source,
+            timestamp=_utcnow_iso(),
+            drivers=cls._drivers(usdmxn, macro),
         )
 
     @classmethod
@@ -86,8 +129,12 @@ class MockMarketDataProvider(MarketDataProvider):
         # Deltas vs baseline give the analysis engine something to chew on.
         return {
             "dxy_delta": round(macro["dxy"] - cls.BASE_DXY, 3),
-            "yield_delta": round(macro["treasury_yield"] - cls.BASE_YIELD, 3),
+            "yield_delta": round(macro["us10y"] - cls.BASE_US10Y, 3),
+            "us2y_delta": round(macro["us2y"] - cls.BASE_US2Y, 3),
             "oil_delta": round(macro["oil"] - cls.BASE_OIL, 3),
+            "gold_delta": round(macro["gold"] - cls.BASE_GOLD, 2),
+            "sp_delta": round(macro["sp_futures"] - cls.BASE_SP, 2),
+            "vix_delta": round(macro["vix"] - cls.BASE_VIX, 2),
             "usdmxn_delta": round(usdmxn - cls.BASE_USDMXN, 4),
         }
 
@@ -142,16 +189,11 @@ class LiveMarketDataProvider(MarketDataProvider):
 
     def get_usdmxn(self) -> MarketData:
         usdmxn = round(self._fetch_usdmxn(), 4)
-        # Macro indicators remain placeholders for now.
+        # Macro indicators remain mocked placeholders for now.
         macro = MockMarketDataProvider()._macro()
-        return MarketData(
-            pair="USDMXN",
-            usdmxn=usdmxn,
-            dxy=macro["dxy"],
-            treasury_yield=macro["treasury_yield"],
-            oil=macro["oil"],
-            source=self.source,
-            drivers=MockMarketDataProvider._drivers(usdmxn, macro),
+        provider = self.settings.fx_provider or "live"
+        return MockMarketDataProvider._assemble(
+            usdmxn, macro, provider=provider, source=self.source
         )
 
 

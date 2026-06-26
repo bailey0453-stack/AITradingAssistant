@@ -29,7 +29,7 @@ _STOP_PCT = 0.004
 
 
 def _news_bias(news: list[dict] | None) -> tuple[float, list[str]]:
-    """Net USD bias from news headlines, weighted by impact."""
+    """Net USD bias from news headlines, weighted by importance."""
     if not news:
         return 0.0, []
 
@@ -37,7 +37,8 @@ def _news_bias(news: list[dict] | None) -> tuple[float, list[str]]:
     score = 0.0
     drivers: list[str] = []
     for item in news:
-        weight = impact_weight.get(str(item.get("impact", "low")).lower(), 0.3)
+        importance = str(item.get("importance", item.get("impact", "low"))).lower()
+        weight = impact_weight.get(importance, 0.3)
         sentiment = str(item.get("sentiment", "neutral")).lower()
         if sentiment == "usd_bullish":
             score += weight
@@ -46,6 +47,23 @@ def _news_bias(news: list[dict] | None) -> tuple[float, list[str]]:
             score -= weight
             drivers.append(f"News (MXN+): {item.get('headline', '')}")
     return score, drivers
+
+
+def _risk_level(market: MarketData) -> str:
+    """Coarse risk read from the VIX level (placeholder macro)."""
+    vix = market.vix or 0.0
+    if vix >= 20:
+        return "high"
+    if vix >= 16:
+        return "elevated"
+    return "low"
+
+
+def _expected_move(price: float, target: float | None, direction: str) -> str:
+    if not price or target is None or direction == "NO_TRADE":
+        return "flat / range-bound"
+    pct = (target / price - 1.0) * 100.0
+    return f"{pct:+.2f}% (spot {price} -> {target})"
 
 
 def compute_signal(market: MarketData, news: list[dict] | None = None) -> dict:
@@ -85,18 +103,21 @@ def compute_signal(market: MarketData, news: list[dict] | None = None) -> dict:
     if score >= _TRADE_THRESHOLD:
         direction = "BUY_USD"
         momentum = "Bullish USD"
+        market_bias = "USD bullish"
         target = round(price * (1 + _TARGET_PCT), 4)
         stretch = round(price * (1 + _STRETCH_PCT), 4)
         stop = round(price * (1 - _STOP_PCT), 4)
     elif score <= -_TRADE_THRESHOLD:
         direction = "SELL_USD"
         momentum = "Bearish USD"
+        market_bias = "USD bearish"
         target = round(price * (1 - _TARGET_PCT), 4)
         stretch = round(price * (1 - _STRETCH_PCT), 4)
         stop = round(price * (1 + _STOP_PCT), 4)
     else:
         direction = "NO_TRADE"
         momentum = "Neutral / range-bound"
+        market_bias = "Neutral"
         target = None
         stretch = None
         stop = None
@@ -106,16 +127,25 @@ def compute_signal(market: MarketData, news: list[dict] | None = None) -> dict:
     if direction == "NO_TRADE":
         confidence = round(min(confidence, 35.0), 1)
 
+    # Trade score: a 0..100 conviction read distinct from confidence.
+    trade_score = round(min(100.0, abs(score) * 30.0), 1)
+
     if not key_drivers:
-        key_drivers = ["No dominant driver; mixed/again flat inputs"]
+        key_drivers = ["No dominant driver; mixed/flat inputs"]
 
     return {
         "direction": direction,
         "confidence": confidence,
+        "trade_score": trade_score,
+        "market_bias": market_bias,
+        "risk_level": _risk_level(market),
         "score": round(score, 4),
         "momentum_status": momentum,
         "key_drivers": key_drivers,
+        "entry": round(price, 4) if price else None,
         "target": target,
         "stretch_target": stretch,
         "stop": stop,
+        "invalidation_level": stop,
+        "expected_move": _expected_move(price, target, direction),
     }
