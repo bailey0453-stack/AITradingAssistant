@@ -104,6 +104,11 @@ class AnalysisSnapshot(Base):
     bearish_factors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     upcoming_risks: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
+    # Configurable weighting engine output (for debugging / tuning)
+    weighted_contributions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    conflicting_signals: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    signal_breakdown: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     # Trade levels
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

@@ -20,6 +20,8 @@ from app.main import app
 from app.services import calendar as calendar_svc
 from app.services import market_data
 from app.services import news as news_svc
+from app.services import signal_weights as sw
+from app.services.market_data import MarketData
 from app.services.secrets import scrub
 
 _passed = 0
@@ -103,6 +105,9 @@ def test_endpoints():
                 "bullish_factors",
                 "bearish_factors",
                 "upcoming_risks",
+                "weighted_contributions",
+                "conflicting_signals",
+                "signal_breakdown",
             ):
                 assert key in body, f"analysis missing {key}"
             assert body["market"]["source"] in {"mock", "live", "fallback"}
@@ -111,6 +116,11 @@ def test_endpoints():
             assert isinstance(body["bullish_factors"], list)
             assert isinstance(body["bearish_factors"], list)
             assert isinstance(body["upcoming_risks"], list)
+            assert isinstance(body["weighted_contributions"], list)
+            assert isinstance(body["conflicting_signals"], list)
+            sb = body["signal_breakdown"]
+            for k in ("usd_score", "mxn_score", "net_score", "trade_threshold", "weights_version"):
+                assert k in sb, f"signal_breakdown missing {k}"
             assert "released_last_24h" in body["context"]
 
         def news_ok():
@@ -373,6 +383,72 @@ def test_calendar_provider():
     check("calendar provider scrubs secret from errors", cal_provider_scrubs_secret)
 
 
+def _market(**drivers) -> MarketData:
+    return MarketData(
+        pair="USDMXN", usdmxn=17.9, inverse_usdmxn=0.0559, dxy=104.5, us2y=4.7,
+        us10y=4.35, treasury_yield=4.35, oil=76.0, gold=2380.0, sp_futures=5450.0,
+        vix=15.0, provider="mock", source="mock", drivers=drivers,
+    )
+
+
+def test_signal_weighting():
+    def weights_load_defaults():
+        w = sw.get_signal_weights(Settings())
+        for key in sw.DEFAULT_WEIGHTS:
+            assert key in w, f"missing weight {key}"
+        assert w["fed_rate_decision"] == 10
+        assert w["general_financial_news"] == 4
+
+    def weights_override_and_ignore_unknown():
+        s = Settings(signal_weights={"dxy": 99, "not_a_real_key": 1})
+        w = sw.get_signal_weights(s)
+        assert w["dxy"] == 99, w["dxy"]
+        assert "not_a_real_key" not in w
+
+    def scores_usd_bias():
+        # Every macro driver pushes USD: DXY up, yields up, oil down, gold down,
+        # equities down (risk-off), VIX up.
+        m = _market(
+            dxy_delta=0.6, yield_delta=0.08, us2y_delta=0.08, oil_delta=-2.5,
+            gold_delta=-25.0, sp_delta=-40.0, vix_delta=3.0,
+        )
+        r = sw.score_signals(m)
+        assert r["direction"] == "BUY_USD", r["direction"]
+        assert r["usd_score"] > r["mxn_score"]
+        assert r["net_score"] > 0
+        assert r["weighted_contributions"], "expected contributions"
+        assert r["key_drivers"] and "No dominant" not in r["key_drivers"][0]
+        assert r["weights_version"] == sw.WEIGHTS_VERSION
+
+    def identifies_conflicts():
+        # USD-leaning DXY/yields, but oil + equities lean MXN -> conflicts listed.
+        m = _market(
+            dxy_delta=0.6, yield_delta=0.08, us2y_delta=0.08, oil_delta=2.5,
+            sp_delta=40.0,
+        )
+        r = sw.score_signals(m)
+        if r["direction"] == "BUY_USD":
+            opp = {c["direction"] for c in r["conflicting_signals"]}
+            assert opp == {"MXN"}, opp
+            keys = {c["key"] for c in r["conflicting_signals"]}
+            assert "oil" in keys and "sp_futures" in keys, keys
+
+    def weights_actually_change_score():
+        m = _market(dxy_delta=0.6)  # single USD driver
+        base = sw.score_signals(m, weights=sw.get_signal_weights())
+        zeroed = dict(sw.DEFAULT_WEIGHTS)
+        zeroed["dxy"] = 0
+        muted = sw.score_signals(m, weights=zeroed)
+        assert base["usd_score"] > muted["usd_score"], "weight change had no effect"
+        assert muted["usd_score"] == 0
+
+    check("weights load defaults", weights_load_defaults)
+    check("weights override + ignore unknown keys", weights_override_and_ignore_unknown)
+    check("score_signals yields USD bias on USD evidence", scores_usd_bias)
+    check("score_signals identifies conflicting signals", identifies_conflicts)
+    check("weights are configurable (change the score)", weights_actually_change_score)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -392,6 +468,7 @@ def main():
     test_source_tagging()
     test_news_provider()
     test_calendar_provider()
+    test_signal_weighting()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

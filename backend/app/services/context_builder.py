@@ -107,6 +107,7 @@ def build_context(
     db_news = [serialize_news_row(r) for r in recent_news_rows(db, limit=16)]
     recent_news = _dedupe_news(db_news or list(fresh_news or []))[:8]
     recent_analyses = [_brief_analysis(r) for r in recent_analyses_rows(db, limit=5)]
+    momentum = _compute_momentum(db)
 
     return {
         "market": market.to_dict(),
@@ -115,7 +116,27 @@ def build_context(
         "released_events": released,
         "released_last_24h": released_24h,
         "recent_analyses": recent_analyses,
+        "momentum": momentum,
         "calendar_source": getattr(cal, "source", "mock"),
+    }
+
+
+def _compute_momentum(db: Session) -> dict | None:
+    """USD/MXN change between the two most recent stored snapshots.
+
+    Returns None until at least two snapshots exist, so momentum never fires on
+    a synthetic baseline — only on real consecutive observations.
+    """
+    snaps = recent_market_rows(db, limit=2)
+    if len(snaps) < 2:
+        return None
+    latest, prev = snaps[0], snaps[1]
+    if latest.usdmxn is None or prev.usdmxn is None:
+        return None
+    return {
+        "change": round(latest.usdmxn - prev.usdmxn, 4),
+        "from": prev.usdmxn,
+        "to": latest.usdmxn,
     }
 
 

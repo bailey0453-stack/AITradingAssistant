@@ -182,6 +182,23 @@ DASHBOARD_HTML = """<!doctype html>
       <ul id="risks"></ul>
     </div>
 
+    <div class="card">
+      <h2>Signal weighting (debug)</h2>
+      <div class="row">
+        <div class="stat"><div class="k">USD score</div><div class="v lean-usd" id="usdsc">—</div></div>
+        <div class="stat"><div class="k">MXN score</div><div class="v lean-mxn" id="mxnsc">—</div></div>
+        <div class="stat"><div class="k">Net</div><div class="v" id="netsc">—</div></div>
+        <div class="stat"><div class="k">Threshold</div><div class="v" id="thrsc">—</div></div>
+        <div class="stat"><div class="k">Weights</div><div class="v" id="wver" style="font-size:14px">—</div></div>
+      </div>
+      <table style="margin-top:14px">
+        <thead><tr><th>Signal</th><th>Dir</th><th>Weight</th><th>Strength</th><th>Contribution</th><th>Detail</th></tr></thead>
+        <tbody id="wcontrib"></tbody>
+      </table>
+      <div class="k muted" style="margin-top:10px">Conflicting signals</div>
+      <ul id="conflicts"></ul>
+    </div>
+
     <div class="grid2">
       <div class="card">
         <h2>Event timeline</h2>
@@ -234,7 +251,7 @@ DASHBOARD_HTML = """<!doctype html>
       (d.key_drivers || []).forEach(x => { const li=document.createElement('li'); li.textContent=x; ul.appendChild(li); });
       $('risknotes').textContent = d.risk_notes || '';
 
-      const leanClass = l => l === 'USD+' ? 'lean-usd' : (l === 'MXN+' ? 'lean-mxn' : 'lean-neutral');
+      const leanClass = l => (l||'').startsWith('USD') ? 'lean-usd' : ((l||'').startsWith('MXN') ? 'lean-mxn' : 'lean-neutral');
       const md = $('mdrivers'); md.innerHTML = '';
       (d.market_drivers || []).forEach(x => {
         const tr=document.createElement('tr');
@@ -262,6 +279,29 @@ DASHBOARD_HTML = """<!doctype html>
         rk.appendChild(li);
       });
       if (!(d.upcoming_risks||[]).length) rk.innerHTML = '<li class="muted">No high-impact events flagged.</li>';
+
+      const sb = d.signal_breakdown || {};
+      fill('usdsc', sb.usd_score); fill('mxnsc', sb.mxn_score); fill('netsc', sb.net_score); fill('thrsc', sb.trade_threshold);
+      $('wver').textContent = sb.weights_version || '—';
+      const wc = $('wcontrib'); wc.innerHTML='';
+      (d.weighted_contributions||[]).forEach(c => {
+        const tr=document.createElement('tr');
+        tr.innerHTML = '<td>'+(c.label||'')+'</td>'+
+          '<td class="lean '+leanClass(c.direction)+'">'+(c.direction||'')+'</td>'+
+          '<td>'+(c.weight ?? '—')+'</td><td>'+(c.strength ?? '—')+'</td>'+
+          '<td class="lean '+leanClass(c.direction)+'">'+(c.contribution ?? '—')+'</td>'+
+          '<td class="muted">'+(c.detail||'')+'</td>';
+        wc.appendChild(tr);
+      });
+      if (!(d.weighted_contributions||[]).length) wc.innerHTML = '<tr><td colspan="6" class="muted">No active signals.</td></tr>';
+      const cf = $('conflicts'); cf.innerHTML='';
+      (d.conflicting_signals||[]).forEach(c => {
+        const li=document.createElement('li');
+        li.innerHTML = (c.label||'') + ' <span class="lean '+leanClass(c.direction)+'">'+(c.direction||'')+'</span>'+
+          ' <span class="muted">'+(c.detail||'')+'</span>';
+        cf.appendChild(li);
+      });
+      if (!(d.conflicting_signals||[]).length) cf.innerHTML = '<li class="muted">None.</li>';
 
       const tl = $('timeline'); tl.innerHTML = '';
       (d.timeline || []).forEach(e => {

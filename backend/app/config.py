@@ -6,7 +6,7 @@ secret by default; real API keys are supplied via environment variables.
 """
 
 from functools import lru_cache
-from typing import Optional
+from typing import Dict, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -58,6 +58,12 @@ class Settings(BaseSettings):
 
     # --- HTTP ---
     http_timeout_seconds: float = 8.0
+
+    # --- Signal weighting engine ---
+    # Optional override of the default signal weights, as a JSON object in the
+    # SIGNAL_WEIGHTS env var, e.g. SIGNAL_WEIGHTS='{"dxy": 9, "oil": 6}'. Unknown
+    # keys are ignored. Defaults live in services/signal_weights.py.
+    signal_weights: Optional[Dict[str, float]] = None
 
     @property
     def is_mock(self) -> bool:

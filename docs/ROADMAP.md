@@ -46,6 +46,10 @@ and make the analysis explain itself.
 - [x] Analysis explains itself: `market_drivers` (per-indicator USD+/MXN+ lean),
       `bullish_factors`, `bearish_factors`, `upcoming_risks`, and a summary that
       names confirming vs opposing indicators.
+- [x] Configurable signal weighting engine (`signal_weights.py`): tunable
+      per-signal weights (file or `SIGNAL_WEIGHTS` env), weighted USD/MXN scoring,
+      and `weighted_contributions` / `conflicting_signals` / `signal_breakdown`
+      returned for debugging.
 - [x] Persist the new explanatory fields (backtesting dataset grows).
 - [x] Dashboard sections: Market Drivers, Latest News, Upcoming Events, Recent
       Releases (24h), Key Risks.

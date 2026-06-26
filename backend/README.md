@@ -33,6 +33,12 @@ exposes a JSON API plus a dashboard.
   Falls back to mock events if no key or on error.
 - **Context builder** assembles market + recent news + upcoming events + events
   released in the **last 24h** + recent analyses into one object for the analyzer.
+- **Configurable signal weighting** (`signal_weights.py`): every signal (rate
+  decisions, CPI/PPI/NFP/GDP, yields, DXY, momentum, oil/gold/S&P/VIX, news
+  categories, technicals) has a tunable weight. The analyzer scores weighted
+  USD-vs-MXN evidence — it does **not** treat inputs equally — and returns the
+  `weighted_contributions`, `conflicting_signals`, and a `signal_breakdown`
+  (USD/MXN/net scores) for debugging. Tune via the file or `SIGNAL_WEIGHTS`.
 - **Richer analysis**: direction, trade_score, market_bias, confidence,
   momentum, historical_similarity (placeholder), risk_level, summary (now
   explains which indicators confirm vs push back), key_drivers, **market_drivers**
@@ -55,7 +61,8 @@ services/
   market_data.py   USD/MXN + macro providers (mock | live OXR | fallback)
   news.py          news provider (mock | live NewsAPI | fallback; Finnhub/FMP stubs)
   calendar.py      economic calendar provider (mock | live Trading Economics | fallback)
-  signals.py       pure directional heuristics (deterministic, testable)
+  signal_weights.py  configurable weighting engine (the only place weights live)
+  signals.py       directional view + trade levels (delegates scoring to weights)
   ai_analysis.py   analyzer composing the recommendation + explanation (rule-based | OpenAI stub)
   context_builder.py  gathers context + builds the event timeline
   secrets.py       scrubs API keys out of any log/error string
@@ -85,6 +92,40 @@ headers (FX `Authorization`, NewsAPI `X-Api-Key`) or, where a provider requires
 a query param (Trading Economics), scrubbed from every outbound error string via
 `services/secrets.py`. Choose the live implementation with `NEWS_PROVIDER` /
 `CALENDAR_PROVIDER`.
+
+## Signal weighting engine
+
+All scoring weights live in one place — `app/services/signal_weights.py` — so
+the model is tunable without touching the analysis engine. Each signal is turned
+into a *signed, weighted contribution* (`weight × strength`, direction `USD` or
+`MXN`); the engine sums each side, takes the net, and derives Trade Score,
+Confidence, Market Bias, and Key Drivers, while flagging conflicting signals.
+
+Default weights (0–10):
+
+| Signal | Weight | Signal | Weight |
+| --- | --- | --- | --- |
+| Fed Rate Decision | 10 | Banxico Rate Decision | 10 |
+| US CPI | 9 | US PPI | 8 |
+| US Nonfarm Payrolls | 9 | US GDP | 8 |
+| Mexico CPI | 9 | Mexico GDP | 8 |
+| Treasury Yield (2Y/10Y) | 8 | DXY | 8 |
+| USD/MXN Momentum | 7 | Oil | 7 |
+| Gold | 5 | S&P Futures | 5 |
+| VIX | 6 | Trade/Tariff News | 8 |
+| Political News | 5 | General Financial News | 4 |
+| Technical Indicators | 5 | | |
+
+Tune by editing the file, or override at runtime with the `SIGNAL_WEIGHTS` env
+var (a JSON object; unknown keys are ignored):
+
+```bash
+SIGNAL_WEIGHTS='{"dxy": 9, "oil": 6, "us_cpi": 10}'
+```
+
+`GET /analysis/usdmxn` returns `weighted_contributions` (sorted strongest-first),
+`conflicting_signals`, and `signal_breakdown` (`usd_score`, `mxn_score`,
+`net_score`, `trade_threshold`, `weights_version`) for debugging and tuning.
 
 ## Project layout
 
@@ -186,6 +227,7 @@ All config is environment-driven (see `.env.example`):
 | `CALENDAR_PROVIDER` | Live calendar implementation (`tradingeconomics` \| `finnhub`) | `tradingeconomics` |
 | `CALENDAR_BASE_URL` | Override the calendar endpoint (optional) | Trading Economics |
 | `HTTP_TIMEOUT_SECONDS` | HTTP timeout for provider calls | `8.0` |
+| `SIGNAL_WEIGHTS` | JSON override of signal weights (see below) | unset (uses defaults) |
 | `MARKET_DATA_API_KEY` | Alternate market feed (future) | empty |
 | `FRED_API_KEY` | DXY / treasury yields (future) | empty |
 | `OPENAI_API_KEY` / `AI_MODEL` | LLM-backed analysis (future) | empty |
@@ -314,7 +356,9 @@ Local development is unchanged — none of this affects `uvicorn app.main:app`.
 ## Tests
 
 A dependency-free smoke test covers all endpoints, the expanded analysis schema
-(`market_drivers`, `bullish_factors`, `bearish_factors`, `upcoming_risks`), the
+(`market_drivers`, `bullish_factors`, `bearish_factors`, `upcoming_risks`,
+`weighted_contributions`, `conflicting_signals`, `signal_breakdown`), the
+weighting engine (defaults, env override, USD/MXN scoring, conflicts), the
 `mock` / `live` / `fallback` source tagging for market **and** news **and**
 calendar, and asserts that **API keys are scrubbed from error messages**:
 

@@ -60,6 +60,9 @@ ANALYSIS_FIELDS = (
     "expected_duration",
     "invalidation_level",
     "risk_notes",
+    "weighted_contributions",
+    "conflicting_signals",
+    "signal_breakdown",
 )
 
 _RISK_RANK = {"low": 0, "elevated": 1, "high": 2}
@@ -145,12 +148,18 @@ class RuleBasedAnalyzer(AIAnalyzer):
         recent_analyses: list[dict] | None = None,
         context: dict | None = None,
     ) -> dict:
-        signal = compute_signal(market, news)
-        direction = signal["direction"]
         context = context or {}
-
         upcoming = context.get("upcoming_events") or _only_upcoming(calendar)
         released_24h = context.get("released_last_24h") or _only_released(calendar)
+
+        # The weighting engine scores the evidence; weights are configurable.
+        signal = compute_signal(
+            market,
+            news=news,
+            released_events=released_24h,
+            momentum=context.get("momentum"),
+        )
+        direction = signal["direction"]
 
         risk_level, event_note = self._risk_with_events(signal["risk_level"], calendar)
 
@@ -183,6 +192,9 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "expected_duration": self._expected_duration(signal),
             "invalidation_level": signal["invalidation_level"],
             "risk_notes": self._build_risk_notes(market, signal, event_note),
+            "weighted_contributions": signal["weighted_contributions"],
+            "conflicting_signals": signal["conflicting_signals"],
+            "signal_breakdown": signal["signal_breakdown"],
             "model": self.model_name,
         }
 
