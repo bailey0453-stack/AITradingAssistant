@@ -42,6 +42,7 @@ Analysis result schema:
     expected_duration: str
     invalidation_level: float | None
     risk_notes: str
+    time_horizons: list[dict]       # per-horizon outlook: 1-4h, EOD, 1-2d, >2d
 """
 
 from __future__ import annotations
@@ -80,6 +81,7 @@ ANALYSIS_FIELDS = (
     "expected_duration",
     "invalidation_level",
     "risk_notes",
+    "time_horizons",
     "weighted_contributions",
     "conflicting_signals",
     "signal_breakdown",
@@ -107,6 +109,52 @@ _GRADE_BANDS = (
 _UNCERTAIN_REGIMES = {"High Volatility", "Political Risk", "Trade War", "Risk Off"}
 
 _RISK_RANK = {"low": 0, "elevated": 1, "high": 2}
+
+# --- Multi-horizon outlook -------------------------------------------------- #
+# Weighted signal keys grouped by *how* they inform each time horizon.
+_SHORT_KEYS = {
+    "dxy", "treasury_yield", "oil", "vix", "usdmxn_momentum",
+    "gold", "sp_futures", "technical_indicators",
+}
+_NEWS_KEYS = {"trade_tariff_news", "political_news", "general_financial_news"}
+_EVENT_KEYS = {
+    "fed_rate_decision", "banxico_rate_decision", "us_cpi", "us_ppi",
+    "us_nfp", "us_gdp", "mexico_cpi", "mexico_gdp",
+}
+
+# Per-horizon configuration:
+#   groups    -> how much each signal group counts on this timeframe
+#   move      -> (target, stretch, stop) sizing as a fraction of price
+#   conf_cap  -> ceiling on horizon confidence
+#   conf_scale-> shrink raw conviction (longer horizons are inherently fuzzier)
+#   threshold -> |net weighted score| needed to lean directional
+#   window_h  -> look-ahead (hours) used to flag event risk for the horizon
+_HORIZON_SPECS = (
+    {"horizon": "1-4 hours", "kind": "intraday",
+     "groups": {"short": 1.0, "news": 1.0, "event": 0.3},
+     "move": (0.0025, 0.005, 0.002), "conf_cap": 90.0, "conf_scale": 1.0,
+     "threshold": 4.0, "window_h": 4.0},
+    {"horizon": "End of day", "kind": "eod",
+     "groups": {"short": 0.85, "news": 0.9, "event": 0.7},
+     "move": (0.004, 0.008, 0.003), "conf_cap": 80.0, "conf_scale": 0.95,
+     "threshold": 4.0, "window_h": 10.0},
+    {"horizon": "1-2 days", "kind": "multiday",
+     "groups": {"short": 0.5, "news": 0.6, "event": 1.0},
+     "move": (0.006, 0.012, 0.005), "conf_cap": 72.0, "conf_scale": 0.9,
+     "threshold": 4.5, "window_h": 48.0},
+    {"horizon": "Beyond 2 days", "kind": "swing",
+     "groups": {"short": 0.3, "news": 0.4, "event": 0.8},
+     "move": (0.01, 0.02, 0.008), "conf_cap": 55.0, "conf_scale": 0.8,
+     "threshold": 5.0, "window_h": 120.0},
+)
+
+
+def _signal_group(key: str) -> str:
+    if key in _EVENT_KEYS:
+        return "event"
+    if key in _NEWS_KEYS:
+        return "news"
+    return "short"
 
 
 def _only_upcoming(calendar: list[dict] | None) -> list[dict]:
@@ -230,6 +278,10 @@ class RuleBasedAnalyzer(AIAnalyzer):
             bullish, bearish,
         )
 
+        # Multi-horizon outlook (refreshed with history/blended confidence by the
+        # router once Phase 4 historical intelligence is available).
+        time_horizons = self._time_horizons(market, signal, regime, upcoming_risks)
+
         return {
             "direction": direction,
             "trade_score": signal["trade_score"],
@@ -254,6 +306,7 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "stop": signal["stop"],
             "expected_move": signal["expected_move"],
             "expected_duration": self._expected_duration(signal),
+            "time_horizons": time_horizons,
             "invalidation_level": signal["invalidation_level"],
             "risk_notes": self._build_risk_notes(market, signal, event_note),
             "weighted_contributions": signal["weighted_contributions"],
@@ -940,6 +993,251 @@ class RuleBasedAnalyzer(AIAnalyzer):
         if ts >= 40:
             return "2-4 days"
         return "3-5 days"
+
+    @classmethod
+    def _time_horizons(
+        cls,
+        market: MarketData,
+        signal: dict,
+        regime: dict,
+        upcoming_risks: list[dict] | None,
+        historical: dict | None = None,
+        confidence_override: float | None = None,
+    ) -> list[dict]:
+        """Per-horizon outlook (intraday → swing) from re-weighted signals.
+
+        Each horizon re-weights the same weighted contributions by how much its
+        signal group matters on that timeframe, then derives an independent
+        bias, confidence, and trade levels:
+          - short horizons lean on momentum/DXY/yields/oil/volatility + news,
+          - end-of-day folds in same-day events and intraday risk,
+          - 1-2 days emphasizes upcoming Fed/Banxico/calendar + historical analogs,
+          - beyond 2 days stays low-confidence unless regime/history is strong.
+
+        A horizon may show a directional lean even when the *primary*
+        recommendation is NO_TRADE/PASS — the primary plan stays authoritative.
+        """
+        contribs = signal.get("weighted_contributions") or []
+        price = market.usdmxn or 0.0
+        vix = market.vix if market.vix is not None else 15.0
+        regime_name = (regime or {}).get("primary") or "mixed"
+        regime_conf = (regime or {}).get("confidence") or 0
+        risks = upcoming_risks or []
+        base_conf = (
+            confidence_override
+            if confidence_override is not None
+            else signal.get("confidence")
+        )
+        sim = (historical or {}).get("best_similarity")
+        stats = (historical or {}).get("statistics") or {}
+
+        out: list[dict] = []
+        for spec in _HORIZON_SPECS:
+            groups = spec["groups"]
+            net = 0.0
+            total = 0.0
+            grouped: dict[str, list] = {"short": [], "news": [], "event": []}
+            for c in contribs:
+                grp = _signal_group(c.get("key", ""))
+                mult = groups.get(grp, 0.0)
+                if mult <= 0:
+                    continue
+                signed = float(c.get("contribution") or 0.0) * mult
+                net += signed
+                total += abs(signed)
+                grouped[grp].append((abs(signed), c))
+            net = round(net, 2)
+            total = round(total, 2)
+
+            thr = spec["threshold"]
+            if net >= thr:
+                bias = "BUY_USD"
+            elif net <= -thr:
+                bias = "SELL_USD"
+            else:
+                bias = "NO_TRADE"
+
+            # Conviction from one-sidedness, shrunk per horizon and anchored
+            # partly to the headline confidence so the horizons stay coherent.
+            raw_conf = (abs(net) / total * 100.0) if total else 0.0
+            conf = raw_conf * spec["conf_scale"]
+            if base_conf is not None:
+                conf = 0.6 * conf + 0.4 * float(base_conf)
+            conf = min(spec["conf_cap"], conf)
+
+            # High/medium-impact event inside this horizon's look-ahead window.
+            window_event = None
+            for ev in risks:
+                if ev.get("importance") not in {"high", "medium"}:
+                    continue
+                h = ev.get("hours_away")
+                if h is None or h <= spec["window_h"]:
+                    window_event = ev
+                    break
+
+            # Historical analogs inform the multi-day / swing horizons.
+            hist_note = ""
+            if spec["kind"] in {"multiday", "swing"} and sim is not None:
+                if sim >= 0.6:
+                    conf = min(spec["conf_cap"], conf + 8.0)
+                    hist_note = (
+                        f"Historical similarity {round(sim * 100)}%"
+                        + (f" (win rate {stats.get('win_rate')}%)."
+                           if stats.get("win_rate") is not None else ".")
+                    )
+                else:
+                    hist_note = f"Weak historical analog ({round(sim * 100)}%)."
+
+            # Beyond two days: lower confidence unless regime/history is strong.
+            if spec["kind"] == "swing":
+                strong = (sim is not None and sim >= 0.7) or regime_conf >= 65
+                if not strong:
+                    conf = min(conf, 45.0)
+
+            # An imminent catalyst raises two-way risk -> trim conviction.
+            if window_event is not None and bias != "NO_TRADE":
+                conf = min(conf, spec["conf_cap"] - 10.0)
+
+            if bias == "NO_TRADE":
+                conf = min(conf, 35.0)
+            conf = round(max(0.0, conf), 1)
+
+            # Trade levels scaled to the horizon's expected move.
+            tgt_pct, str_pct, stop_pct = spec["move"]
+            if bias == "BUY_USD" and price:
+                target = round(price * (1 + tgt_pct), 4)
+                stretch = round(price * (1 + str_pct), 4)
+                stop = round(price * (1 - stop_pct), 4)
+            elif bias == "SELL_USD" and price:
+                target = round(price * (1 - tgt_pct), 4)
+                stretch = round(price * (1 - str_pct), 4)
+                stop = round(price * (1 + stop_pct), 4)
+            else:
+                target = stretch = stop = None
+
+            if target and price:
+                expected_move = (
+                    f"{(target / price - 1) * 100:+.2f}% "
+                    f"(spot {_fmt(price)} → {_fmt(target)})"
+                )
+            else:
+                expected_move = "flat / range-bound"
+
+            out.append(
+                {
+                    "horizon": spec["horizon"],
+                    "bias": bias,
+                    "confidence": conf,
+                    "target": target,
+                    "stretch_target": stretch,
+                    "stop": stop,
+                    "expected_move": expected_move,
+                    "rationale": cls._horizon_rationale(
+                        spec, bias, grouped, window_event, hist_note, regime_name
+                    ),
+                    "risk_level": cls._horizon_risk(vix, window_event),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _horizon_risk(vix: float, window_event: dict | None) -> str:
+        if vix >= 20:
+            base = "high"
+        elif vix >= 16:
+            base = "elevated"
+        else:
+            base = "low"
+        if window_event is not None:
+            if window_event.get("importance") == "high":
+                return "high"
+            if base == "low":
+                base = "elevated"
+        return base
+
+    @staticmethod
+    def _horizon_rationale(
+        spec: dict,
+        bias: str,
+        grouped: dict[str, list],
+        window_event: dict | None,
+        hist_note: str,
+        regime_name: str,
+    ) -> str:
+        # Lead drivers from the group(s) this horizon leans on most.
+        emphasis = [g for g, m in spec["groups"].items() if m >= 0.7] or ["short"]
+        leads: list[str] = []
+        for g in emphasis:
+            for _, c in sorted(
+                grouped.get(g, []), key=lambda t: t[0], reverse=True
+            )[:2]:
+                if c.get("label"):
+                    leads.append(str(c["label"]))
+        leads = list(dict.fromkeys(leads))[:3]
+
+        lean = {
+            "BUY_USD": "USD strength (USD/MXN higher)",
+            "SELL_USD": "peso strength (USD/MXN lower)",
+            "NO_TRADE": "no clear lean",
+        }.get(bias, "no clear lean")
+
+        kind = spec["kind"]
+        if kind == "intraday":
+            head = f"Intraday tape favors {lean}."
+        elif kind == "eod":
+            head = f"Into the close, {lean}."
+        elif kind == "multiday":
+            head = f"Over 1-2 sessions, {lean}."
+        else:
+            head = f"Beyond two days the {regime_name} regime frames {lean}."
+
+        parts = [head]
+        if leads:
+            parts.append("Drivers: " + ", ".join(leads) + ".")
+        if window_event is not None:
+            when = (
+                f"~{window_event['hours_away']}h"
+                if window_event.get("hours_away") is not None
+                else "soon"
+            )
+            parts.append(
+                f"Watch {window_event.get('event')} "
+                f"({window_event.get('importance')} impact, {when})."
+            )
+        if hist_note:
+            parts.append(hist_note)
+        return " ".join(parts)
+
+    @classmethod
+    def time_horizons_from_result(
+        cls,
+        result: dict,
+        market: MarketData,
+        historical: dict | None = None,
+        confidence_override: float | None = None,
+    ) -> list[dict]:
+        """Rebuild the multi-horizon outlook from an analysis ``result``.
+
+        Used by the analysis endpoint to refresh horizons *after* Phase 4 blends
+        historical/regime/volatility into the final confidence, so the longer
+        horizons can fold in historical similarity and stay consistent with the
+        headline confidence.
+        """
+        signal_like = {
+            "weighted_contributions": result.get("weighted_contributions"),
+            "confidence": result.get("confidence"),
+            "direction": result.get("direction"),
+            "trade_score": result.get("trade_score"),
+            "signal_breakdown": result.get("signal_breakdown"),
+        }
+        return cls._time_horizons(
+            market,
+            signal_like,
+            result.get("market_regime") or {},
+            result.get("upcoming_risks") or [],
+            historical=historical,
+            confidence_override=confidence_override,
+        )
 
     @staticmethod
     def _build_summary(

@@ -1,4 +1,4 @@
-# AI Trading Assistant — Backend (Phase 4.5)
+# AI Trading Assistant — Backend (Phase 4.6)
 
 Backend-only **USD/MXN market intelligence engine**. It collects market + macro
 inputs, **live news**, and a **live economic calendar**, builds a structured
@@ -63,6 +63,15 @@ dataset) and exposes a JSON API plus a dashboard.
   grade is consistent with direction: **PASS ⇔ NO_TRADE**, a directional read
   floors at `D`, `C`/`D` are bias-only (low quality), and `B`/`A`/`A+` support an
   active recommendation.
+- **Multi-horizon outlook** (Phase 4.6): alongside the single Primary Trade Plan,
+  `/analysis/usdmxn` returns `time_horizons` — four independent reads (`1-4 hours`,
+  `End of day`, `1-2 days`, `Beyond 2 days`). Each re-weights the same signal
+  contributions by timeframe (short horizons lean on momentum/DXY/yields/oil/VIX
+  + news; 1-2 days emphasizes upcoming Fed/Banxico/calendar + historical analogs;
+  beyond 2 days stays low-confidence unless regime/history is strong) and reports
+  its own `bias`, `confidence`, `target`/`stretch_target`/`stop`, `expected_move`,
+  `rationale`, and `risk_level`. Horizons may show a directional lean even when
+  the primary recommendation is `NO_TRADE`/`PASS`.
 - **Historical intelligence engine** (Phase 4, `services/history/`): backfills a
   historical dataset (sample data out of the box, paid providers optional),
   measures USD/MXN reactions after each event over fixed windows (15m/1h/4h/1d/

@@ -100,6 +100,7 @@ def test_endpoints():
                 "stop",
                 "expected_move",
                 "expected_duration",
+                "time_horizons",
                 "invalidation_level",
                 "risk_notes",
                 "timeline",
@@ -154,6 +155,18 @@ def test_endpoints():
             assert (body.get("historical_similarity") or {}).get("status") == "active"
             cb = body["confidence_breakdown"] or {}
             assert "components" in cb and "signal" in cb["components"]
+            # Multi-horizon outlook: four horizons, each fully shaped.
+            th = body["time_horizons"]
+            assert isinstance(th, list) and len(th) == 4, th
+            assert [h["horizon"] for h in th] == [
+                "1-4 hours", "End of day", "1-2 days", "Beyond 2 days"
+            ], th
+            for h in th:
+                for k in ("bias", "confidence", "target", "stretch_target",
+                          "stop", "expected_move", "rationale", "risk_level"):
+                    assert k in h, f"horizon missing {k}"
+                assert h["bias"] in {"BUY_USD", "SELL_USD", "NO_TRADE"}, h["bias"]
+                assert 0 <= h["confidence"] <= 100, h["confidence"]
 
         def news_ok():
             r = c.get("/news/recent")
@@ -644,6 +657,66 @@ def test_strategist_narrative():
     check("PASS/C/B/A grade-direction-action rule holds", grade_direction_action_rule)
 
 
+def test_multi_horizon():
+    from app.services.ai_analysis import RuleBasedAnalyzer
+    from app.services.market_data import MockMarketDataProvider
+
+    analyzer = RuleBasedAnalyzer()
+    ORDER = ["1-4 hours", "End of day", "1-2 days", "Beyond 2 days"]
+
+    def four_horizons_shaped():
+        for _ in range(12):
+            market = MockMarketDataProvider().get_usdmxn()
+            r = analyzer.analyze(market)
+            th = r["time_horizons"]
+            assert [h["horizon"] for h in th] == ORDER, th
+            for h in th:
+                assert h["bias"] in {"BUY_USD", "SELL_USD", "NO_TRADE"}
+                assert 0 <= h["confidence"] <= 100
+                # Directional horizons carry levels; flat horizons do not.
+                if h["bias"] == "NO_TRADE":
+                    assert h["target"] is None and h["stop"] is None, h
+                else:
+                    assert h["target"] is not None and h["stop"] is not None, h
+
+    def swing_not_more_confident_than_intraday_baseline():
+        # Beyond-2-days is capped well below the intraday ceiling.
+        for _ in range(8):
+            market = MockMarketDataProvider().get_usdmxn()
+            r = analyzer.analyze(market)
+            swing = r["time_horizons"][3]
+            assert swing["confidence"] <= 55.0, swing
+
+    def pass_primary_allows_horizon_lean():
+        # PASS keeps the *primary* recommendation NO_TRADE, but horizons MAY lean.
+        # Construct contributions that net flat overall yet lean short-term USD:
+        # strong short-term USD drivers offset by an opposing event signal.
+        market = _market(dxy_delta=0.6, yield_delta=0.08, us2y_delta=0.08)
+        signal = {
+            "direction": "NO_TRADE",
+            "confidence": 20.0,
+            "trade_score": 5.0,
+            "weighted_contributions": [
+                {"key": "dxy", "label": "DXY", "direction": "USD",
+                 "weight": 8, "strength": 0.9, "contribution": 7.2, "detail": "DXY"},
+                {"key": "treasury_yield", "label": "Treasury", "direction": "USD",
+                 "weight": 8, "strength": 0.5, "contribution": 4.0, "detail": "yields"},
+                {"key": "us_cpi", "label": "US CPI", "direction": "MXN",
+                 "weight": 9, "strength": 0.9, "contribution": -8.1, "detail": "CPI"},
+            ],
+        }
+        horizons = analyzer._time_horizons(market, signal, {"primary": "Fed Driven", "confidence": 50}, [])
+        intraday = horizons[0]
+        # Short horizon de-emphasizes the event -> USD lean emerges.
+        assert intraday["bias"] == "BUY_USD", intraday
+        # Primary recommendation (overall direction) is unchanged / NO_TRADE.
+        assert signal["direction"] == "NO_TRADE"
+
+    check("multi-horizon: four horizons fully shaped", four_horizons_shaped)
+    check("multi-horizon: swing confidence capped low", swing_not_more_confident_than_intraday_baseline)
+    check("multi-horizon: PASS primary still allows horizon lean", pass_primary_allows_horizon_lean)
+
+
 def test_history_engine():
     from app.services.history import historical_statistics as hs
     from app.services.history import similarity_engine as sim
@@ -744,6 +817,7 @@ def main():
     test_signal_weighting()
     test_reasoning_engine()
     test_strategist_narrative()
+    test_multi_horizon()
     test_history_engine()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")

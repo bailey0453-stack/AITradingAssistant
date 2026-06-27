@@ -122,6 +122,20 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
         result["probabilities"] = probabilities
         result["confidence_breakdown"] = confidence_breakdown
 
+        # Refresh the multi-horizon outlook so the 1-2d / >2d horizons fold in
+        # historical analogs and reflect the final blended confidence.
+        try:
+            from app.services.ai_analysis import RuleBasedAnalyzer
+
+            result["time_horizons"] = RuleBasedAnalyzer.time_horizons_from_result(
+                result,
+                market,
+                historical=historical_context,
+                confidence_override=confidence_breakdown.get("value"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Horizon refresh failed; keeping signal-only horizons.")
+
         out["historical_context"] = historical_context
         out["probabilities"] = probabilities
         out["confidence_breakdown"] = confidence_breakdown
@@ -184,6 +198,7 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "stop": row.stop,
         "expected_move": row.expected_move,
         "expected_duration": row.expected_duration,
+        "time_horizons": row.time_horizons,
         "invalidation_level": row.invalidation_level,
         "risk_notes": row.risk_notes,
         "timeline": row.timeline,
@@ -248,6 +263,7 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         invalidation_level=result["invalidation_level"],
         expected_move=result["expected_move"],
         expected_duration=result["expected_duration"],
+        time_horizons=result.get("time_horizons"),
         historical_similarity=result["historical_similarity"],
         risk_notes=result["risk_notes"],
         news_context=context["recent_news"],

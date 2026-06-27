@@ -132,6 +132,8 @@ class AnalysisSnapshot(Base):
 
     expected_move: Mapped[str] = mapped_column(String(64), default="")
     expected_duration: Mapped[str] = mapped_column(String(64), default="")
+    # Multi-horizon outlook: independent lean per timeframe (1-4h, EOD, 1-2d, >2d)
+    time_horizons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     historical_similarity: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     risk_notes: Mapped[str] = mapped_column(Text, default="")

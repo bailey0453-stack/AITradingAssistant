@@ -40,10 +40,10 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.4.5",
+    version="0.4.6",
     description=(
         "Backend-only USD/MXN market intelligence assistant "
-        "(Phase 4.5 · strategist narrative)."
+        "(Phase 4.6 · multi-horizon outlook)."
     ),
     lifespan=lifespan,
 )
@@ -114,7 +114,7 @@ DASHBOARD_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 4.5 · strategist narrative)</span></h1>
+    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 4.6 · multi-horizon outlook)</span></h1>
     <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
   </header>
   <main>
@@ -224,7 +224,7 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
 
       <div class="card">
-        <h2>Trade plan</h2>
+        <h2>Primary Trade Plan</h2>
         <div class="row">
           <div class="stat"><div class="k">Entry</div><div class="v" id="entry">—</div></div>
           <div class="stat"><div class="k">Target</div><div class="v" id="tgt">—</div></div>
@@ -232,8 +232,16 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="stat"><div class="k">Stop</div><div class="v" id="stp">—</div></div>
         </div>
         <p class="muted" id="move" style="margin-top:12px"></p>
-        <p class="muted" id="dur"></p>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Time Horizon Outlook</h2>
+      <table>
+        <thead><tr><th>Horizon</th><th>Bias</th><th>Confidence</th><th>Target</th><th>Stretch</th><th>Stop</th><th>Rationale</th></tr></thead>
+        <tbody id="horizons"></tbody>
+      </table>
+      <p class="muted" style="margin-top:8px">Independent lean per timeframe. The Primary Trade Plan above is the single actionable recommendation; when it is NO_TRADE/PASS these horizons may still show a directional lean.</p>
     </div>
 
     <div class="card">
@@ -361,7 +369,21 @@ DASHBOARD_HTML = """<!doctype html>
 
       fill('entry', d.entry); fill('tgt', d.target); fill('str', d.stretch_target); fill('stp', d.stop);
       $('move').textContent = 'Expected move: ' + (d.expected_move || '—');
-      $('dur').textContent = 'Expected duration: ' + (d.expected_duration || '—');
+
+      const hz = $('horizons'); hz.innerHTML = '';
+      (d.time_horizons || []).forEach(h => {
+        const tr = document.createElement('tr');
+        const bias = h.bias || 'NO_TRADE';
+        tr.innerHTML = '<td><b>'+(h.horizon||'')+'</b></td>'+
+          '<td><span class="tag '+bias+'" style="font-size:11px; padding:2px 8px">'+bias+'</span></td>'+
+          '<td>'+(h.confidence != null ? h.confidence+'/100' : '—')+'</td>'+
+          '<td>'+(h.target ?? '—')+'</td>'+
+          '<td>'+(h.stretch_target ?? '—')+'</td>'+
+          '<td>'+(h.stop ?? '—')+'</td>'+
+          '<td class="muted">'+(h.rationale||'')+'</td>';
+        hz.appendChild(tr);
+      });
+      if (!(d.time_horizons||[]).length) hz.innerHTML = '<tr><td colspan="7" class="muted">No horizon data.</td></tr>';
 
       $('summary').textContent = d.summary || '';
       const ul = $('drivers'); ul.innerHTML = '';
