@@ -39,8 +39,14 @@ class Settings(BaseSettings):
     # (https://openexchangerates.org), which returns USD-based rates.
     fx_provider: str = "openexchangerates"
     fx_base_url: Optional[str] = None
-    # Macro indicators (e.g. FRED for DXY / treasury yields)
+    # Macro indicators
+    # FRED (St. Louis Fed) — US 2Y / 10Y treasury yields + macro series.
     fred_api_key: Optional[str] = None
+    # Alpha Vantage — DXY / gold / oil / VIX / S&P where available.
+    alpha_vantage_api_key: Optional[str] = None
+    # Cache macro fetches this many seconds to respect provider rate limits
+    # (Alpha Vantage free tier is ~25 requests/day). 0 disables caching.
+    macro_cache_seconds: int = 600
     # News
     news_api_key: Optional[str] = None
     # News provider selection + endpoint. Default targets NewsAPI.org; the
@@ -93,6 +99,13 @@ class Settings(BaseSettings):
     def news_live_enabled(self) -> bool:
         """Live news is attempted only when mock mode is off AND a key is set."""
         return (not self.use_mock_data) and bool(self.news_api_key)
+
+    @property
+    def macro_live_enabled(self) -> bool:
+        """Live macro (FRED / Alpha Vantage) attempted when off-mock + any key."""
+        return (not self.use_mock_data) and bool(
+            self.fred_api_key or self.alpha_vantage_api_key
+        )
 
     @property
     def calendar_live_enabled(self) -> bool:

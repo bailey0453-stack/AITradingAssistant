@@ -173,14 +173,42 @@ Each external dependency sits behind an interface + factory, selected by config:
 
 | Service | Factory | Live when | Else |
 | --- | --- | --- | --- |
-| Market (USD/MXN) | `get_market_data()` | `USE_MOCK_DATA=false` **and** `FX_API_KEY` set | `mock`; `fallback` on error |
-| News | `get_news_provider()` | `USE_MOCK_DATA=false` **and** `NEWS_API_KEY` set | mock; `fallback` on error |
+| USD/MXN spot | `get_market_data()` | `USE_MOCK_DATA=false` **and** `FX_API_KEY` set | `mock`; `fallback` on error |
+| Macro (2Y/10Y) | FRED via `macro_data` | `USE_MOCK_DATA=false` **and** `FRED_API_KEY` set | per-field `fallback`; else `mock` |
+| Macro (DXY/gold/oil/VIX/S&P) | Alpha Vantage via `macro_data` | `USE_MOCK_DATA=false` **and** `ALPHA_VANTAGE_API_KEY` set | per-field `fallback`; else `mock` |
+| News | `get_news_provider()` | `USE_MOCK_DATA=false` **and** `NEWS_API_KEY` set (`NEWS_PROVIDER=newsapi`\|`finnhub`) | mock; `fallback` on error |
 | Calendar | `get_calendar_provider()` | `USE_MOCK_DATA=false` **and** `CALENDAR_API_KEY` set, **or** `CALENDAR_PROVIDER=csv` + `CALENDAR_CSV_PATH` | mock; `fallback` on error |
 | Analyzer | `get_analyzer()` | `USE_MOCK_DATA=false` **and** `OPENAI_API_KEY` set | rule-based |
 
 Every live provider degrades safely: if a fetch fails or the key is missing,
 the service returns mock data (tagged `source="fallback"` for market) and never
 breaks.
+
+### Live macro indicators (per-field)
+
+Macro drivers are fetched **independently per field**, so one unavailable
+symbol degrades only that value:
+
+- **FRED** (`FRED_API_KEY`) → US 2Y (`DGS2`) and US 10Y (`DGS10`) yields.
+- **Alpha Vantage** (`ALPHA_VANTAGE_API_KEY`) → WTI oil and gold (XAU/USD).
+  DXY, VIX and S&P have no clean free-tier endpoint, so they are attempted and,
+  when unavailable, retained as the existing (mock) value tagged `fallback` —
+  the reason is logged (with keys scrubbed).
+
+Every macro fetch is range-checked (a wrong-scale value is rejected) and cached
+for `MACRO_CACHE_SECONDS` (default 600s). **Note:** Alpha Vantage's free tier is
+~25 requests/day; caching keeps the app within that budget, and fields fall
+back to mock if the limit is hit. `/market/usdmxn` returns a `sources` map
+(`{field: live|fallback|mock}`) and the dashboard shows a badge per field.
+
+### Finnhub news
+
+Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from
+Finnhub (`general` + `forex` categories). Articles are filtered to USD/MXN
+topics (Fed/FOMC/Powell, Banxico, Mexico, peso, USD/MXN, CPI/PPI/NFP,
+Treasury/inflation, oil, tariffs/US–Mexico trade); each keeps a
+`relevance_score` (0–100) and anything scoring 0 is discarded. The key is sent
+in the `X-Finnhub-Token` header so it never reaches a URL or log line.
 
 ### Data-source labeling
 
@@ -189,7 +217,7 @@ returns a `data_sources` block and the dashboard renders a badge per source:
 
 | Source | Possible labels |
 | --- | --- |
-| `market` | `live` · `mock` · `fallback` |
+| `market` | `live` · `mock` · `fallback` (overall = USD/MXN spot; per-field in `market.sources`) |
 | `news` | `live` · `mock` · `fallback` |
 | `calendar` | `live` · `imported` (CSV) · `mock` · `fallback` |
 | `historical` | `live` · `backfilled` · `sample` |
@@ -457,7 +485,10 @@ All config is environment-driven (see `.env.example`):
 | `FX_API_KEY` | FX provider key/App ID for **live USD/MXN** | empty |
 | `FX_PROVIDER` | FX provider name | `openexchangerates` |
 | `FX_BASE_URL` | Override FX endpoint (optional) | OXR `latest.json` |
-| `NEWS_API_KEY` | News provider key for **live news** (NewsAPI.org) | empty |
+| `FRED_API_KEY` | FRED key for **live US 2Y / 10Y** treasury yields | empty |
+| `ALPHA_VANTAGE_API_KEY` | Alpha Vantage key for **live oil / gold** (DXY/VIX/S&P fall back) | empty |
+| `MACRO_CACHE_SECONDS` | Cache macro fetches to respect rate limits (AV ~25/day) | `600` |
+| `NEWS_API_KEY` | News provider key for **live news** (NewsAPI.org / Finnhub) | empty |
 | `NEWS_PROVIDER` | Live news implementation (`newsapi` \| `finnhub` \| `fmp`) | `newsapi` |
 | `NEWS_BASE_URL` | Override the news endpoint (optional) | NewsAPI `/v2/everything` |
 | `CALENDAR_API_KEY` | Economic calendar provider key (Trading Economics) | empty |
@@ -568,7 +599,10 @@ Optional live providers (omit to keep mock news/calendar):
 
 | Variable | Value | Notes |
 | --- | --- | --- |
-| `NEWS_API_KEY` | `<NewsAPI.org key>` | **Secret** — enables live news |
+| `NEWS_API_KEY` | `<NewsAPI.org or Finnhub key>` | **Secret** — enables live news |
+| `NEWS_PROVIDER` | `finnhub` | Use Finnhub for live news |
+| `FRED_API_KEY` | `<FRED key>` | **Secret** — enables live US 2Y / 10Y |
+| `ALPHA_VANTAGE_API_KEY` | `<Alpha Vantage key>` | **Secret** — enables live oil / gold |
 | `CALENDAR_API_KEY` | `<Trading Economics key>` | **Secret** — enables live calendar |
 
 Optional: set `DATABASE_URL` to a Postgres URL for durable storage. By default

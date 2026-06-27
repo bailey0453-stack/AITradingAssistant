@@ -48,6 +48,8 @@ class MarketSnapshot(Base):
 
     provider: Mapped[str] = mapped_column(String(48), default="mock")
     source: Mapped[str] = mapped_column(String(32), default="mock")
+    # Per-field provenance: {field: "live"|"fallback"|"mock"} for transparency.
+    sources: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     analyses: Mapped[List["AnalysisSnapshot"]] = relationship(
         back_populates="market_snapshot",
@@ -72,6 +74,7 @@ class NewsItem(Base):
     sentiment: Mapped[str] = mapped_column(String(24), default="neutral")
     affected_currencies: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     importance: Mapped[str] = mapped_column(String(16), default="low")
+    relevance_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     provider: Mapped[str] = mapped_column(String(48), default="mock")

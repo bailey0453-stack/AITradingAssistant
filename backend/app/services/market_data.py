@@ -46,12 +46,28 @@ class MarketData:
     sp_futures: float | None = None  # S&P 500 futures (placeholder)
     vix: float | None = None  # volatility index (placeholder)
     provider: str = "mock"  # provider name, e.g. openexchangerates / mock
-    source: str = "mock"  # one of: mock | live | fallback
+    source: str = "mock"  # overall USD/MXN spot source: mock | live | fallback
     timestamp: str | None = None  # ISO 8601
     drivers: dict = field(default_factory=dict)
+    # Per-field provenance: field name -> "live" | "fallback" | "mock".
+    field_sources: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# Fields whose provenance is tracked individually for source transparency, and
+# the provider that supplies each when live.
+MACRO_FIELDS = ("dxy", "us2y", "us10y", "oil", "gold", "sp_futures", "vix")
+_FIELD_PROVIDER = {
+    "us2y": "fred",
+    "us10y": "fred",
+    "dxy": "alphavantage",
+    "gold": "alphavantage",
+    "oil": "alphavantage",
+    "vix": "alphavantage",
+    "sp_futures": "alphavantage",
+}
 
 
 class MarketDataProvider(ABC):
@@ -222,25 +238,86 @@ def get_market_provider(settings: Settings | None = None) -> MarketDataProvider:
     return MockMarketDataProvider()
 
 
+def _mock_all(data: MarketData) -> MarketData:
+    """Tag every tracked field as mock and return the snapshot."""
+    data.field_sources = {f: "mock" for f in ("usdmxn", *MACRO_FIELDS)}
+    return data
+
+
 def get_market_data(settings: Settings | None = None) -> MarketData:
-    """Resilient USD/MXN fetch with mock fallback and clear source tagging."""
+    """Resilient USD/MXN + macro fetch with per-field source tagging.
+
+    Each field is independently ``live`` / ``fallback`` / ``mock`` so a single
+    unavailable provider/symbol degrades only that field. The overall
+    ``source`` mirrors the USD/MXN spot source for backward compatibility.
+    """
     settings = settings or get_settings()
 
-    # Explicit mock mode.
+    # Explicit mock mode — everything mocked.
     if settings.is_mock:
-        return MockMarketDataProvider().get_usdmxn()
+        return _mock_all(MockMarketDataProvider().get_usdmxn())
 
-    # Live desired but no key configured -> fallback.
-    if not settings.fx_api_key:
-        logger.warning("Live FX requested but FX_API_KEY missing; using fallback.")
-        return _fallback_data()
+    # Start from a full mock baseline, then overlay whatever we can fetch live.
+    data = MockMarketDataProvider().get_usdmxn()
+    field_sources: dict[str, str] = {}
 
-    # Attempt live fetch; fall back on any error.
-    try:
-        return LiveMarketDataProvider(settings).get_usdmxn()
-    except Exception as exc:  # noqa: BLE001 - any failure should degrade gracefully
-        logger.warning(
-            "Live FX fetch failed (%s); using fallback.",
-            _scrub(str(exc), settings.fx_api_key),
-        )
-        return _fallback_data()
+    # --- USD/MXN spot (FX provider) ---
+    if settings.fx_api_key:
+        try:
+            spot = round(LiveMarketDataProvider(settings)._fetch_usdmxn(), 4)
+            data.usdmxn = spot
+            data.inverse_usdmxn = _inverse(spot)
+            data.provider = settings.fx_provider or "live"
+            data.source = "live"
+            field_sources["usdmxn"] = "live"
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully
+            logger.warning(
+                "Live FX fetch failed (%s); using fallback for USD/MXN.",
+                _scrub(str(exc), settings.fx_api_key),
+            )
+            data.source = "fallback"
+            field_sources["usdmxn"] = "fallback"
+    else:
+        logger.warning("Live FX requested but FX_API_KEY missing; USD/MXN fallback.")
+        data.source = "fallback"
+        field_sources["usdmxn"] = "fallback"
+
+    # --- Macro drivers (FRED + Alpha Vantage), per field ---
+    live_macro: dict[str, float] = {}
+    if settings.macro_live_enabled:
+        try:
+            from app.services.macro_data import fetch_live_macro
+
+            live_macro = fetch_live_macro(settings)
+        except Exception as exc:  # noqa: BLE001 - never break the snapshot
+            logger.warning("Macro fetch failed wholesale (%s); using fallback.",
+                           _scrub(str(exc), settings.fred_api_key or ""))
+
+    have_key = {
+        "fred": bool(settings.fred_api_key),
+        "alphavantage": bool(settings.alpha_vantage_api_key),
+    }
+    for fld in MACRO_FIELDS:
+        if fld in live_macro:
+            setattr(data, fld, live_macro[fld])
+            field_sources[fld] = "live"
+        elif have_key.get(_FIELD_PROVIDER[fld]):
+            # Live was attempted for this field's provider but it was
+            # unavailable — keep the mock value, tagged as a fallback.
+            field_sources[fld] = "fallback"
+        else:
+            field_sources[fld] = "mock"
+
+    if "treasury_yield" in live_macro:
+        data.treasury_yield = live_macro["treasury_yield"]
+
+    # Recompute driver deltas so they reflect the (possibly live) macro values.
+    macro = {
+        "dxy": data.dxy, "us2y": data.us2y, "us10y": data.us10y,
+        "treasury_yield": data.treasury_yield, "oil": data.oil,
+        "gold": data.gold, "sp_futures": data.sp_futures, "vix": data.vix,
+    }
+    data.drivers = MockMarketDataProvider._drivers(data.usdmxn, macro)
+    data.field_sources = field_sources
+    data.timestamp = _utcnow_iso()
+    return data

@@ -44,6 +44,7 @@ def serialize_news_row(row: NewsItem) -> dict:
         "sentiment": row.sentiment,
         "affected_currencies": row.affected_currencies,
         "importance": row.importance,
+        "relevance_score": row.relevance_score,
         "tags": row.tags,
     }
 

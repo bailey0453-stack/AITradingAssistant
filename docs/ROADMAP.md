@@ -183,6 +183,26 @@ real feed when available.
 - [x] No API keys logged (scrubbed); smoke tests cover provider source tags,
       CSV import + fallback, and the analysis `data_sources` contract.
 
+## Phase 5.6 — Connect live market intelligence providers (built)
+
+Goal: move real feeds into production, per field, while preserving the mock
+fallback architecture and the reasoning engine.
+
+- [x] **Finnhub news** (`NEWS_PROVIDER=finnhub`): live `general` + `forex`
+      feeds replacing MockWire, filtered to USD/MXN topics with a
+      `relevance_score` (0 discarded); key sent via `X-Finnhub-Token` header.
+- [x] **FRED macro**: live US 2Y (`DGS2`) + US 10Y (`DGS10`) yields.
+- [x] **Alpha Vantage macro**: live WTI oil + gold (XAU/USD); DXY/VIX/S&P
+      attempted and retained as fallback when the free tier can't serve them,
+      with the reason logged (keys scrubbed).
+- [x] **Per-field source transparency**: `market.sources` maps every field to
+      `live`/`fallback`/`mock`; dashboard renders a badge per market field.
+      Range checks + a `MACRO_CACHE_SECONDS` cache respect provider rate limits.
+- [x] **Persistence**: `MarketSnapshot.sources` + `NewsItem.relevance_score`
+      (provider, fetch time, headline, tags, sentiment already stored).
+- [x] Smoke tests cover Finnhub filtering, FRED/Alpha Vantage per-field live +
+      fallback, all-mock without keys, and that errors never expose API keys.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.

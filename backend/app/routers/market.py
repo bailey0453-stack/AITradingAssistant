@@ -41,6 +41,7 @@ def store_news_items(db: Session, items: list[dict], provider: str = "mock") -> 
                 sentiment=item.get("sentiment", "neutral"),
                 affected_currencies=item.get("affected_currencies"),
                 importance=item.get("importance", "low"),
+                relevance_score=item.get("relevance_score"),
                 tags=item.get("tags"),
                 provider=provider,
             )
@@ -83,6 +84,7 @@ def capture_market_snapshot(
         economic_calendar=calendar,
         provider=market.provider,
         source=market.source,
+        sources=market.field_sources or None,
     )
     db.add(snapshot)
     db.commit()
@@ -109,6 +111,7 @@ def serialize_market(snapshot: MarketSnapshot) -> dict:
         "economic_calendar": snapshot.economic_calendar,
         "provider": snapshot.provider,
         "source": snapshot.source,
+        "sources": snapshot.sources or {},
     }
 
 

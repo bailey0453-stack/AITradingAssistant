@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import app
 from app.services import calendar as calendar_svc
+from app.services import macro_data as macro_svc
 from app.services import market_data
 from app.services import news as news_svc
 from app.services import market_regime as market_regime_svc
@@ -895,6 +896,94 @@ def test_source_labeling():
     check("CSV calendar falls back to mock when file missing", csv_calendar_falls_back_when_missing)
 
 
+def test_live_providers():
+    def finnhub_filters_and_tags_live():
+        # general + forex categories both return this list (deduped by headline).
+        payload = [
+            {"headline": "Fed's Powell signals fewer rate cuts as inflation lingers",
+             "summary": "Treasury yields rose.", "source": "Reuters",
+             "url": "https://x/fed", "datetime": 1750000000},
+            {"headline": "Banxico holds rate; peso steadies",
+             "summary": "Mexico central bank decision.", "source": "Bloomberg",
+             "url": "https://x/banxico", "datetime": 1750000100},
+            {"headline": "Apple unveils new iPhone lineup",
+             "summary": "Consumer tech launch.", "source": "TechCrunch",
+             "url": "https://x/apple", "datetime": 1750000200},
+        ]
+        original = news_svc.httpx.get
+        news_svc.httpx.get = lambda *a, **k: _FakeResponse(payload)
+        try:
+            prov = news_svc.get_news_provider(
+                Settings(use_mock_data=False, news_api_key="k", news_provider="finnhub")
+            )
+            items = prov.get_news()
+            assert prov.source == "live", prov.source
+            heads = [i["headline"] for i in items]
+            assert any("Powell" in h for h in heads), heads
+            assert not any("iPhone" in h for h in heads), "unrelated news must be dropped"
+            assert all(i["relevance_score"] > 0 for i in items), items
+            # ranked by relevance (descending)
+            scores = [i["relevance_score"] for i in items]
+            assert scores == sorted(scores, reverse=True), scores
+        finally:
+            news_svc.httpx.get = original
+
+    def macro_per_field_live_and_fallback():
+        macro_svc.clear_macro_cache()
+
+        def fake_get(url, *a, **k):
+            params = k.get("params", {})
+            if "stlouisfed" in url:
+                sid = params.get("series_id")
+                val = "4.71" if sid == "DGS2" else "4.29"
+                return _FakeResponse({"observations": [{"date": "2026-06-26", "value": val}]})
+            if "alphavantage" in url:
+                fn = params.get("function")
+                if fn == "WTI":
+                    return _FakeResponse({"data": [{"date": "2026-06-26", "value": "77.2"}]})
+                if fn == "CURRENCY_EXCHANGE_RATE":
+                    return _FakeResponse({"Realtime Currency Exchange Rate": {"5. Exchange Rate": "2380.5"}})
+                # GLOBAL_QUOTE (DXY/VIX/SPX) -> unavailable on the free tier.
+                return _FakeResponse({"Global Quote": {}})
+            return _FakeResponse({"rates": {"MXN": 18.55}})  # FX spot
+
+        orig_macro, orig_mkt = macro_svc.httpx.get, market_data.httpx.get
+        macro_svc.httpx.get = fake_get
+        market_data.httpx.get = fake_get
+        try:
+            md = market_data.get_market_data(Settings(
+                use_mock_data=False, fx_api_key="fx",
+                fred_api_key="fred", alpha_vantage_api_key="av",
+                macro_cache_seconds=0,
+            ))
+            fs = md.field_sources
+            assert md.source == "live" and fs["usdmxn"] == "live", fs
+            assert fs["us2y"] == "live" and fs["us10y"] == "live", fs
+            assert fs["oil"] == "live" and fs["gold"] == "live", fs
+            # No clean free-tier symbol -> retained as fallback, not live.
+            assert fs["dxy"] == "fallback" and fs["vix"] == "fallback", fs
+            assert fs["sp_futures"] == "fallback", fs
+            assert md.us2y == 4.71 and md.us10y == 4.29 and md.oil == 77.2, md
+        finally:
+            macro_svc.httpx.get, market_data.httpx.get = orig_macro, orig_mkt
+            macro_svc.clear_macro_cache()
+
+    def macro_all_mock_without_keys():
+        md = market_data.get_market_data(Settings(use_mock_data=True))
+        assert md.source == "mock", md.source
+        assert all(v == "mock" for v in md.field_sources.values()), md.field_sources
+
+    def macro_scrub_hides_keys():
+        s = Settings(fred_api_key="FREDSECRET", alpha_vantage_api_key="AVSECRET")
+        msg = macro_svc._scrub("boom FREDSECRET and AVSECRET leaked", s)
+        assert "FREDSECRET" not in msg and "AVSECRET" not in msg, msg
+
+    check("Finnhub filters unrelated news + tags live", finnhub_filters_and_tags_live)
+    check("macro per-field live + fallback (FRED/Alpha Vantage)", macro_per_field_live_and_fallback)
+    check("macro all-mock without keys", macro_all_mock_without_keys)
+    check("macro errors never expose API keys", macro_scrub_hides_keys)
+
+
 def test_evidence_engine():
     from app.services.history import historical_statistics as hs
     from app.services.history.importers import MockSampleImporter
@@ -998,6 +1087,7 @@ def main():
     test_history_engine()
     test_evidence_engine()
     test_source_labeling()
+    test_live_providers()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

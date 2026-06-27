@@ -134,14 +134,14 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card">
       <h2>Market</h2>
       <div class="row">
-        <div class="stat"><div class="k">USD/MXN</div><div class="v" id="px">—</div></div>
+        <div class="stat"><div class="k">USD/MXN <span class="src" id="fs_usdmxn">—</span></div><div class="v" id="px">—</div></div>
         <div class="stat"><div class="k">Inverse</div><div class="v" id="inv">—</div></div>
-        <div class="stat"><div class="k">DXY</div><div class="v" id="dxy">—</div></div>
-        <div class="stat"><div class="k">US 2Y</div><div class="v" id="us2y">—</div></div>
-        <div class="stat"><div class="k">US 10Y</div><div class="v" id="us10y">—</div></div>
-        <div class="stat"><div class="k">Oil</div><div class="v" id="oil">—</div></div>
-        <div class="stat"><div class="k">Gold</div><div class="v" id="gold">—</div></div>
-        <div class="stat"><div class="k">VIX</div><div class="v" id="vix">—</div></div>
+        <div class="stat"><div class="k">DXY <span class="src" id="fs_dxy">—</span></div><div class="v" id="dxy">—</div></div>
+        <div class="stat"><div class="k">US 2Y <span class="src" id="fs_us2y">—</span></div><div class="v" id="us2y">—</div></div>
+        <div class="stat"><div class="k">US 10Y <span class="src" id="fs_us10y">—</span></div><div class="v" id="us10y">—</div></div>
+        <div class="stat"><div class="k">Oil <span class="src" id="fs_oil">—</span></div><div class="v" id="oil">—</div></div>
+        <div class="stat"><div class="k">Gold <span class="src" id="fs_gold">—</span></div><div class="v" id="gold">—</div></div>
+        <div class="stat"><div class="k">VIX <span class="src" id="fs_vix">—</span></div><div class="v" id="vix">—</div></div>
       </div>
     </div>
 
@@ -385,6 +385,12 @@ DASHBOARD_HTML = """<!doctype html>
       fill('gold', m.gold); fill('vix', m.vix);
       $('src').textContent = 'source: ' + (m.source || '—') + ' · ' + (m.provider || '');
 
+      // Per-market-field provenance badges (live/fallback/mock).
+      const fsrc = m.sources || {};
+      ['usdmxn','dxy','us2y','us10y','oil','gold','vix'].forEach(function(f){
+        setSrc('fs_'+f, fsrc[f]);
+      });
+
       // Clearly label every data source (live/mock/fallback/imported/sample).
       const ds = d.data_sources || {};
       setSrc('ds_market', ds.market || m.source);
@@ -602,7 +608,8 @@ DASHBOARD_HTML = """<!doctype html>
       (ctx.recent_news||[]).slice(0,6).forEach(n => {
         const li=document.createElement('li');
         const head = n.url ? '<a href="'+n.url+'" target="_blank" rel="noopener">'+(n.headline||'')+'</a>' : (n.headline||'');
-        li.innerHTML = head + ' <span class="pill '+(n.importance||'')+'">'+(n.importance||'')+'</span>'+
+        const rel = (n.relevance_score===0||n.relevance_score) ? ' <span class="pill">rel '+n.relevance_score+'</span>' : '';
+        li.innerHTML = head + ' <span class="pill '+(n.importance||'')+'">'+(n.importance||'')+'</span>'+ rel +
           ' <span class="muted">'+(n.source||'')+'</span>';
         nu.appendChild(li);
       });
