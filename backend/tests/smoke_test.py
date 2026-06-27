@@ -155,6 +155,14 @@ def test_endpoints():
             assert (body.get("historical_similarity") or {}).get("status") == "active"
             cb = body["confidence_breakdown"] or {}
             assert "components" in cb and "signal" in cb["components"]
+            # Data-source labeling: every source is explicitly tagged.
+            ds = body.get("data_sources") or {}
+            for k in ("market", "news", "calendar", "historical"):
+                assert k in ds, f"data_sources missing {k}"
+            assert ds["market"] in {"mock", "live", "fallback"}, ds
+            assert ds["news"] in {"mock", "live", "fallback"}, ds
+            assert ds["calendar"] in {"mock", "live", "fallback", "imported"}, ds
+            assert ds["historical"] in {"sample", "backfilled", "live"}, ds
             # Phase 5 evidence engine
             for k in ("explanations", "evidence_summary"):
                 assert k in body, f"analysis missing {k}"
@@ -197,6 +205,7 @@ def test_endpoints():
             assert r.status_code == 200, r.status_code
             body = r.json()
             assert body["count"] >= 1
+            assert body.get("provider") in {"mock", "live", "fallback"}, body.get("provider")
             item = body["news"][0]
             for key in (
                 "headline",
@@ -216,6 +225,7 @@ def test_endpoints():
             assert r.status_code == 200, r.status_code
             body = r.json()
             assert body["count"] >= 1
+            assert body.get("provider") in {"mock", "live", "fallback", "imported"}, body.get("provider")
             ev = body["events"][0]
             for key in (
                 "event",
@@ -826,6 +836,65 @@ def test_history_engine():
     check("confidence weights are configurable", confidence_weights_configurable)
 
 
+def test_source_labeling():
+    import os
+    import tempfile
+
+    def news_provider_source_live_vs_mock():
+        # No key -> mock provider; with key + live success -> ResilientNews "live".
+        p = news_svc.get_news_provider(Settings(use_mock_data=False, news_api_key=None))
+        assert p.source == "mock", p.source
+
+        articles = {"status": "ok", "articles": [{
+            "title": "Fed holds rates as inflation cools",
+            "description": "Dollar steadies after the decision.",
+            "source": {"name": "Reuters"}, "url": "https://x/y",
+            "publishedAt": "2026-06-27T10:00:00Z",
+        }]}
+        original = news_svc.httpx.get
+        news_svc.httpx.get = lambda *a, **k: _FakeResponse(articles)
+        try:
+            rp = news_svc.get_news_provider(
+                Settings(use_mock_data=False, news_api_key="k")
+            )
+            rp.get_news()
+            assert rp.source == "live", rp.source
+        finally:
+            news_svc.httpx.get = original
+
+    def csv_calendar_imports_without_key():
+        rows = (
+            "event,country,release_time,forecast,previous,actual,importance,currency_impact\n"
+            "US CPI (MoM),US,2099-01-15T13:30:00,0.3,0.2,,high,USD\n"
+            "Banxico Rate Decision,MX,2099-01-20T19:00:00,hold,hold,,high,MXN\n"
+        )
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.write(fd, rows.encode()); os.close(fd)
+        try:
+            # CSV works even in mock mode and with no API key.
+            s = Settings(use_mock_data=True, calendar_provider="csv",
+                         calendar_csv_path=path, calendar_api_key=None)
+            prov = calendar_svc.get_calendar_provider(s)
+            events = prov.get_upcoming()
+            assert prov.source == "imported", prov.source
+            assert any(e["event"].startswith("US CPI") for e in events), events
+            assert {e["country"] for e in events} <= {"US", "MX"}
+        finally:
+            os.remove(path)
+
+    def csv_calendar_falls_back_when_missing():
+        s = Settings(use_mock_data=True, calendar_provider="csv",
+                     calendar_csv_path="/nonexistent/calendar.csv")
+        prov = calendar_svc.get_calendar_provider(s)
+        events = prov.get_upcoming()
+        assert prov.source == "fallback", prov.source
+        assert events, "fallback should still return mock events"
+
+    check("news provider tags mock vs live source", news_provider_source_live_vs_mock)
+    check("CSV calendar imports without an API key", csv_calendar_imports_without_key)
+    check("CSV calendar falls back to mock when file missing", csv_calendar_falls_back_when_missing)
+
+
 def test_evidence_engine():
     from app.services.history import historical_statistics as hs
     from app.services.history.importers import MockSampleImporter
@@ -928,6 +997,7 @@ def main():
     test_multi_horizon()
     test_history_engine()
     test_evidence_engine()
+    test_source_labeling()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

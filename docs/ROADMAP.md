@@ -165,6 +165,24 @@ Ships on the deterministic sample library; no paid provider required.
 - [x] Dashboard **Historical Evidence** panel + "How these numbers are
       calculated" card; everything persisted on the analysis snapshot.
 
+## Phase 5.5 — Real data sources & source labeling (built)
+
+Goal: move off mock intelligence where real feeds are configured, and label
+every source so the dashboard never implies sample/mock data is real. Mock
+fallback is preserved; the reasoning engine is unchanged beyond consuming the
+real feed when available.
+
+- [x] **Live news** via NewsAPI (`NEWS_API_KEY`) with mock fallback — `live`
+      on success, `fallback` on error, `mock` when unconfigured.
+- [x] **Importable calendar**: new `CSVCalendarProvider` (`CALENDAR_PROVIDER=csv`
+      + `CALENDAR_CSV_PATH`) loads a real calendar export with no paid key,
+      tagged `imported`; live Trading Economics (`CALENDAR_API_KEY`) unchanged.
+- [x] **`data_sources`** block on `/analysis/usdmxn` (market / news / calendar /
+      historical) feeding per-source dashboard badges
+      (`live` · `imported` · `fallback` · `mock` · `sample` · `backfilled`).
+- [x] No API keys logged (scrubbed); smoke tests cover provider source tags,
+      CSV import + fallback, and the analysis `data_sources` contract.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.

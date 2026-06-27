@@ -175,12 +175,30 @@ Each external dependency sits behind an interface + factory, selected by config:
 | --- | --- | --- | --- |
 | Market (USD/MXN) | `get_market_data()` | `USE_MOCK_DATA=false` **and** `FX_API_KEY` set | `mock`; `fallback` on error |
 | News | `get_news_provider()` | `USE_MOCK_DATA=false` **and** `NEWS_API_KEY` set | mock; `fallback` on error |
-| Calendar | `get_calendar_provider()` | `USE_MOCK_DATA=false` **and** `CALENDAR_API_KEY` set | mock; `fallback` on error |
+| Calendar | `get_calendar_provider()` | `USE_MOCK_DATA=false` **and** `CALENDAR_API_KEY` set, **or** `CALENDAR_PROVIDER=csv` + `CALENDAR_CSV_PATH` | mock; `fallback` on error |
 | Analyzer | `get_analyzer()` | `USE_MOCK_DATA=false` **and** `OPENAI_API_KEY` set | rule-based |
 
 Every live provider degrades safely: if a fetch fails or the key is missing,
 the service returns mock data (tagged `source="fallback"` for market) and never
-breaks. **API keys are never written to logs** — keys are sent via request
+breaks.
+
+### Data-source labeling
+
+Nothing on the dashboard implies sample/mock data is real. `/analysis/usdmxn`
+returns a `data_sources` block and the dashboard renders a badge per source:
+
+| Source | Possible labels |
+| --- | --- |
+| `market` | `live` · `mock` · `fallback` |
+| `news` | `live` · `mock` · `fallback` |
+| `calendar` | `live` · `imported` (CSV) · `mock` · `fallback` |
+| `historical` | `live` · `backfilled` · `sample` |
+
+The **importable calendar** lets you load a real calendar export with no paid
+key: set `CALENDAR_PROVIDER=csv` and `CALENDAR_CSV_PATH=/path/to/calendar.csv`
+(header columns: `event,country,release_time,forecast,previous,actual,
+importance,currency_impact`). It still falls back to mock data if the file is
+missing or empty, and is tagged `imported` when it loads. **API keys are never written to logs** — keys are sent via request
 headers (FX `Authorization`, NewsAPI `X-Api-Key`) or, where a provider requires
 a query param (Trading Economics), scrubbed from every outbound error string via
 `services/secrets.py`. Choose the live implementation with `NEWS_PROVIDER` /
@@ -443,8 +461,9 @@ All config is environment-driven (see `.env.example`):
 | `NEWS_PROVIDER` | Live news implementation (`newsapi` \| `finnhub` \| `fmp`) | `newsapi` |
 | `NEWS_BASE_URL` | Override the news endpoint (optional) | NewsAPI `/v2/everything` |
 | `CALENDAR_API_KEY` | Economic calendar provider key (Trading Economics) | empty |
-| `CALENDAR_PROVIDER` | Live calendar implementation (`tradingeconomics` \| `finnhub`) | `tradingeconomics` |
+| `CALENDAR_PROVIDER` | Live calendar implementation (`tradingeconomics` \| `finnhub` \| `csv`) | `tradingeconomics` |
 | `CALENDAR_BASE_URL` | Override the calendar endpoint (optional) | Trading Economics |
+| `CALENDAR_CSV_PATH` | Path to an importable calendar CSV (used when `CALENDAR_PROVIDER=csv`; no key needed) | empty |
 | `HTTP_TIMEOUT_SECONDS` | HTTP timeout for provider calls | `8.0` |
 | `SIGNAL_WEIGHTS` | JSON override of signal weights (see below) | unset (uses defaults) |
 | `SIMILARITY_WEIGHTS` | JSON override of history similarity feature weights | unset (uses defaults) |

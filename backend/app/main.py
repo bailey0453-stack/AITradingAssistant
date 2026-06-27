@@ -92,6 +92,12 @@ DASHBOARD_HTML = """<!doctype html>
     .tl .item { margin-bottom:12px; }
     .tl .label { font-weight:600; }
     .src { font-size:11px; padding:2px 7px; border-radius:6px; background:#1b2542; color:#9fb3d9; }
+    .src.live { background:#0f3d2e; color:#5be3a0; }
+    .src.imported, .src.backfilled { background:#15324a; color:#7fd0ff; }
+    .src.fallback { background:#3d3416; color:#ffd98a; }
+    .src.mock, .src.sample { background:#3a2236; color:#f0a6d6; }
+    .sources { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .sources .lbl { font-size:11px; color:#8aa0c6; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #1d2740; }
     th { color:#8aa0c6; font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:.04em; }
@@ -116,6 +122,13 @@ DASHBOARD_HTML = """<!doctype html>
   <header>
     <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 5 · evidence-based forecasting)</span></h1>
     <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
+    <div class="sources">
+      <span class="lbl">Data sources:</span>
+      <span>Market <span id="ds_market" class="src">—</span></span>
+      <span>News <span id="ds_news" class="src">—</span></span>
+      <span>Calendar <span id="ds_cal" class="src">—</span></span>
+      <span>Historical <span id="ds_hist" class="src">—</span></span>
+    </div>
   </header>
   <main>
     <div class="card">
@@ -282,7 +295,7 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
-      <h2>Historical evidence <span class="muted" id="histsrc">(sample data)</span></h2>
+      <h2>Historical evidence <span id="histsrc" class="src">sample</span></h2>
       <p id="hevidence" style="margin:6px 0 14px;line-height:1.5"></p>
       <div class="row">
         <div class="stat"><div class="k">Historical similarity</div><div class="v" id="hsim">—</div></div>
@@ -343,14 +356,14 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="tl" id="timeline"></div>
       </div>
       <div class="card">
-        <h2>Latest news</h2>
+        <h2>Latest news <span id="news_src" class="src">—</span></h2>
         <ul id="news"></ul>
       </div>
     </div>
 
     <div class="grid2">
       <div class="card">
-        <h2>Upcoming events</h2>
+        <h2>Upcoming events <span id="cal_src" class="src">—</span></h2>
         <ul id="events"></ul>
       </div>
       <div class="card">
@@ -363,6 +376,7 @@ DASHBOARD_HTML = """<!doctype html>
   <script>
     const $ = id => document.getElementById(id);
     function fill(id, v, suffix){ $(id).textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—'; }
+    function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+v; }
     async function refresh() {
       const d = await (await fetch('/analysis/usdmxn')).json();
       const m = d.market || {};
@@ -370,6 +384,15 @@ DASHBOARD_HTML = """<!doctype html>
       fill('us2y', m.us2y, '%'); fill('us10y', m.us10y, '%'); fill('oil', m.oil);
       fill('gold', m.gold); fill('vix', m.vix);
       $('src').textContent = 'source: ' + (m.source || '—') + ' · ' + (m.provider || '');
+
+      // Clearly label every data source (live/mock/fallback/imported/sample).
+      const ds = d.data_sources || {};
+      setSrc('ds_market', ds.market || m.source);
+      setSrc('ds_news', ds.news);
+      setSrc('ds_cal', ds.calendar);
+      setSrc('ds_hist', ds.historical);
+      setSrc('news_src', ds.news);
+      setSrc('cal_src', ds.calendar);
 
       const dir = $('dir'); dir.textContent = d.direction; dir.className = 'tag ' + d.direction;
       $('bias').textContent = d.market_bias || '';
@@ -448,6 +471,7 @@ DASHBOARD_HTML = """<!doctype html>
       // Historical evidence (Phase 5)
       const h = d.historical || {};
       const hstats = h.statistics || {};
+      setSrc('histsrc', (d.data_sources||{}).historical || h.historical_source || 'sample');
       const pct = v => (v === null || v === undefined) ? '—' : ((v>0?'+':'') + v + '%');
       $('hevidence').textContent = d.evidence_summary || h.evidence_summary || 'Insufficient comparable history for an evidence-based read.';
       $('hsim').textContent = (h.best_similarity != null) ? Math.round(h.best_similarity*100)+'%' : '—';
@@ -602,7 +626,7 @@ DASHBOARD_HTML = """<!doctype html>
       });
       if (!(ctx.released_last_24h||[]).length) rel.innerHTML = '<li class="muted">No releases in the last 24h.</li>';
 
-      $('newssrc').textContent = 'news items: ' + (ctx.recent_news||[]).length;
+      $('newssrc').textContent = 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items';
       $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
     }
     refresh();

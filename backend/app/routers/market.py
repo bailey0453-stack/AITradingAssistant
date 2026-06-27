@@ -49,16 +49,23 @@ def store_news_items(db: Session, items: list[dict], provider: str = "mock") -> 
     return stored
 
 
-def capture_market_snapshot(db: Session) -> tuple[MarketSnapshot, MarketData, list[dict]]:
-    """Fetch a fresh market snapshot (+ news + calendar) and persist it."""
+def capture_market_snapshot(
+    db: Session,
+) -> tuple[MarketSnapshot, MarketData, list[dict], str]:
+    """Fetch a fresh market snapshot (+ news + calendar) and persist it.
+
+    Returns ``(snapshot, market, news, news_source)`` where ``news_source`` is
+    the resolved provider label (``live`` | ``mock`` | ``fallback``).
+    """
     market = get_market_data()
 
     news_provider = get_news_provider()
     news = news_provider.get_news()
+    news_source = getattr(news_provider, "source", "mock")
 
     calendar = get_calendar_provider().get_upcoming(limit=6)
 
-    store_news_items(db, news, provider=news_provider.source)
+    store_news_items(db, news, provider=news_source)
 
     snapshot = MarketSnapshot(
         pair=market.pair,
@@ -80,7 +87,7 @@ def capture_market_snapshot(db: Session) -> tuple[MarketSnapshot, MarketData, li
     db.add(snapshot)
     db.commit()
     db.refresh(snapshot)
-    return snapshot, market, news
+    return snapshot, market, news, news_source
 
 
 def serialize_market(snapshot: MarketSnapshot) -> dict:
@@ -108,7 +115,7 @@ def serialize_market(snapshot: MarketSnapshot) -> dict:
 @router.get("/usdmxn")
 def get_usdmxn(db: Session = Depends(get_db)) -> dict:
     """Fetch the current USD/MXN snapshot, store it, and return it."""
-    snapshot, _, _ = capture_market_snapshot(db)
+    snapshot, _, _, _ = capture_market_snapshot(db)
     return serialize_market(snapshot)
 
 

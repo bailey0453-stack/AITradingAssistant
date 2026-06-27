@@ -36,6 +36,20 @@ def _rep_move(match: dict) -> float | None:
             return w[key]
     return None
 
+
+# Map a reaction's provenance to a dashboard-facing label.
+_BACKFILLED_QUALITIES = {"imported", "official", "vendor_free", "vendor_paid", "backfilled"}
+
+
+def _historical_source_label(matches: list[dict]) -> str:
+    """Summarize the provenance of the matched history (sample/backfilled/live)."""
+    qualities = {str(m.get("source_quality") or "").lower() for m in matches or []}
+    if "live" in qualities:
+        return "live"
+    if qualities & _BACKFILLED_QUALITIES:
+        return "backfilled"
+    return "sample"
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -134,6 +148,7 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             "distance_score", "rank", "windows", "max_favorable_excursion",
             "max_adverse_excursion", "time_to_peak_hours", "reversal_behavior",
         )
+        historical_source = _historical_source_label(matches)
         historical_context = {
             "best_similarity": hist["best_similarity"],
             "best_distance": hist.get("best_distance"),
@@ -141,9 +156,11 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             "sample_size": stats.get("sample_size"),
             "setup_percentile": percentile,
             "evidence_summary": evidence_summary,
+            "historical_source": historical_source,
             "statistics": stats,
             "top_matches": [{k: m.get(k) for k in keep} for m in matches[:25]],
         }
+        out["historical_source"] = historical_source
 
         # Refine the history-dependent "explain every number" entries now that
         # the evidence base + blended confidence are computed.
@@ -287,7 +304,7 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
 @router.get("/usdmxn")
 def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
     """Capture market + news + calendar context, analyze, store, and return."""
-    snapshot, market, news = capture_market_snapshot(db)
+    snapshot, market, news, news_source = capture_market_snapshot(db)
 
     context = build_context(db, market, fresh_news=news)
     timeline = build_timeline(db, context)
@@ -368,6 +385,15 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         "released_events": context["released_events"],
         "released_last_24h": context.get("released_last_24h", []),
         "recent_news": context["recent_news"],
+    }
+    # Clearly label every data source so the dashboard never implies sample/mock
+    # data is fully real. Values: live | mock | fallback | imported | sample |
+    # backfilled (market uses live | mock | fallback).
+    payload["data_sources"] = {
+        "market": market.source,
+        "news": news_source,
+        "calendar": context.get("calendar_source", "mock"),
+        "historical": history.get("historical_source", "sample"),
     }
     return payload
 

@@ -50,8 +50,12 @@ class Settings(BaseSettings):
     # Economic calendar
     calendar_api_key: Optional[str] = None
     # Calendar provider selection + endpoint. Default targets Trading Economics.
+    # Set CALENDAR_PROVIDER=csv (with CALENDAR_CSV_PATH) to import a calendar from
+    # a local CSV with no API key.
     calendar_provider: str = "tradingeconomics"
     calendar_base_url: Optional[str] = None
+    # Path to an importable calendar CSV (used when CALENDAR_PROVIDER=csv).
+    calendar_csv_path: Optional[str] = None
     # AI model (e.g. OpenAI) for narrative analysis
     openai_api_key: Optional[str] = None
     ai_model: str = "gpt-4o-mini"
@@ -94,6 +98,17 @@ class Settings(BaseSettings):
     def calendar_live_enabled(self) -> bool:
         """Live calendar is attempted only when mock mode off AND a key is set."""
         return (not self.use_mock_data) and bool(self.calendar_api_key)
+
+    @property
+    def calendar_csv_enabled(self) -> bool:
+        """Importable CSV calendar is used when selected + a path is configured.
+
+        Unlike the live API providers, this needs no key and works in mock mode,
+        so an operator can import a real calendar export without a paid feed.
+        """
+        return (self.calendar_provider or "").lower() == "csv" and bool(
+            self.calendar_csv_path
+        )
 
 
 @lru_cache

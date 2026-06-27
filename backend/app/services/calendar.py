@@ -281,6 +281,66 @@ class TradingEconomicsCalendarProvider(CalendarProvider):
             return str(raw)
 
 
+class CSVCalendarProvider(CalendarProvider):
+    """Importable calendar from a local CSV export (no API key required).
+
+    Point ``CALENDAR_CSV_PATH`` at a CSV with a header row containing any of:
+    ``event,country,release_time,forecast,previous,actual,importance,
+    currency_impact`` (``release_time`` ISO-8601). ``status`` is derived from
+    whether ``actual`` is present; ``importance`` accepts ``high|medium|low`` or
+    ``3|2|1``. Raises on any problem so the resilient wrapper falls back to mock.
+    """
+
+    source = "imported"
+    _IMPORTANCE_WORDS = {"3": "high", "2": "medium", "1": "low"}
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.path = settings.calendar_csv_path
+
+    def get_events(self) -> list[dict]:
+        import csv
+        import os
+
+        if not self.path:
+            raise RuntimeError("CALENDAR_CSV_PATH is not configured.")
+        if not os.path.isfile(self.path):
+            raise RuntimeError(f"Calendar CSV not found: {self.path}")
+
+        events: list[dict] = []
+        with open(self.path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                name = (row.get("event") or row.get("Event") or "").strip()
+                if not name:
+                    continue
+                country = (row.get("country") or row.get("Country") or "US").strip()
+                currency_impact = (
+                    row.get("currency_impact")
+                    or ("MXN" if country.upper() in {"MX", "MEXICO"} else "USD")
+                ).strip().upper()
+                actual = _clean(row.get("actual") or row.get("Actual"))
+                imp_raw = (row.get("importance") or row.get("Importance") or "").strip().lower()
+                importance = self._IMPORTANCE_WORDS.get(imp_raw, imp_raw or "low")
+                if importance not in {"high", "medium", "low"}:
+                    importance = "low"
+                events.append({
+                    "event": name,
+                    "country": "MX" if currency_impact == "MXN" else "US",
+                    "release_time": TradingEconomicsCalendarProvider._parse_dt(
+                        row.get("release_time") or row.get("Date")
+                    ),
+                    "forecast": _clean(row.get("forecast") or row.get("Forecast")),
+                    "previous": _clean(row.get("previous") or row.get("Previous")),
+                    "actual": actual,
+                    "importance": importance,
+                    "currency_impact": currency_impact,
+                    "status": "released" if actual not in (None, "") else "upcoming",
+                })
+        if not events:
+            raise RuntimeError("Calendar CSV contained no usable events.")
+        return events
+
+
 class FinnhubCalendarProvider(CalendarProvider):  # pragma: no cover - future stub
     source = "finnhub"
 
@@ -309,6 +369,7 @@ def _as_int(value) -> int:
 _LIVE_CALENDAR_PROVIDERS = {
     "tradingeconomics": TradingEconomicsCalendarProvider,
     "finnhub": FinnhubCalendarProvider,
+    "csv": CSVCalendarProvider,
 }
 
 
@@ -328,6 +389,10 @@ class ResilientCalendarProvider(CalendarProvider):
             TradingEconomicsCalendarProvider,
         )
         self._live = live_cls(settings)
+        # A successful CSV import is labeled "imported"; an API feed is "live".
+        self._success_source = getattr(self._live, "source", "live")
+        if self._success_source not in {"imported"}:
+            self._success_source = "live"
         self._mock = MockCalendarProvider()
         self._cache: list[dict] | None = None
 
@@ -336,7 +401,7 @@ class ResilientCalendarProvider(CalendarProvider):
             return self._cache
         try:
             events = self._live.get_events()
-            self.source = "live"
+            self.source = self._success_source
         except Exception as exc:  # noqa: BLE001 - degrade gracefully
             logger.warning(
                 "Live calendar fetch failed (%s); using mock fallback.",
@@ -350,6 +415,9 @@ class ResilientCalendarProvider(CalendarProvider):
 
 def get_calendar_provider(settings: Settings | None = None) -> CalendarProvider:
     settings = settings or get_settings()
+    # Importable CSV calendar needs no API key and works even in mock mode.
+    if settings.calendar_csv_enabled:
+        return ResilientCalendarProvider(settings)
     if settings.is_mock or not settings.calendar_api_key:
         return MockCalendarProvider()
     return ResilientCalendarProvider(settings)
