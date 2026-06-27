@@ -15,15 +15,29 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AnalysisSnapshot, MarketSnapshot, Recommendation
 from app.services.recommendation_evaluator import evaluate_due, performance_summary
+from app.versions import version_tags
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+
+
+def _news_category(market_snapshot: MarketSnapshot) -> str | None:
+    """Most common tag across the snapshot's news, as a coarse category."""
+    news = getattr(market_snapshot, "news", None) or []
+    counts: dict[str, int] = {}
+    for item in news:
+        for tag in (item or {}).get("tags") or []:
+            counts[tag] = counts.get(tag, 0) + 1
+    return max(counts, key=counts.get) if counts else None
 
 
 def store_recommendation(
     db: Session, analysis: AnalysisSnapshot, market_snapshot: MarketSnapshot
 ) -> Recommendation:
-    """Persist a lean, indexed paper recommendation from an analysis snapshot."""
+    """Persist a versioned, indexed paper recommendation from an analysis snapshot."""
+    regime = (analysis.market_regime or {}).get("primary") if analysis.market_regime else None
+    vols = version_tags()
     reco = Recommendation(
+        **vols,
         pair=analysis.pair,
         spot_price=market_snapshot.usdmxn if market_snapshot else None,
         direction=analysis.direction,
@@ -31,11 +45,25 @@ def store_recommendation(
         opportunity_grade=analysis.opportunity_grade,
         trade_score=analysis.trade_score,
         market_regime=analysis.market_regime,
+        regime=regime,
+        volatility=market_snapshot.vix if market_snapshot else None,
+        news_category=_news_category(market_snapshot),
         target=analysis.target,
         stretch_target=analysis.stretch_target,
         stop=analysis.stop,
         time_horizons=analysis.time_horizons,
+        primary_trade_plan={
+            "entry": analysis.entry,
+            "target": analysis.target,
+            "stretch_target": analysis.stretch_target,
+            "stop": analysis.stop,
+            "expected_move": analysis.expected_move,
+            "expected_duration": analysis.expected_duration,
+        },
         key_drivers=analysis.key_drivers,
+        bullish_factors=analysis.bullish_factors,
+        bearish_factors=analysis.bearish_factors,
+        conflicting_signals=analysis.conflicting_signals,
         historical_similarity=analysis.historical_similarity,
         strategist=analysis.strategist,
         analysis_snapshot_id=analysis.id,
@@ -50,7 +78,12 @@ def store_recommendation(
 def serialize_recommendation(reco: Recommendation, with_outcomes: bool = False) -> dict:
     data = {
         "id": reco.id,
+        "recommendation_uuid": reco.recommendation_uuid,
         "created_at": reco.created_at.isoformat() if reco.created_at else None,
+        "model_version": reco.model_version,
+        "reasoning_engine_version": reco.reasoning_engine_version,
+        "weighting_profile": reco.weighting_profile,
+        "historical_engine_version": reco.historical_engine_version,
         "pair": reco.pair,
         "spot_price": reco.spot_price,
         "direction": reco.direction,
@@ -58,11 +91,18 @@ def serialize_recommendation(reco: Recommendation, with_outcomes: bool = False) 
         "opportunity_grade": reco.opportunity_grade,
         "trade_score": reco.trade_score,
         "market_regime": reco.market_regime,
+        "regime": reco.regime,
+        "volatility": reco.volatility,
+        "news_category": reco.news_category,
         "target": reco.target,
         "stretch_target": reco.stretch_target,
         "stop": reco.stop,
         "time_horizons": reco.time_horizons,
+        "primary_trade_plan": reco.primary_trade_plan,
         "key_drivers": reco.key_drivers,
+        "bullish_factors": reco.bullish_factors,
+        "bearish_factors": reco.bearish_factors,
+        "conflicting_signals": reco.conflicting_signals,
         "historical_similarity": reco.historical_similarity,
         "strategist": reco.strategist,
         "evaluation_status": reco.evaluation_status,
@@ -83,6 +123,13 @@ def serialize_recommendation(reco: Recommendation, with_outcomes: bool = False) 
                 "stop_hit": o.stop_hit,
                 "max_favorable_excursion": o.max_favorable_excursion,
                 "max_adverse_excursion": o.max_adverse_excursion,
+                "time_to_target_hours": o.time_to_target_hours,
+                "time_to_stop_hours": o.time_to_stop_hours,
+                "holding_time_hours": o.holding_time_hours,
+                "actionable": o.actionable,
+                "hedge_return_pct": o.hedge_return_pct,
+                "gross_pnl_usd": o.gross_pnl_usd,
+                "net_pnl_usd": o.net_pnl_usd,
             }
             for o in sorted(reco.outcomes, key=lambda x: x.horizon)
         ]

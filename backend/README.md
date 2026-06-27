@@ -271,6 +271,45 @@ signal) and later scored against the real USD/MXN price path. These are kept
 > default ephemeral SQLite the recommendation/outcome history resets per cold
 > start.
 
+### AI Research Lab & paper hedge performance (Phase 5.2+)
+
+A self-evaluating layer that turns every recommendation into a permanent
+research observation, scores it, and measures model quality over time.
+
+- **Versioned repository**: each recommendation gets a `recommendation_uuid` plus
+  `model_version` / `reasoning_engine_version` / `weighting_profile` /
+  `historical_engine_version` (see `app/versions.py`), the market snapshot,
+  strategist narrative, factors (bullish/bearish/conflicting), regime,
+  volatility, news category, time horizons, and the primary trade plan. Kept
+  separate from public historical data and from real Border Currency trades; a
+  future real trade can reference `recommendation_uuid`.
+- **Evaluator** (`recommendation_evaluator.py`): scores 1h/4h/end_of_day/1d/2d/5d
+  with direction-correct, target/stretch/stop hits, return %, MFE/MAE, time to
+  target, time to stop, and holding time. Completed evaluations are never
+  recomputed (unique per recommendation+horizon).
+- **Paper hedge (SIMULATED — never a real trade)**: each actionable BUY_USD /
+  SELL_USD becomes a $100,000 notional hedge with $20 entry + $20 exit = $40
+  cost; PASS/NO_TRADE generate none. Stored: `hedge_return_pct`,
+  `gross_pnl_usd`, `net_pnl_usd`.
+- **Research Lab** (`research_lab.py`): overall accuracy; accuracy by confidence
+  bucket / grade / regime / news category / historical-similarity bucket /
+  volatility / horizon / model version; confidence calibration (predicted vs
+  actual); signal stability + recommendation drift; top/weakest drivers;
+  historical-similarity accuracy; provider reliability; and **self-assessment
+  observations** (observations only — weights are never changed automatically).
+- **Monthly performance**: totals, actionable count, win rate, gross/costs/net
+  P/L, average P/L, return on notional, best/worst trade, with breakdowns by
+  confidence/grade/regime/model version/horizon.
+- **Endpoints**: `GET /research/summary`, `/research/calibration`,
+  `/research/drivers`, `/research/model-performance`, `/research/performance`,
+  `GET /performance/monthly`, `/performance/summary`, `/performance/recommendations`.
+- **Dashboard**: an **AI Research Lab** panel and a **Paper hedge performance**
+  panel, both clearly labeled **SIMULATED PAPER PERFORMANCE**. All reads are
+  cheap aggregates; evaluation runs only via `POST /recommendations/evaluate`.
+- **Indexes** for scale (hundreds of thousands of rows): `created_at`,
+  `recommendation_uuid`, `model_version`, `confidence`, `opportunity_grade`,
+  `regime`, `evaluation_status`, `evaluated_at`.
+
 ### Finnhub news
 
 Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from

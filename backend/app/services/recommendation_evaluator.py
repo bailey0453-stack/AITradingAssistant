@@ -38,6 +38,14 @@ HORIZONS = list(HORIZON_SECONDS.keys())
 
 _FX_DAY_CLOSE_HOUR = 21  # 21:00 UTC
 
+# Paper hedge (SIMULATED model evaluation only — never a real trade).
+PAPER_NOTIONAL_USD = 100_000.0
+PAPER_ENTRY_COST_USD = 20.0
+PAPER_EXIT_COST_USD = 20.0
+PAPER_TOTAL_COST_USD = PAPER_ENTRY_COST_USD + PAPER_EXIT_COST_USD  # 40
+_ACTIONABLE = {"BUY_USD", "SELL_USD"}
+_DIR_SIGN = {"BUY_USD": 1.0, "SELL_USD": -1.0}
+
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -88,11 +96,30 @@ def _evaluation_price(
     return None  # no post-horizon observation yet -> evaluate later
 
 
+def _first_crossing_hours(
+    series: list[tuple[datetime, float]], created: datetime,
+    level: Optional[float], above: bool
+) -> Optional[float]:
+    """Hours from ``created`` to the first time price crosses ``level``.
+
+    ``above=True`` means "price >= level" (target for BUY / stop for SELL);
+    ``above=False`` means "price <= level".
+    """
+    if level is None:
+        return None
+    for ts, px in series:
+        if (px >= level) if above else (px <= level):
+            return round(max(0.0, (_aware(ts) - created).total_seconds()) / 3600, 3)
+    return None
+
+
 def _score(reco: Recommendation, spot_eval: float,
-           prices: list[float]) -> dict:
-    """Compute the outcome metrics for one horizon."""
+           series: list[tuple[datetime, float]],
+           created: datetime, eval_time: datetime) -> dict:
+    """Compute the outcome + paper-hedge metrics for one horizon."""
     spot0 = reco.spot_price
     ret = round((spot_eval - spot0) / spot0 * 100, 4) if spot0 else None
+    prices = [p for _, p in series]
     hi = max(prices) if prices else spot_eval
     lo = min(prices) if prices else spot_eval
 
@@ -104,6 +131,8 @@ def _score(reco: Recommendation, spot_eval: float,
         stop_hit = reco.stop is not None and lo <= reco.stop
         mfe = (hi - spot0) / spot0 * 100 if spot0 else None
         mae = (lo - spot0) / spot0 * 100 if spot0 else None
+        ttt = _first_crossing_hours(series, created, reco.target, above=True)
+        tts = _first_crossing_hours(series, created, reco.stop, above=False)
     elif direction == "SELL_USD":
         correct = spot_eval < spot0 if spot0 else None
         target_hit = reco.target is not None and lo <= reco.target
@@ -111,11 +140,22 @@ def _score(reco: Recommendation, spot_eval: float,
         stop_hit = reco.stop is not None and hi >= reco.stop
         mfe = (spot0 - lo) / spot0 * 100 if spot0 else None
         mae = (spot0 - hi) / spot0 * 100 if spot0 else None
-    else:  # NO_TRADE: "correct" when price stayed essentially flat.
+        ttt = _first_crossing_hours(series, created, reco.target, above=False)
+        tts = _first_crossing_hours(series, created, reco.stop, above=True)
+    else:  # NO_TRADE / PASS: "correct" when price stayed essentially flat.
         correct = (abs(ret) <= 0.10) if ret is not None else None
         target_hit = stretch_hit = stop_hit = False
         mfe = (hi - spot0) / spot0 * 100 if spot0 else None
         mae = (lo - spot0) / spot0 * 100 if spot0 else None
+        ttt = tts = None
+
+    # Paper hedge: actionable directions only; direction-adjusted return.
+    actionable = direction in _ACTIONABLE
+    hedge_ret = gross = net = None
+    if actionable and ret is not None:
+        hedge_ret = round(_DIR_SIGN[direction] * ret, 4)
+        gross = round(PAPER_NOTIONAL_USD * hedge_ret / 100, 2)
+        net = round(gross - PAPER_TOTAL_COST_USD, 2)
 
     return {
         "spot_at_evaluation": round(spot_eval, 6),
@@ -126,6 +166,13 @@ def _score(reco: Recommendation, spot_eval: float,
         "stop_hit": bool(stop_hit),
         "max_favorable_excursion": round(mfe, 4) if mfe is not None else None,
         "max_adverse_excursion": round(mae, 4) if mae is not None else None,
+        "time_to_target_hours": ttt,
+        "time_to_stop_hours": tts,
+        "holding_time_hours": round((eval_time - created).total_seconds() / 3600, 3),
+        "actionable": actionable,
+        "hedge_return_pct": hedge_ret,
+        "gross_pnl_usd": gross,
+        "net_pnl_usd": net,
     }
 
 
@@ -171,8 +218,8 @@ def evaluate_due(
             if ev is None:
                 continue  # no price observed at/after the horizon yet
             eval_time, spot_eval = ev
-            prices = [p for _, p in _price_window(db, reco.pair, created, eval_time)]
-            metrics = _score(reco, spot_eval, prices)
+            series = _price_window(db, reco.pair, created, eval_time)
+            metrics = _score(reco, spot_eval, series, created, eval_time)
             db.add(RecommendationOutcome(
                 recommendation_id=reco.id, horizon=horizon,
                 evaluated_at=now, **metrics,

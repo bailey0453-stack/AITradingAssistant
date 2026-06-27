@@ -25,7 +25,9 @@ from app.routers import (
     history,
     market,
     news,
+    performance,
     recommendations,
+    research,
     timeline,
 )
 
@@ -65,6 +67,8 @@ app.include_router(calendar.router)
 app.include_router(timeline.router)
 app.include_router(history.router)
 app.include_router(recommendations.router)
+app.include_router(research.router)
+app.include_router(performance.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -202,6 +206,68 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="k muted" style="margin-top:10px">By horizon</div>
       <table><thead><tr><th>Horizon</th><th>Win%</th><th>Target%</th><th>Stop%</th><th>Avg ret</th><th>N</th></tr></thead><tbody id="perf_horizon"></tbody></table>
       <p class="muted" id="perf_empty" style="margin-top:8px"></p>
+    </div>
+
+    <div class="card" style="border-left:4px solid #6b46c1">
+      <h2>AI Research Lab <span class="src sample">self-evaluation</span></h2>
+      <div class="row">
+        <div class="stat"><div class="k">Overall accuracy (1d)</div><div class="v" id="rl_acc">—</div></div>
+        <div class="stat"><div class="k">Signal stability</div><div class="v" id="rl_stab">—</div></div>
+        <div class="stat"><div class="k">Recommendation drift</div><div class="v" id="rl_drift">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:12px">Self-assessment (observations only — weights never change automatically)</div>
+      <ul id="rl_assess"></ul>
+      <div class="grid2" style="margin-top:8px">
+        <div>
+          <div class="k muted">Confidence calibration</div>
+          <table><thead><tr><th>Conf</th><th>Predicted</th><th>Actual</th><th>Gap</th><th>N</th></tr></thead><tbody id="rl_calib"></tbody></table>
+        </div>
+        <div>
+          <div class="k muted">Accuracy by grade</div>
+          <table><thead><tr><th>Grade</th><th>Acc%</th><th>N</th></tr></thead><tbody id="rl_grade"></tbody></table>
+        </div>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div>
+          <div class="k muted">Accuracy by regime</div>
+          <table><thead><tr><th>Regime</th><th>Acc%</th><th>N</th></tr></thead><tbody id="rl_regime"></tbody></table>
+        </div>
+        <div>
+          <div class="k muted">Accuracy by model version</div>
+          <table><thead><tr><th>Version</th><th>Acc%</th><th>Net P/L</th><th>N</th></tr></thead><tbody id="rl_model"></tbody></table>
+        </div>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div>
+          <div class="k muted">Top drivers</div>
+          <table><thead><tr><th>Driver</th><th>Acc%</th><th>N</th></tr></thead><tbody id="rl_topdrv"></tbody></table>
+        </div>
+        <div>
+          <div class="k muted">Weakest drivers</div>
+          <table><thead><tr><th>Driver</th><th>Acc%</th><th>N</th></tr></thead><tbody id="rl_weakdrv"></tbody></table>
+        </div>
+      </div>
+      <div class="k muted" style="margin-top:8px">Historical similarity accuracy</div>
+      <table><thead><tr><th>Similarity</th><th>Acc%</th><th>Avg ret</th><th>N</th></tr></thead><tbody id="rl_sim"></tbody></table>
+      <div class="k muted" style="margin-top:8px">Provider reliability</div>
+      <div id="rl_providers" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #2f855a">
+      <h2>Paper hedge performance <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">SIMULATED PAPER PERFORMANCE</span></h2>
+      <p class="muted" style="margin:4px 0 10px">$100,000 notional · $40 round-trip cost · BUY_USD / SELL_USD only · no real trades.</p>
+      <div class="row">
+        <div class="stat"><div class="k">Actionable trades</div><div class="v" id="ph_trades">—</div></div>
+        <div class="stat"><div class="k">Win rate</div><div class="v" id="ph_win">—</div></div>
+        <div class="stat"><div class="k">Gross P/L</div><div class="v" id="ph_gross">—</div></div>
+        <div class="stat"><div class="k">Costs</div><div class="v" id="ph_costs">—</div></div>
+        <div class="stat"><div class="k">Net P/L</div><div class="v" id="ph_net">—</div></div>
+        <div class="stat"><div class="k">Return on notional</div><div class="v" id="ph_ron">—</div></div>
+        <div class="stat"><div class="k">Best trade</div><div class="v lean-usd" id="ph_best">—</div></div>
+        <div class="stat"><div class="k">Worst trade</div><div class="v lean-mxn" id="ph_worst">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:10px">Monthly net P/L</div>
+      <table><thead><tr><th>Month</th><th>Recs</th><th>Actionable</th><th>Win%</th><th>Gross</th><th>Costs</th><th>Net</th><th>Best</th><th>Worst</th></tr></thead><tbody id="ph_monthly"></tbody></table>
     </div>
 
     <div class="card" style="border-left:4px solid #2b6cb0">
@@ -751,6 +817,63 @@ DASHBOARD_HTML = """<!doctype html>
       });
       $('perf_empty').textContent = (p.evaluated_outcomes? '' :
         'No outcomes scored yet — recommendations are evaluated once enough time passes (POST /recommendations/evaluate).');
+      loadResearch();
+    }
+
+    function usd(v){ return (v==null)?'—':('$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2})); }
+    function accRows(obj, cols){
+      // cols: array of functions(name, block) -> cell text
+      return Object.keys(obj||{}).map(function(k){
+        const a=obj[k]||{};
+        return '<tr>'+cols.map(function(fn){return '<td>'+fn(k,a)+'</td>';}).join('')+'</tr>';
+      }).join('');
+    }
+    async function loadResearch(){
+      let s, ph, mo;
+      try {
+        s = await (await fetch('/research/summary')).json();
+        ph = await (await fetch('/performance/summary')).json();
+        mo = await (await fetch('/performance/monthly')).json();
+      } catch(e){ return; }
+
+      $('rl_acc').textContent = pctTxt(s.overall_accuracy);
+      $('rl_stab').textContent = pctTxt((s.signal_stability||{}).stability);
+      $('rl_drift').textContent = pctTxt((s.signal_stability||{}).drift_rate);
+      const al=$('rl_assess'); al.innerHTML='';
+      (s.self_assessment||[]).forEach(function(o){ const li=document.createElement('li'); li.textContent=o; al.appendChild(li); });
+
+      $('rl_calib').innerHTML = accRows(s.confidence_calibration, [
+        (k)=>k, (k,a)=>pctTxt(a.predicted_confidence), (k,a)=>pctTxt(a.actual_accuracy),
+        (k,a)=>(a.gap==null?'—':a.gap), (k,a)=>a.samples]);
+      $('rl_grade').innerHTML = accRows(s.accuracy_by_grade, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
+      $('rl_regime').innerHTML = accRows(s.accuracy_by_regime, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
+      $('rl_model').innerHTML = accRows(s.accuracy_by_model_version, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>usd(a.avg_net_pnl_usd),(k,a)=>a.samples]);
+      $('rl_sim').innerHTML = accRows(s.accuracy_by_historical_similarity, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>retTxt(a.avg_return_pct),(k,a)=>a.samples]);
+
+      const drv=function(list){ return (list||[]).map(function(d){return '<tr><td>'+d.driver+'</td><td>'+pctTxt(d.accuracy)+'</td><td>'+d.samples+'</td></tr>';}).join(''); };
+      $('rl_topdrv').innerHTML = drv(s.top_drivers);
+      $('rl_weakdrv').innerHTML = drv(s.weakest_drivers);
+
+      const pv=s.provider_reliability||{}; const pb=$('rl_providers'); pb.innerHTML='';
+      Object.keys(pv).forEach(function(k){ const r=pv[k]||{}; const sp=document.createElement('span'); sp.className='hstat'; sp.innerHTML='<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+((r.status||'').replace(/_/g,' ')); pb.appendChild(sp); });
+      if(!Object.keys(pv).length) pb.innerHTML='<span class="muted">No provider activity yet.</span>';
+
+      $('ph_trades').textContent = ph.actionable_trades ?? '—';
+      $('ph_win').textContent = pctTxt(ph.win_rate);
+      $('ph_gross').textContent = usd(ph.gross_pnl_usd);
+      $('ph_costs').textContent = usd(ph.transaction_costs_usd);
+      $('ph_net').textContent = usd(ph.net_pnl_usd);
+      $('ph_ron').textContent = retTxt(ph.return_on_notional_pct);
+      $('ph_best').textContent = usd(ph.best_trade_usd);
+      $('ph_worst').textContent = usd(ph.worst_trade_usd);
+
+      const mb=$('ph_monthly'); mb.innerHTML='';
+      const months=(mo||{}).months||{};
+      Object.keys(months).sort().reverse().forEach(function(k){
+        const m=months[k];
+        mb.innerHTML += '<tr><td>'+k+'</td><td>'+m.total_recommendations+'</td><td>'+m.actionable_recommendations+'</td><td>'+pctTxt(m.win_rate)+'</td><td>'+usd(m.gross_pnl_usd)+'</td><td>'+usd(m.transaction_costs_usd)+'</td><td>'+usd(m.net_pnl_usd)+'</td><td>'+usd(m.best_trade_usd)+'</td><td>'+usd(m.worst_trade_usd)+'</td></tr>';
+      });
+      if(!Object.keys(months).length) mb.innerHTML='<tr><td colspan="9" class="muted">No evaluated months yet.</td></tr>';
     }
     refresh();
   </script>

@@ -15,6 +15,7 @@ Designed for many rows: timestamp / direction / confidence / opportunity_grade /
 evaluated_at are indexed, and outcomes are unique per (recommendation, horizon).
 """
 
+import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -37,16 +38,30 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
 class Recommendation(Base):
     """A stored paper recommendation (model signal) for later evaluation."""
 
     __tablename__ = "recommendations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Stable external id (UUID) so future real trades can reference it.
+    recommendation_uuid: Mapped[str] = mapped_column(
+        String(36), default=_uuid, unique=True, index=True
+    )
     # Recommendation timestamp (indexed for time-range queries / growth).
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, index=True
     )
+
+    # Component versions, for cross-version model comparison in the Research Lab.
+    model_version: Mapped[Optional[str]] = mapped_column(String(24), nullable=True, index=True)
+    reasoning_engine_version: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    weighting_profile: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    historical_engine_version: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
 
     pair: Mapped[str] = mapped_column(String(16), default="USDMXN", index=True)
     spot_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -59,13 +74,21 @@ class Recommendation(Base):
     trade_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     market_regime: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Denormalized primary regime + volatility + news category for fast grouping.
+    regime: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    volatility: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    news_category: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stretch_target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stop: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     time_horizons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    primary_trade_plan: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     key_drivers: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    bullish_factors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    bearish_factors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    conflicting_signals: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     historical_similarity: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     strategist: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
@@ -123,3 +146,14 @@ class RecommendationOutcome(Base):
 
     max_favorable_excursion: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     max_adverse_excursion: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    time_to_target_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    time_to_stop_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    holding_time_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Paper hedge (SIMULATED model evaluation only; never a real trade).
+    # Applies only to actionable BUY_USD / SELL_USD directions.
+    actionable: Mapped[bool] = mapped_column(Boolean, default=False)
+    hedge_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gross_pnl_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_pnl_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

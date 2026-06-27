@@ -1125,6 +1125,119 @@ def test_recommendation_tracking():
     check("recommendation endpoints respond", performance_endpoint_ok)
 
 
+def test_research_lab():
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
+    from app.services import recommendation_evaluator as rev
+    from app.services import research_lab as rl
+
+    init_db()
+
+    def seed_and_evaluate():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.query(MarketSnapshot).delete()
+            db.commit()
+
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=6)).replace(hour=10, minute=0, second=0, microsecond=0)
+
+            buy = Recommendation(
+                pair="USDMXN", created_at=t0, spot_price=18.00, direction="BUY_USD",
+                confidence=88.0, opportunity_grade="A", regime="Trending",
+                model_version="9.9-test", target=18.15, stretch_target=18.30, stop=17.90,
+                key_drivers=["DXY momentum", "US yields"],
+            )
+            no_trade = Recommendation(
+                pair="USDMXN", created_at=t0, spot_price=18.00, direction="NO_TRADE",
+                confidence=40.0, opportunity_grade="PASS", regime="Range Bound",
+                model_version="9.9-test",
+            )
+            db.add_all([buy, no_trade])
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            for h, px in {"1h": 18.05, "4h": 18.12, "end_of_day": 18.14, "1d": 18.20}.items():
+                db.add(MarketSnapshot(pair="USDMXN", usdmxn=px, created_at=rev.horizon_due_time(t0, h)))
+            db.commit()
+            rev.evaluate_due(db, now=now)
+            return buy.id, no_trade.id
+        finally:
+            db.close()
+
+    buy_id, no_trade_id = seed_and_evaluate()
+
+    def paper_hedge_math_is_correct():
+        db = SessionLocal()
+        try:
+            buy_1d = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=buy_id, horizon="1d").one()
+            assert buy_1d.actionable is True
+            exp_ret = round((18.20 - 18.00) / 18.00 * 100, 4)         # +1.1111
+            assert abs(buy_1d.hedge_return_pct - exp_ret) < 1e-3, buy_1d.hedge_return_pct
+            exp_gross = round(100000 * exp_ret / 100, 2)               # ~1111.11
+            assert abs(buy_1d.gross_pnl_usd - exp_gross) < 0.5, buy_1d.gross_pnl_usd
+            assert abs(buy_1d.net_pnl_usd - (exp_gross - 40)) < 0.5, buy_1d.net_pnl_usd
+            assert buy_1d.holding_time_hours and buy_1d.time_to_target_hours is not None
+
+            nt_1d = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=no_trade_id, horizon="1d").one()
+            assert nt_1d.actionable is False
+            assert nt_1d.net_pnl_usd is None, "PASS/NO_TRADE must not generate hedge P/L"
+        finally:
+            db.close()
+
+    def research_summary_and_calibration():
+        db = SessionLocal()
+        try:
+            s = rl.research_summary(db)
+            for k in ("overall_accuracy", "accuracy_by_grade", "accuracy_by_regime",
+                      "accuracy_by_confidence", "accuracy_by_model_version",
+                      "confidence_calibration", "signal_stability", "top_drivers",
+                      "weakest_drivers", "provider_reliability", "self_assessment"):
+                assert k in s, k
+            assert "9.9-test" in s["accuracy_by_model_version"], s["accuracy_by_model_version"]
+            cal = rl.calibration(db)["buckets"]
+            assert "85-100" in cal, cal
+            mp = rl.model_performance(db)["by_model_version"]
+            assert "9.9-test" in mp, mp
+        finally:
+            db.close()
+
+    def paper_hedge_and_monthly_totals():
+        db = SessionLocal()
+        try:
+            ph = rl.paper_hedge_performance(db)
+            assert ph["label"] == "SIMULATED PAPER PERFORMANCE"
+            assert ph["actionable_trades"] == 1, ph  # only the BUY reco
+            assert ph["transaction_costs_usd"] == 40.0, ph
+            assert ph["net_pnl_usd"] > 0, ph
+            assert ph["win_rate"] == 100.0, ph
+
+            mo = rl.monthly_performance(db)["months"]
+            month = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%Y-%m")
+            assert month in mo, (month, list(mo))
+            assert mo[month]["total_recommendations"] >= 2, mo[month]
+            assert mo[month]["actionable_recommendations"] == 1, mo[month]
+        finally:
+            db.close()
+
+    def research_endpoints_respond():
+        with TestClient(app) as c:
+            for ep in ("/research/summary", "/research/calibration", "/research/drivers",
+                       "/research/model-performance", "/research/performance",
+                       "/performance/monthly", "/performance/summary",
+                       "/performance/recommendations"):
+                assert c.get(ep).status_code == 200, ep
+
+    check("paper hedge math ($100k notional, $40 cost, actionable only)", paper_hedge_math_is_correct)
+    check("research summary + calibration + model performance", research_summary_and_calibration)
+    check("paper hedge totals + monthly statistics", paper_hedge_and_monthly_totals)
+    check("research + performance endpoints respond", research_endpoints_respond)
+
+
 def test_live_providers():
     def finnhub_filters_and_tags_live():
         # general + forex categories both return this list (deduped by headline).
@@ -1319,6 +1432,7 @@ def main():
     test_live_providers()
     test_market_infrastructure()
     test_recommendation_tracking()
+    test_research_lab()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

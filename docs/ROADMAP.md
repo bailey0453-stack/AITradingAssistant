@@ -252,6 +252,30 @@ correct — paper signals, kept separate from real trades.
       `recommendation_id`. Smoke tests cover storage, multi-horizon scoring, and
       the fast performance read.
 
+## Phase 5.3 — AI Research Lab & paper hedge performance (built)
+
+Goal: a self-evaluating market intelligence platform — every recommendation is a
+permanent research observation, later scored and used to measure model quality.
+
+- [x] Versioned recommendation repository (`recommendation_uuid`, model/
+      reasoning/weighting/historical engine versions; factors, regime,
+      volatility, news category, trade plan) — separate from public history and
+      real trades.
+- [x] Evaluator adds time-to-target/stop, holding time, and per-horizon paper
+      hedge P/L; completed evaluations are never recomputed.
+- [x] Paper hedge (SIMULATED): $100k notional, $40 round-trip cost, BUY_USD/
+      SELL_USD only (never PASS/NO_TRADE).
+- [x] `research_lab.py`: accuracy breakdowns (confidence/grade/regime/news/
+      similarity/volatility/horizon/model version), confidence calibration,
+      signal stability + drift, top/weakest drivers, provider reliability, and
+      self-assessment observations (never auto-tunes weights).
+- [x] Monthly performance with full P/L + breakdowns.
+- [x] Endpoints: `/research/summary|calibration|drivers|model-performance|
+      performance`, `/performance/monthly|summary|recommendations`.
+- [x] Dashboard AI Research Lab + Paper hedge panels labeled SIMULATED PAPER
+      PERFORMANCE. Indexed for hundreds of thousands of rows. Smoke tests cover
+      hedge math, research summary/calibration/model perf, and monthly totals.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
