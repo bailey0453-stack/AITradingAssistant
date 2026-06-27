@@ -93,9 +93,13 @@ DASHBOARD_HTML = """<!doctype html>
     .tl .label { font-weight:600; }
     .src { font-size:11px; padding:2px 7px; border-radius:6px; background:#1b2542; color:#9fb3d9; }
     .src.live { background:#0f3d2e; color:#5be3a0; }
-    .src.imported, .src.backfilled { background:#15324a; color:#7fd0ff; }
+    .src.imported, .src.backfilled, .src.cached { background:#15324a; color:#7fd0ff; }
     .src.fallback { background:#3d3416; color:#ffd98a; }
     .src.mock, .src.sample { background:#3a2236; color:#f0a6d6; }
+    .hstat { display:inline-flex; gap:6px; align-items:center; margin:3px 10px 3px 0; font-size:12px; }
+    .dot { width:9px; height:9px; border-radius:50%; display:inline-block; background:#5b6b8c; }
+    .dot.healthy { background:#5be3a0; } .dot.using_cache { background:#7fd0ff; }
+    .dot.using_fallback, .dot.rate_limited { background:#ffd98a; } .dot.offline { background:#ff6b8b; }
     .sources { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .sources .lbl { font-size:11px; color:#8aa0c6; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -142,6 +146,26 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Oil <span class="src" id="fs_oil">—</span></div><div class="v" id="oil">—</div></div>
         <div class="stat"><div class="k">Gold <span class="src" id="fs_gold">—</span></div><div class="v" id="gold">—</div></div>
         <div class="stat"><div class="k">VIX <span class="src" id="fs_vix">—</span></div><div class="v" id="vix">—</div></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Market status <span id="mkt_badge" class="src">—</span></h2>
+        <p id="mkt_reason" class="muted" style="margin:4px 0 10px"></p>
+        <div class="row">
+          <div class="stat"><div class="k">Last live update</div><div class="v" id="mkt_fetched">—</div></div>
+          <div class="stat"><div class="k">Data age</div><div class="v" id="mkt_age">—</div></div>
+          <div class="stat"><div class="k">Next refresh</div><div class="v" id="mkt_next">—</div></div>
+          <div class="stat"><div class="k">Next market open</div><div class="v" id="mkt_open">—</div></div>
+          <div class="stat"><div class="k">Provider</div><div class="v" id="mkt_provider">—</div></div>
+          <div class="stat"><div class="k">Source</div><div class="v" id="mkt_source">—</div></div>
+        </div>
+        <p id="mkt_closed_note" class="muted" style="margin-top:10px;font-weight:600"></p>
+      </div>
+      <div class="card">
+        <h2>Provider health</h2>
+        <div id="provhealth" style="margin-top:8px"></div>
       </div>
     </div>
 
@@ -377,6 +401,7 @@ DASHBOARD_HTML = """<!doctype html>
     const $ = id => document.getElementById(id);
     function fill(id, v, suffix){ $(id).textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—'; }
     function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+v; }
+    function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(); }catch(e){ return iso; } }
     async function refresh() {
       const d = await (await fetch('/analysis/usdmxn')).json();
       const m = d.market || {};
@@ -390,6 +415,29 @@ DASHBOARD_HTML = """<!doctype html>
       ['usdmxn','dxy','us2y','us10y','oil','gold','vix'].forEach(function(f){
         setSrc('fs_'+f, fsrc[f]);
       });
+
+      // Market status panel (open/closed, age, next refresh/open, provider).
+      const ms = d.market_state || {};
+      const mb = $('mkt_badge'); mb.textContent = ms.market_status || '—';
+      mb.className = 'src ' + (ms.is_open ? 'live' : 'fallback');
+      $('mkt_reason').textContent = ms.market_reason || '';
+      $('mkt_fetched').textContent = fmtTime(ms.fetched_at);
+      $('mkt_age').textContent = (ms.age_minutes==null?'—':(ms.age_minutes+' min'+(ms.is_stale?' · stale':'')));
+      $('mkt_next').textContent = fmtTime(ms.next_refresh);
+      $('mkt_open').textContent = ms.is_open ? 'open now' : fmtTime(ms.next_market_open);
+      $('mkt_provider').textContent = m.provider || '—';
+      $('mkt_source').textContent = (ms.cached ? 'cached · ' : '') + (m.source || '—');
+      $('mkt_closed_note').textContent = ms.is_open ? '' : 'Using latest available market data.';
+
+      // Provider health panel.
+      const ph = d.provider_health || {}; const box = $('provhealth'); box.innerHTML='';
+      Object.keys(ph).forEach(function(k){
+        const r = ph[k] || {}; const s = document.createElement('span'); s.className='hstat';
+        const label = (r.status||'').replace(/_/g,' ');
+        s.innerHTML = '<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+label+(r.detail?(' <span class="muted">('+r.detail+')</span>'):'');
+        box.appendChild(s);
+      });
+      if (!Object.keys(ph).length) box.innerHTML = '<span class="muted">No provider activity yet.</span>';
 
       // Clearly label every data source (live/mock/fallback/imported/sample).
       const ds = d.data_sources || {};

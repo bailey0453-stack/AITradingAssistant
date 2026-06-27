@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AnalysisSnapshot
 from app.routers.market import capture_market_snapshot, serialize_market
+from app.services import cache_manager
 from app.services.ai_analysis import get_analyzer
 from app.services.context_builder import build_context, build_timeline
 from app.services.history import (
@@ -304,7 +305,7 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
 @router.get("/usdmxn")
 def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
     """Capture market + news + calendar context, analyze, store, and return."""
-    snapshot, market, news, news_source = capture_market_snapshot(db)
+    snapshot, market, news, news_source, market_meta = capture_market_snapshot(db)
 
     context = build_context(db, market, fresh_news=news)
     timeline = build_timeline(db, context)
@@ -379,7 +380,31 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
             db, history.get("query_vector") or {}, history["matches"], analysis.id
         )
 
-    payload = serialize_analysis(analysis, market=serialize_market(snapshot))
+    payload = serialize_analysis(
+        analysis, market={**serialize_market(snapshot), **market_meta}
+    )
+    # Market-state awareness: prices may be from the latest session when closed,
+    # but news / calendar / historical / regime / strategist are still evaluated.
+    payload["market_state"] = {
+        k: market_meta.get(k)
+        for k in (
+            "market_status", "market_reason", "is_open", "cached", "is_stale",
+            "fetched_at", "age_minutes", "next_refresh", "last_market_close",
+            "next_market_open", "refresh_interval_minutes",
+        )
+    }
+    if market_meta.get("is_open"):
+        payload["market_status_note"] = (
+            "FX market is open; USD/MXN is live within the refresh interval."
+        )
+    else:
+        payload["market_status_note"] = (
+            f"FX market is closed ({market_meta.get('market_reason', '')}). "
+            "Prices shown are the latest available session and are not currently "
+            "moving; news, calendar, historical evidence, market regime, and the "
+            "strategist view are still evaluated."
+        )
+    payload["provider_health"] = cache_manager.health_snapshot()
     payload["context"] = {
         "upcoming_events": context["upcoming_events"],
         "released_events": context["released_events"],

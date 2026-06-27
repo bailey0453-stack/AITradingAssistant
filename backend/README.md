@@ -201,6 +201,46 @@ for `MACRO_CACHE_SECONDS` (default 600s). **Note:** Alpha Vantage's free tier is
 back to mock if the limit is hit. `/market/usdmxn` returns a `sources` map
 (`{field: live|fallback|mock}`) and the dashboard shows a badge per field.
 
+### Market intelligence infrastructure (Phase 5.1)
+
+A professional data layer minimizes API usage, respects market hours, and
+continuously builds the historical database.
+
+- **Market hours** (`services/market_hours.py`): the global FX week runs
+  continuously from **Sunday 21:00 UTC** to **Friday 21:00 UTC**. State is one
+  of `OPEN` / `CLOSED` / `WEEKEND` / `HOLIDAY` / `EARLY_CLOSE` / `MAINTENANCE`,
+  returned with `market_reason`, `last_market_close`, `next_market_open`, and
+  `next_expected_refresh`.
+- **Holiday framework**: pass a `MarketCalendar` (holidays / early closes /
+  maintenance windows) or set `MARKET_HOLIDAYS='["2026-01-01"]"`. Nothing is
+  hardcoded to weekends only.
+- **Cache strategy** (`services/cache_manager.py`): if a value is within its
+  refresh interval it's reused; if expired **and the market is open** a live
+  fetch runs; **while the market is closed USD/MXN is never requested** — the
+  latest stored session is served. On provider failure the latest cache is
+  served, and mock data is used only when no cache exists at all.
+- **Refresh policies** (configurable via `REFRESH_POLICIES`, minutes): USD/MXN
+  60m (market-gated), news 5m, calendar 30m, treasury/DXY/gold/oil/VIX 15m.
+  Market-instrument keys are gated to market hours.
+- **Automatic historical capture**: every successful **live** refresh writes a
+  `historical_market_snapshots` row (timestamp, provider, market data, status,
+  source) — the foundation for similarity analysis, with no second process.
+- **Market metadata**: `/market/usdmxn` returns `market_status`,
+  `market_reason`, `provider`, `source`, `cached`, `fetched_at`, `cached_at`,
+  `age_minutes`, `refresh_interval_*`, `next_refresh`, `last_market_close`,
+  `next_market_open`, and `is_stale`. `/market/status` returns the state +
+  policies + provider health without forcing a fetch.
+- **Provider health**: each provider reports `healthy` / `rate_limited` /
+  `offline` / `using_cache` / `using_fallback`; surfaced on `/analysis/usdmxn`
+  (`provider_health`) and the dashboard's Provider Health panel.
+- **Analysis awareness**: when the market is closed, `/analysis/usdmxn` adds a
+  `market_state` block and a `market_status_note` clarifying that prices are the
+  latest session (not moving) while news, calendar, historical evidence, regime,
+  and the strategist view are still evaluated.
+- **Future scheduler**: `cache_manager.RefreshScheduler.planned_jobs()` enumerates
+  the periodic refreshes a future scheduler (e.g. Vercel Cron) would run.
+  Nothing runs in the background yet — the interface is only prepared.
+
 ### Finnhub news
 
 Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from
@@ -488,6 +528,8 @@ All config is environment-driven (see `.env.example`):
 | `FRED_API_KEY` | FRED key for **live US 2Y / 10Y** treasury yields | empty |
 | `ALPHA_VANTAGE_API_KEY` | Alpha Vantage key for **live oil / gold** (DXY/VIX/S&P fall back) | empty |
 | `MACRO_CACHE_SECONDS` | Cache macro fetches to respect rate limits (AV ~25/day) | `600` |
+| `REFRESH_POLICIES` | JSON of per-provider refresh minutes, e.g. `{"usdmxn":30,"news":10}` | built-in defaults |
+| `MARKET_HOLIDAYS` | JSON list of ISO dates the FX market is closed | empty |
 | `NEWS_API_KEY` | News provider key for **live news** (NewsAPI.org / Finnhub) | empty |
 | `NEWS_PROVIDER` | Live news implementation (`newsapi` \| `finnhub` \| `fmp`) | `newsapi` |
 | `NEWS_BASE_URL` | Override the news endpoint (optional) | NewsAPI `/v2/everything` |

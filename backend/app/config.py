@@ -6,7 +6,7 @@ secret by default; real API keys are supplied via environment variables.
 """
 
 from functools import lru_cache
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     confidence_weights: Optional[Dict[str, float]] = None
     # Which importer seeds historical backfill (mock | csv | yahoo | fred | ...).
     history_importer: str = "mock"
+
+    # --- Market hours + refresh policies (Phase 5.1) ---
+    # Per-provider refresh cadence override, in MINUTES, as a JSON object, e.g.
+    # REFRESH_POLICIES='{"usdmxn": 30, "news": 10}'. Unknown keys ignored.
+    # Defaults live in services/cache_manager.py.
+    refresh_policies: Optional[Dict[str, float]] = None
+    # FX market holidays as a JSON list of ISO dates, e.g.
+    # MARKET_HOLIDAYS='["2026-01-01", "2026-12-25"]'. Empty by default; the
+    # weekend schedule always applies regardless.
+    market_holidays: Optional[List[str]] = None
 
     @property
     def is_mock(self) -> bool:

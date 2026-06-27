@@ -161,7 +161,7 @@ def test_endpoints():
             for k in ("market", "news", "calendar", "historical"):
                 assert k in ds, f"data_sources missing {k}"
             assert ds["market"] in {"mock", "live", "fallback"}, ds
-            assert ds["news"] in {"mock", "live", "fallback"}, ds
+            assert ds["news"] in {"mock", "live", "fallback", "cached"}, ds
             assert ds["calendar"] in {"mock", "live", "fallback", "imported"}, ds
             assert ds["historical"] in {"sample", "backfilled", "live"}, ds
             # Phase 5 evidence engine
@@ -896,6 +896,142 @@ def test_source_labeling():
     check("CSV calendar falls back to mock when file missing", csv_calendar_falls_back_when_missing)
 
 
+def test_market_infrastructure():
+    from datetime import datetime, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import HistoricalMarketSnapshot, MarketSnapshot
+    from app.routers import market as market_mod
+    from app.services import cache_manager
+    from app.services import market_hours as mh
+    from app.services.market_data import MarketData
+
+    init_db()
+
+    def _state(is_open, status):
+        return mh.MarketState(
+            market_status=status, market_reason="test", is_open=is_open,
+            last_market_close="2026-06-26T21:00:00+00:00",
+            next_market_open="2026-06-28T21:00:00+00:00",
+            next_expected_refresh="2026-06-28T21:00:00+00:00",
+        )
+
+    def market_hours_schedule():
+        cal = mh.MarketCalendar()
+        sat = datetime(2026, 6, 27, 12, 0, tzinfo=timezone.utc)      # Saturday
+        wed = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)      # Wednesday
+        fri_late = datetime(2026, 6, 26, 22, 0, tzinfo=timezone.utc)  # Fri after close
+        sun_late = datetime(2026, 6, 28, 22, 0, tzinfo=timezone.utc)  # Sun after open
+        assert mh.get_market_state(sat, cal).market_status == "WEEKEND"
+        assert mh.get_market_state(wed, cal).is_open is True
+        assert mh.get_market_state(fri_late, cal).is_open is False
+        assert mh.get_market_state(sun_late, cal).is_open is True
+        st = mh.get_market_state(sat, cal)
+        assert st.next_market_open and st.last_market_close
+
+    def holiday_framework_closes_open_day():
+        wed = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+        cal = mh.MarketCalendar(holidays={wed.date(): "Test Holiday"})
+        st = mh.get_market_state(wed, cal)
+        assert st.market_status == "HOLIDAY" and st.is_open is False, st
+
+    def gating_rules():
+        # USD/MXN is market-gated: closed -> never refresh.
+        assert cache_manager.should_refresh("usdmxn", market_open=False, age_seconds=None) is False
+        # Open + nothing cached -> refresh.
+        assert cache_manager.should_refresh("usdmxn", market_open=True, age_seconds=None) is True
+        # Open + within interval -> cache before live.
+        assert cache_manager.should_refresh("usdmxn", market_open=True, age_seconds=5) is False
+        # News is not market-gated -> flows on the weekend.
+        assert cache_manager.should_refresh("news", market_open=False, age_seconds=None) is True
+
+    def weekend_never_requests_usdmxn():
+        db = SessionLocal()
+        try:
+            db.query(MarketSnapshot).delete(); db.commit()
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=17.9, source="live",
+                                  provider="seed", sources={"usdmxn": "live"}))
+            db.commit()
+            called = {"n": 0}
+            def boom(*a, **k):
+                called["n"] += 1
+                raise AssertionError("USD/MXN must not be requested while closed")
+            orig_state, orig_md = market_mod.get_market_state, market_mod.get_market_data
+            market_mod.get_market_state = lambda **k: _state(False, "WEEKEND")
+            market_mod.get_market_data = boom
+            try:
+                intel = market_mod.get_market_intelligence(db, Settings(use_mock_data=True))
+            finally:
+                market_mod.get_market_state, market_mod.get_market_data = orig_state, orig_md
+            assert called["n"] == 0, "provider was called while market closed"
+            assert intel["meta"]["cached"] is True, intel["meta"]
+            assert intel["market"].usdmxn == 17.9
+        finally:
+            db.close()
+
+    def latest_cache_before_mock_on_failure():
+        db = SessionLocal()
+        try:
+            db.query(MarketSnapshot).delete(); db.commit()
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.12, source="live",
+                                  provider="seed", sources={"usdmxn": "live"}))
+            db.commit()
+            def boom(*a, **k):
+                raise RuntimeError("provider down")
+            orig_state, orig_md = market_mod.get_market_state, market_mod.get_market_data
+            market_mod.get_market_state = lambda **k: _state(True, "OPEN")
+            market_mod.get_market_data = boom
+            try:
+                # interval 0 forces a refresh attempt that then fails -> serve cache.
+                intel = market_mod.get_market_intelligence(
+                    db, Settings(use_mock_data=False, fx_api_key="k",
+                                 refresh_policies={"usdmxn": 0})
+                )
+            finally:
+                market_mod.get_market_state, market_mod.get_market_data = orig_state, orig_md
+            assert intel["meta"]["cached"] is True, intel["meta"]
+            assert intel["market"].usdmxn == 18.12, "served latest cache, not mock"
+        finally:
+            db.close()
+
+    def live_refresh_auto_captures_history():
+        db = SessionLocal()
+        try:
+            db.query(MarketSnapshot).delete()
+            db.query(HistoricalMarketSnapshot).delete(); db.commit()
+            before = db.query(HistoricalMarketSnapshot).count()
+            live = MarketData(pair="USDMXN", usdmxn=18.4, inverse_usdmxn=0.0543,
+                              dxy=104.0, us2y=4.7, us10y=4.3, oil=77.0, gold=2380.0,
+                              vix=14.0, sp_futures=5450.0, provider="oxr", source="live",
+                              field_sources={"usdmxn": "live", "us2y": "live"})
+            orig_state, orig_md = market_mod.get_market_state, market_mod.get_market_data
+            market_mod.get_market_state = lambda **k: _state(True, "OPEN")
+            market_mod.get_market_data = lambda *a, **k: live
+            try:
+                intel = market_mod.get_market_intelligence(
+                    db, Settings(use_mock_data=False, fx_api_key="k")
+                )
+            finally:
+                market_mod.get_market_state, market_mod.get_market_data = orig_state, orig_md
+            after = db.query(HistoricalMarketSnapshot).count()
+            assert after == before + 1, (before, after)
+            row = db.query(HistoricalMarketSnapshot).order_by(
+                HistoricalMarketSnapshot.id.desc()).first()
+            assert row.source_quality == "live" and row.usdmxn == 18.4, row
+            assert intel["meta"]["cached"] is False
+            ph = cache_manager.health_snapshot()
+            assert ph.get("fx", {}).get("status") == "healthy", ph
+        finally:
+            db.close()
+
+    check("FX market-hours schedule (weekend/weekday/boundaries)", market_hours_schedule)
+    check("holiday framework closes an otherwise-open day", holiday_framework_closes_open_day)
+    check("refresh gating (closed=no fetch, within-interval=cache, news ungated)", gating_rules)
+    check("weekend never requests USD/MXN (serves cache)", weekend_never_requests_usdmxn)
+    check("latest cache served before mock on provider failure", latest_cache_before_mock_on_failure)
+    check("live refresh auto-captures a historical snapshot + health", live_refresh_auto_captures_history)
+
+
 def test_live_providers():
     def finnhub_filters_and_tags_live():
         # general + forex categories both return this list (deduped by headline).
@@ -1088,6 +1224,7 @@ def main():
     test_evidence_engine()
     test_source_labeling()
     test_live_providers()
+    test_market_infrastructure()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

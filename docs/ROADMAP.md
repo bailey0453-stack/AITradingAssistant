@@ -203,6 +203,34 @@ fallback architecture and the reasoning engine.
 - [x] Smoke tests cover Finnhub filtering, FRED/Alpha Vantage per-field live +
       fallback, all-mock without keys, and that errors never expose API keys.
 
+## Phase 5.1 — Market intelligence infrastructure (built)
+
+Goal: a professional data layer that minimizes API usage, respects market
+hours, and continuously builds the historical database.
+
+- [x] **Market hours** (`services/market_hours.py`): global FX week (Sun 21:00 →
+      Fri 21:00 UTC) with `OPEN`/`CLOSED`/`WEEKEND`/`HOLIDAY`/`EARLY_CLOSE`/
+      `MAINTENANCE`, plus `last_market_close` / `next_market_open` /
+      `next_expected_refresh`. Holiday/early-close/maintenance are extensible
+      frameworks, not hardcoded weekends.
+- [x] **Intelligent cache** (`services/cache_manager.py`): serve fresh-enough
+      cache before live; **never request USD/MXN while closed**; serve latest
+      cache before mock; mock only when no cache exists.
+- [x] **Configurable refresh policies** (`REFRESH_POLICIES`) with market-gated
+      keys, plus `policies_view` + a prepared `RefreshScheduler` interface (no
+      background execution yet).
+- [x] **Automatic historical capture**: every successful live refresh writes a
+      `historical_market_snapshots` row (no second process).
+- [x] **Market metadata** on `/market/usdmxn` (status, reason, cached,
+      fetched_at, age, next refresh/open, is_stale) + `/market/status`.
+- [x] **Provider health** (healthy/rate_limited/offline/using_cache/
+      using_fallback) on `/analysis/usdmxn` and the dashboard.
+- [x] **Analysis awareness**: closed-market note; prices marked as latest
+      session while news/calendar/historical/regime/strategist still evaluate.
+- [x] Dashboard **Market status** + **Provider health** panels. Smoke tests
+      cover weekend no-fetch, holiday closure, cache-before-live,
+      cache-before-mock, and automatic historical capture.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
