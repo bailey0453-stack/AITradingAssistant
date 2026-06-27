@@ -16,10 +16,25 @@ from app.services.context_builder import build_context, build_timeline
 from app.services.history import (
     aggregate_statistics,
     blend_confidence,
+    evidence_narrative,
     find_similar,
     persist_matches,
     probability_forecast,
+    setup_percentile,
 )
+from app.services.history.historical_events import load_reactions
+
+# Direction sign for "favorable" USD/MXN moves (BUY_USD wants up, SELL_USD down).
+_DIR_SIGN = {"BUY_USD": 1.0, "SELL_USD": -1.0, "NO_TRADE": 1.0}
+
+
+def _rep_move(match: dict) -> float | None:
+    """Representative USD/MXN move for a match (1d, falling back to shorter)."""
+    w = match.get("windows") or {}
+    for key in ("1d", "4h", "1h", "3d", "5d"):
+        if w.get(key) is not None:
+            return w[key]
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +52,16 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
            "probabilities": None, "confidence_breakdown": None}
     try:
         context["market_regime"] = result.get("market_regime")
-        hist = find_similar(db, context, regime=result.get("market_regime"), top_n=8)
+        # Phase 5: nearest-neighbor matching over a broad evidence base (top 25).
+        hist = find_similar(db, context, regime=result.get("market_regime"), top_n=25)
         matches = hist["top_matches"]
         out["matches"] = matches
         out["query_vector"] = hist["query_vector"]
 
+        direction = result["direction"]
         current_price = market.usdmxn
         stats = aggregate_statistics(
-            matches, direction=result["direction"], current_price=current_price
+            matches, direction=direction, current_price=current_price
         )
 
         target_1 = result.get("target")
@@ -61,16 +78,38 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             "stop": result.get("stop"),
         }
         probabilities = probability_forecast(
-            matches, current_price, result["direction"], targets
+            matches, current_price, direction, targets
         )
 
-        # Blended, configurable confidence.
+        # Setup strength percentile: rank today's expected directional move vs
+        # the full historical library of directional moves.
+        percentile = None
+        try:
+            if direction in ("BUY_USD", "SELL_USD") and stats.get("average_move") is not None:
+                sign = _DIR_SIGN.get(direction, 1.0)
+                reference = [
+                    _rep_move(r) * sign
+                    for r in load_reactions(db)
+                    if _rep_move(r) is not None
+                ]
+                percentile = setup_percentile(reference, stats["average_move"] * sign)
+        except Exception:  # noqa: BLE001
+            logger.exception("Setup percentile failed; continuing.")
+
+        # Evidence-based historical brief sentence(s).
+        evidence_summary = evidence_narrative(stats, direction, percentile)
+
+        # Blended, configurable confidence. The six conceptual inputs (signals,
+        # historical evidence, regime, volatility, news quality, calendar
+        # certainty) are surfaced; news + calendar richness feed data_quality.
         vix = market.vix if market.vix is not None else 15.0
         vol_quality = max(0.0, min(100.0, 100.0 - max(0.0, (vix - 12.0)) * 5.0))
         n_news = len(context.get("recent_news") or [])
         n_events = len(context.get("upcoming_events") or []) + len(
             context.get("released_last_24h") or []
         )
+        news_quality = round(max(0.0, min(100.0, n_news * 12.0)), 1)
+        calendar_certainty = round(max(0.0, min(100.0, n_events * 12.0)), 1)
         data_quality = max(0.0, min(100.0, n_news * 8.0 + n_events * 6.0))
         components = {
             "signal": result.get("confidence"),
@@ -80,19 +119,50 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             "data_quality": round(data_quality, 1),
         }
         confidence_breakdown = blend_confidence(components)
+        confidence_breakdown["inputs"] = {
+            "current_signals": result.get("confidence"),
+            "historical_evidence": components["historical"],
+            "market_regime_confidence": components["regime"],
+            "volatility_quality": components["volatility"],
+            "news_quality": news_quality,
+            "calendar_certainty": calendar_certainty,
+            "data_completeness": components["data_quality"],
+        }
 
         keep = (
             "event_type", "event_name", "release_time", "similarity_score",
-            "windows", "max_favorable_excursion", "max_adverse_excursion",
-            "time_to_peak_hours", "reversal_behavior",
+            "distance_score", "rank", "windows", "max_favorable_excursion",
+            "max_adverse_excursion", "time_to_peak_hours", "reversal_behavior",
         )
         historical_context = {
             "best_similarity": hist["best_similarity"],
+            "best_distance": hist.get("best_distance"),
             "considered": hist["considered"],
             "sample_size": stats.get("sample_size"),
+            "setup_percentile": percentile,
+            "evidence_summary": evidence_summary,
             "statistics": stats,
-            "top_matches": [{k: m.get(k) for k in keep} for m in matches[:5]],
+            "top_matches": [{k: m.get(k) for k in keep} for m in matches[:25]],
         }
+
+        # Refine the history-dependent "explain every number" entries now that
+        # the evidence base + blended confidence are computed.
+        explanations = dict(result.get("explanations") or {})
+        if confidence_breakdown.get("formula"):
+            explanations["confidence"] = (
+                "Blended confidence — " + confidence_breakdown["formula"]
+                + " Components: " + "; ".join(confidence_breakdown.get("explanation") or [])
+            )
+        explanations["historical_similarity"] = (
+            f"Best analog similarity {round(hist['best_similarity'] * 100, 1)}% "
+            f"(distance {hist.get('best_distance')}) across {hist['considered']} "
+            f"historical events; weighted blend of regime, event type, DXY, yields, "
+            f"oil, VIX, momentum and news-tag overlap (SIMILARITY_WEIGHTS)."
+        )
+        if probabilities.get("method"):
+            explanations["probability"] = probabilities["method"]
+        result["explanations"] = explanations
+        result["evidence_summary"] = evidence_summary
 
         if confidence_breakdown.get("value") is not None:
             result["confidence"] = confidence_breakdown["value"]
@@ -192,6 +262,8 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
         "historical": row.historical_context,
         "probabilities": row.probabilities,
         "confidence_breakdown": row.confidence_breakdown,
+        "explanations": row.explanations,
+        "evidence_summary": row.evidence_summary,
         "entry": row.entry,
         "target": row.target,
         "stretch_target": row.stretch_target,
@@ -256,6 +328,8 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         probabilities=history.get("probabilities"),
         confidence_breakdown=history.get("confidence_breakdown"),
         strategist=result.get("strategist"),
+        explanations=result.get("explanations"),
+        evidence_summary=result.get("evidence_summary"),
         entry=result["entry"],
         target=result["target"],
         stretch_target=result["stretch_target"],

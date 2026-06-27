@@ -124,10 +124,52 @@ Border Currency desk actionable pricing guidance — without new data sources.
 - [x] Dashboard "Strategist brief" card; narrative confidence reconciled with the
       Phase 4 blended confidence.
 
-## Phase 5 — Smarter analysis
+## Phase 4.6 — Multi-horizon outlook (built)
+
+Goal: replace the single expected-duration read with independent outlooks per
+timeframe so the desk sees the intraday vs swing picture at a glance.
+
+- [x] `/analysis/usdmxn` returns `time_horizons` — four reads (`1-4 hours`,
+      `End of day`, `1-2 days`, `Beyond 2 days`), each re-weighting the same
+      signal contributions by timeframe and reporting its own bias / confidence /
+      target / stretch / stop / expected_move / rationale / risk_level.
+- [x] Longer horizons fold in historical analogs + the blended confidence; swing
+      stays low-confidence unless regime/history is strong.
+- [x] Dashboard "Time Horizon Outlook" table; main plan labeled "Primary Trade Plan".
+
+## Phase 5 — Evidence-based forecasting engine (built)
+
+Goal: transform the assistant from a weighted rules engine into an
+evidence-based FX strategist that backs every read with historical statistics.
+Ships on the deterministic sample library; no paid provider required.
+
+- [x] **Pattern library** expanded with a deterministic synthetic 2019–2025
+      dataset on top of the curated anchors, so nearest-neighbor matching has a
+      deep (50+ event) evidence base.
+- [x] **Import framework**: functional `CSVImporter` (`CSV_HISTORY_DIR`) for
+      events + reaction paths and a standalone market-series loader; Yahoo /
+      FRED / Alpha Vantage / Polygon remain modular stubs.
+- [x] **Nearest-neighbor matching**: top-25 analogs with `similarity_score`,
+      `distance_score`, and `rank`.
+- [x] **Outcome analysis**: average/median/best/worst move, win rate, average
+      holding time, average + typical MFE/MAE, maximum drawdown, reversal
+      probability.
+- [x] **Evidence-based probabilities**: reaches target/stretch/stop + finishes
+      positive today/tomorrow/within-5d, each with sample size, a 95% Wilson
+      confidence interval, and a historical basis.
+- [x] **Confidence model**: configurable weighted blend with a full per-term
+      `explanation`, the exact `formula`, and the six conceptual `inputs`.
+- [x] **Strategist evidence brief** (`evidence_summary`) + setup percentile rank.
+- [x] **Explain every number** (`explanations`): trade score, confidence,
+      opportunity grade, historical similarity, probability.
+- [x] Dashboard **Historical Evidence** panel + "How these numbers are
+      calculated" card; everything persisted on the analysis snapshot.
+
+## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
-- [ ] Real historical_similarity scoring over stored snapshots.
+- [ ] Wire a real provider (Polygon intraday / FRED / yfinance) to replace the
+      sample dataset behind the Phase 5 evidence engine.
 - [ ] LLM-backed narrative analyzer (`OpenAIAnalyzer`) on top of rule-based guardrails.
 - [ ] Backtesting harness against stored recommendation snapshots.
 - [ ] Confidence calibration.

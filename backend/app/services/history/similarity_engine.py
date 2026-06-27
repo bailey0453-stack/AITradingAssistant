@@ -183,7 +183,12 @@ def find_similar(
     analysis_snapshot_id: int | None = None,
     settings: Settings | None = None,
 ) -> dict:
-    """Rank historical reactions by similarity to the current context."""
+    """Nearest-neighbor ranking of historical reactions vs the current context.
+
+    Each match carries a ``similarity_score`` (0..1, higher = closer), a
+    ``distance_score`` (1 - similarity, lower = closer) and an integer ``rank``.
+    ``top_n`` may be up to 25 to expose a broad evidence base.
+    """
     settings = settings or get_settings()
     weights = get_similarity_weights(settings)
     query = build_feature_vector(context, regime=regime)
@@ -196,9 +201,13 @@ def find_similar(
         s = score_reaction(query, r, weights)
         item = dict(r)
         item["similarity_score"] = s
+        item["distance_score"] = round(1.0 - s, 4)
         scored.append(item)
+    # Nearest-neighbor order: highest similarity (lowest distance) first.
     scored.sort(key=lambda x: x["similarity_score"], reverse=True)
     top = scored[:top_n]
+    for rank, item in enumerate(top, start=1):
+        item["rank"] = rank
 
     if persist and top:
         persist_matches(db, query, top, analysis_snapshot_id)
@@ -210,6 +219,7 @@ def find_similar(
         "considered": len(reactions),
         "top_matches": top,
         "best_similarity": best,
+        "best_distance": round(1.0 - best, 4) if top else None,
     }
 
 

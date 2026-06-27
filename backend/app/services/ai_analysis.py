@@ -43,6 +43,8 @@ Analysis result schema:
     invalidation_level: float | None
     risk_notes: str
     time_horizons: list[dict]       # per-horizon outlook: 1-4h, EOD, 1-2d, >2d
+    explanations: dict              # how each major score was calculated
+    evidence_summary: str | None    # Phase 5 evidence-based historical brief
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ from app.config import Settings, get_settings
 from app.services.market_data import MarketData
 from app.services.market_regime import detect_regime
 from app.services.signals import compute_signal
+from app.services.signal_weights import SCORE_SCALE
 
 ANALYSIS_FIELDS = (
     "direction",
@@ -95,6 +98,9 @@ ANALYSIS_FIELDS = (
     "quote_guidance",
     "risk_watchlist",
     "invalidation_triggers",
+    # Phase 5 evidence engine
+    "explanations",
+    "evidence_summary",
 )
 
 # Composite-score thresholds -> letter grade (highest first).
@@ -282,6 +288,10 @@ class RuleBasedAnalyzer(AIAnalyzer):
         # router once Phase 4 historical intelligence is available).
         time_horizons = self._time_horizons(market, signal, regime, upcoming_risks)
 
+        # Phase 5: how each major score was computed (history-dependent entries
+        # are refined by the router once the evidence base is available).
+        explanations = self._explanations(signal, grade)
+
         return {
             "direction": direction,
             "trade_score": signal["trade_score"],
@@ -323,7 +333,53 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "risk_watchlist": strategist["risk_watchlist"],
             "invalidation_triggers": strategist["invalidation_triggers"],
             "strategist": strategist,
+            "explanations": explanations,
+            "evidence_summary": None,
             "model": self.model_name,
+        }
+
+    @staticmethod
+    def _explanations(signal: dict, grade: dict) -> dict:
+        """Plain-language "how this number was calculated" for each major score.
+
+        History-dependent entries (confidence, probability, historical
+        similarity) are seeded here and refined by the analysis router once the
+        evidence base is computed.
+        """
+        sb = signal.get("signal_breakdown") or {}
+        net = sb.get("net_score")
+        total = sb.get("total_score")
+        usd = sb.get("usd_score")
+        mxn = sb.get("mxn_score")
+        ts = signal.get("trade_score")
+        return {
+            "trade_score": (
+                f"Trade score = min(100, |net weighted score| × {SCORE_SCALE}). "
+                f"Net = USD {usd} − MXN {mxn} = {net} across {total} total weight "
+                f"→ {ts}/100. Weights are configurable (SIGNAL_WEIGHTS)."
+            ),
+            "confidence": (
+                "Confidence is the weighted blend of current-signal conviction, "
+                "historical evidence, regime confidence, volatility quality and "
+                "data completeness (see confidence_breakdown for the exact terms)."
+            ),
+            "opportunity_grade": (
+                f"Grade {grade.get('grade')} from a composite "
+                f"{grade.get('score')}/100 = 40% trade score + 30% signal "
+                f"agreement + 30% confidence, minus risk / conflict / volatility "
+                f"penalties. " + " ".join(grade.get("reasons") or [])
+            ),
+            "historical_similarity": (
+                "Similarity (0–100%) is a weighted blend of regime + event-type "
+                "match plus Gaussian closeness on DXY, yields, oil, VIX, momentum "
+                "and Jaccard overlap of news tags vs each historical analog "
+                "(tunable via SIMILARITY_WEIGHTS)."
+            ),
+            "probability": (
+                "Probabilities are evidence-based: the share of the nearest "
+                "historical analogs whose USD/MXN excursion reached each level, "
+                "each with a 95% Wilson confidence interval scaled to sample size."
+            ),
         }
 
     @staticmethod

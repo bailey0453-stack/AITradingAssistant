@@ -70,6 +70,22 @@ def _event_lean(event: dict) -> str:
     return "MXN+" if beat else "USD+"
 
 
+# Market time-series the import framework is designed to load (Phase 5). The
+# mock/sample build seeds reaction paths only; real providers (CSV / Yahoo /
+# FRED / Alpha Vantage / Polygon) fill these standalone series when configured.
+SUPPORTED_SERIES: tuple[str, ...] = (
+    "USDMXN",       # daily + hourly
+    "USDMXN_1H",
+    "DXY",
+    "US2Y",
+    "US10Y",
+    "OIL",
+    "GOLD",
+    "VIX",
+    "SP_FUTURES",
+)
+
+
 class HistoricalImporter(ABC):
     """Base importer: subclasses supply data, this class persists + computes."""
 
@@ -84,6 +100,43 @@ class HistoricalImporter(ABC):
     def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
         """Return [(hours_after_event, usdmxn_price)] including (0.0, baseline)."""
         raise NotImplementedError
+
+    def fetch_series(self) -> list[dict]:
+        """Optional: standalone market series bars to backfill.
+
+        Each bar: ``{"series", "ts" (datetime), "value", ...optional macro}``.
+        Default is empty; real providers override this. Persisted via
+        :meth:`run_series` into ``historical_market_snapshots`` (no event link).
+        """
+        return []
+
+    def run_series(self, db: Session) -> dict:
+        """Persist standalone market series bars (best-effort, no event link)."""
+        bars = self.fetch_series()
+        n = 0
+        for bar in bars:
+            series = bar.get("series", "USDMXN")
+            db.add(
+                HistoricalMarketSnapshot(
+                    series=series,
+                    ts=bar["ts"],
+                    usdmxn=bar.get("usdmxn") if series == "USDMXN" else bar.get("value"),
+                    dxy=bar.get("dxy"),
+                    us2y=bar.get("us2y"),
+                    us10y=bar.get("us10y"),
+                    oil=bar.get("oil"),
+                    gold=bar.get("gold"),
+                    vix=bar.get("vix"),
+                    sp_futures=bar.get("sp_futures"),
+                    regime=bar.get("regime"),
+                    source=self.name,
+                    source_quality=self.source_quality,
+                )
+            )
+            n += 1
+        if n:
+            db.commit()
+        return {"importer": self.name, "series_points": n}
 
     def run(self, db: Session) -> dict:
         """Import events + reaction paths into the historical tables."""
@@ -361,8 +414,79 @@ class MockSampleImporter(HistoricalImporter):
         },
     ]
 
+    # Building blocks for the synthetic library (deterministic expansion).
+    _SYNTH_TYPES: list[tuple[str, str, str, str, float]] = [
+        # (event_type, event_name, country, currency_impact, surprise_scale)
+        ("us_cpi", "US CPI (MoM)", "US", "USD", 0.2),
+        ("us_ppi", "US PPI (MoM)", "US", "USD", 0.3),
+        ("us_nfp", "US Nonfarm Payrolls", "US", "USD", 60.0),
+        ("us_gdp", "US GDP (QoQ)", "US", "USD", 0.5),
+        ("fed_rate_decision", "FOMC Rate Decision", "US", "USD", 0.25),
+        ("banxico_rate_decision", "Banxico Rate Decision", "MX", "MXN", 0.25),
+        ("mexico_cpi", "Mexico CPI (YoY)", "MX", "MXN", 0.2),
+        ("mexico_gdp", "Mexico GDP (QoQ)", "MX", "MXN", 0.4),
+    ]
+    _SYNTH_REGIMES: list[tuple[str, list[str]]] = [
+        ("Inflation Driven", ["inflation", "cpi", "fed"]),
+        ("Fed Driven", ["fed", "rates", "fomc"]),
+        ("Banxico Driven", ["banxico", "rates", "mexico"]),
+        ("Risk On", ["risk", "equities"]),
+        ("Risk Off", ["risk", "haven"]),
+        ("Trade War", ["tariff", "trade", "mexico"]),
+        ("Trending", ["momentum", "trend"]),
+        ("Range Bound", ["range", "consolidation"]),
+        ("High Volatility", ["volatility", "vix"]),
+    ]
+
+    def _synthetic_events(self, count: int = 72) -> list[dict]:
+        """Deterministically generate a broad historical library.
+
+        Spans 2019–2025 across event types, surprise sizes, and market regimes
+        so nearest-neighbor matching has a meaningful (25+) evidence base
+        without any paid data provider. Tagged as sample-quality data.
+        """
+        rng = random.Random(20240601)
+        events: list[dict] = []
+        base_price = 18.5
+        for i in range(count):
+            etype, ename, country, impact, sigma = self._SYNTH_TYPES[i % len(self._SYNTH_TYPES)]
+            regime, tags = self._SYNTH_REGIMES[i % len(self._SYNTH_REGIMES)]
+            # Spread releases roughly every ~30 days from 2019-01.
+            day = _dt(2019, 1, 15) + timedelta(days=int(i * 31.5) + rng.randint(0, 6))
+            forecast = round(rng.uniform(0.0, 5.0), 2)
+            surprise = rng.uniform(-1.8, 1.8) * sigma
+            actual = round(forecast + surprise, 3)
+            # Drift the baseline across the period (USD/MXN broadly 17–21).
+            base_price = max(16.5, min(21.5, base_price + rng.uniform(-0.35, 0.4)))
+            events.append({
+                "event_type": etype,
+                "event_name": ename,
+                "country": country,
+                "release_time": day,
+                "forecast": forecast,
+                "actual": actual,
+                "previous": round(forecast + rng.uniform(-0.5, 0.5), 3),
+                "importance": "high" if i % 3 == 0 else ("medium" if i % 3 == 1 else "low"),
+                "currency_impact": impact,
+                "baseline": round(base_price, 4),
+                "context": {
+                    "dxy": round(rng.uniform(96.0, 110.0), 2),
+                    "us2y": round(rng.uniform(0.2, 5.2), 2),
+                    "us10y": round(rng.uniform(0.6, 4.9), 2),
+                    "oil": round(rng.uniform(40.0, 95.0), 1),
+                    "gold": round(rng.uniform(1500.0, 3050.0), 1),
+                    "vix": round(rng.uniform(11.0, 34.0), 1),
+                    "sp_futures": round(rng.uniform(2800.0, 6000.0), 1),
+                    "momentum": round(rng.uniform(-0.15, 0.15), 3),
+                    "regime": regime,
+                    "news_tags": tags,
+                },
+            })
+        return events
+
     def fetch_events(self) -> list[dict]:
-        return [dict(e) for e in self.SAMPLE_EVENTS]
+        # Curated anchor events first, then the deterministic synthetic library.
+        return [dict(e) for e in self.SAMPLE_EVENTS] + self._synthetic_events()
 
     def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
         """Deterministic synthetic USD/MXN path driven by the event's surprise."""
@@ -412,10 +536,131 @@ class _NotConfiguredImporter(HistoricalImporter):
         raise NotImplementedError(f"{self.name} importer is not implemented yet.")
 
 
-class CSVImporter(_NotConfiguredImporter):
+class CSVImporter(HistoricalImporter):
+    """Load historical events + USD/MXN reaction paths from local CSV files.
+
+    Configure ``CSV_HISTORY_DIR`` (env) pointing at a directory containing:
+
+      - ``events.csv`` — one row per event with columns:
+        ``event_key,event_type,event_name,country,release_time,forecast,actual,
+        previous,importance,currency_impact,baseline,dxy,us2y,us10y,oil,gold,
+        vix,sp_futures,momentum,regime,news_tags`` (``news_tags`` pipe-separated,
+        ``release_time`` ISO-8601).
+      - ``paths.csv`` — reaction paths with columns ``event_key,hours,price``.
+
+    This is a real, no-paid-provider loader: drop CSVs exported from any source
+    (Yahoo, FRED, broker, manual) and import them. Missing dir/files raise a
+    clear, actionable error.
+    """
+
     name = "csv"
     source_quality = "imported"
-    docs = "Point it at local CSV files of bars + events."
+
+    def __init__(self, directory: str | None = None) -> None:
+        import os
+
+        self.directory = directory or os.getenv("CSV_HISTORY_DIR")
+        self._paths: dict[str, list[tuple[float, float]]] | None = None
+
+    def _require_dir(self) -> str:
+        import os
+
+        if not self.directory:
+            raise NotImplementedError(
+                "CSV importer needs CSV_HISTORY_DIR set (or directory=) pointing "
+                "at events.csv + paths.csv. Use the 'mock' importer for samples."
+            )
+        if not os.path.isdir(self.directory):
+            raise FileNotFoundError(f"CSV_HISTORY_DIR not found: {self.directory}")
+        return self.directory
+
+    def _load_paths(self) -> dict[str, list[tuple[float, float]]]:
+        import csv
+        import os
+
+        if self._paths is not None:
+            return self._paths
+        directory = self._require_dir()
+        paths: dict[str, list[tuple[float, float]]] = {}
+        paths_file = os.path.join(directory, "paths.csv")
+        if os.path.isfile(paths_file):
+            with open(paths_file, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    key = (row.get("event_key") or "").strip()
+                    try:
+                        hours = float(row["hours"])
+                        price = float(row["price"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    paths.setdefault(key, []).append((hours, price))
+        for key in paths:
+            paths[key].sort(key=lambda x: x[0])
+        self._paths = paths
+        return paths
+
+    def fetch_events(self) -> list[dict]:
+        import csv
+        import os
+        from datetime import datetime as _datetime
+
+        directory = self._require_dir()
+        events_file = os.path.join(directory, "events.csv")
+        if not os.path.isfile(events_file):
+            raise FileNotFoundError(f"events.csv not found in {directory}")
+
+        def _f(row: dict, key: str) -> float | None:
+            val = (row.get(key) or "").strip()
+            try:
+                return float(val) if val != "" else None
+            except ValueError:
+                return None
+
+        events: list[dict] = []
+        with open(events_file, newline="", encoding="utf-8") as fh:
+            for i, row in enumerate(csv.DictReader(fh)):
+                rt = (row.get("release_time") or "").strip()
+                try:
+                    release = _datetime.fromisoformat(rt)
+                except ValueError:
+                    continue
+                if release.tzinfo is None:
+                    release = release.replace(tzinfo=timezone.utc)
+                tags = [t.strip() for t in (row.get("news_tags") or "").split("|") if t.strip()]
+                events.append({
+                    "event_key": (row.get("event_key") or str(i)).strip(),
+                    "event_type": (row.get("event_type") or "unknown").strip(),
+                    "event_name": (row.get("event_name") or "").strip(),
+                    "country": (row.get("country") or "US").strip(),
+                    "release_time": release,
+                    "forecast": _f(row, "forecast"),
+                    "actual": _f(row, "actual"),
+                    "previous": _f(row, "previous"),
+                    "importance": (row.get("importance") or "medium").strip(),
+                    "currency_impact": (row.get("currency_impact") or "USD").strip(),
+                    "baseline": _f(row, "baseline"),
+                    "context": {
+                        "dxy": _f(row, "dxy"), "us2y": _f(row, "us2y"),
+                        "us10y": _f(row, "us10y"), "oil": _f(row, "oil"),
+                        "gold": _f(row, "gold"), "vix": _f(row, "vix"),
+                        "sp_futures": _f(row, "sp_futures"),
+                        "momentum": _f(row, "momentum"),
+                        "regime": (row.get("regime") or "").strip() or None,
+                        "news_tags": tags or None,
+                    },
+                })
+        return events
+
+    def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
+        paths = self._load_paths()
+        key = str(event.get("event_key", ""))
+        path = paths.get(key)
+        if path:
+            if path[0][0] != 0.0 and event.get("baseline"):
+                path = [(0.0, float(event["baseline"]))] + path
+            return path
+        # No intraday path supplied: fall back to a flat baseline (daily-only).
+        baseline = float(event.get("baseline") or 0.0)
+        return [(0.0, baseline)] if baseline else []
 
 
 class YahooFinanceImporter(_NotConfiguredImporter):

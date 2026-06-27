@@ -73,7 +73,7 @@ def history_events(
 
 @router.get("/similar")
 def history_similar(
-    top_n: int = Query(default=5, ge=1, le=25),
+    top_n: int = Query(default=25, ge=1, le=25),
     db: Session = Depends(get_db),
 ) -> dict:
     context, signal = _live_context_and_signal(db)
@@ -82,13 +82,14 @@ def history_similar(
         "query_vector": hist["query_vector"],
         "considered": hist["considered"],
         "best_similarity": hist["best_similarity"],
+        "best_distance": hist.get("best_distance"),
         "top_matches": hist["top_matches"],
     }
 
 
 @router.get("/statistics")
 def history_statistics(
-    top_n: int = Query(default=10, ge=1, le=50),
+    top_n: int = Query(default=25, ge=1, le=50),
     db: Session = Depends(get_db),
 ) -> dict:
     context, signal = _live_context_and_signal(db)
@@ -107,7 +108,7 @@ def history_statistics(
 
 @router.get("/probabilities")
 def history_probabilities(
-    top_n: int = Query(default=10, ge=1, le=50),
+    top_n: int = Query(default=25, ge=1, le=50),
     db: Session = Depends(get_db),
 ) -> dict:
     context, signal = _live_context_and_signal(db)

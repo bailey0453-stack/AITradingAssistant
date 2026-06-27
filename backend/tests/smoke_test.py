@@ -155,6 +155,30 @@ def test_endpoints():
             assert (body.get("historical_similarity") or {}).get("status") == "active"
             cb = body["confidence_breakdown"] or {}
             assert "components" in cb and "signal" in cb["components"]
+            # Phase 5 evidence engine
+            for k in ("explanations", "evidence_summary"):
+                assert k in body, f"analysis missing {k}"
+            ex = body["explanations"] or {}
+            for k in ("trade_score", "confidence", "opportunity_grade",
+                      "historical_similarity", "probability"):
+                assert isinstance(ex.get(k), str) and ex[k], f"explanation missing {k}"
+            # Broad evidence base: nearest-neighbor over many events.
+            assert (hist.get("considered") or 0) >= 25, hist.get("considered")
+            assert isinstance(cb.get("explanation"), list) and cb["explanation"]
+            assert isinstance(cb.get("formula"), str) and cb["formula"]
+            assert "inputs" in cb, "confidence_breakdown missing six-input map"
+            # Expanded outcome statistics.
+            hstats = hist.get("statistics") or {}
+            for k in ("best_move", "worst_move", "average_MFE", "average_MAE",
+                      "max_drawdown", "reversal_probability", "average_holding_hours"):
+                assert k in hstats, f"statistics missing {k}"
+            # Evidence-based probabilities carry sample size + CI + basis.
+            ev = (body["probabilities"] or {}).get("evidence") or {}
+            shaped = [e for e in ev.values() if e]
+            assert shaped, "probabilities missing evidence detail"
+            sample_e = shaped[0]
+            for k in ("value", "sample_size", "confidence_interval", "basis"):
+                assert k in sample_e, f"probability evidence missing {k}"
             # Multi-horizon outlook: four horizons, each fully shaped.
             th = body["time_horizons"]
             assert isinstance(th, list) and len(th) == 4, th
@@ -220,24 +244,31 @@ def test_endpoints():
             assert rs.status_code == 200, rs.status_code
             sb = rs.json()
             assert "top_matches" in sb and isinstance(sb["top_matches"], list)
-            assert sb["considered"] >= 1
+            assert sb["considered"] >= 25, "expected a broad evidence base"
             if sb["top_matches"]:
                 m = sb["top_matches"][0]
                 assert "similarity_score" in m and "windows" in m
+                # Phase 5: nearest-neighbor distance + rank.
+                assert "distance_score" in m and "rank" in m, m
+                assert m["rank"] == 1, m["rank"]
 
             rst = c.get("/history/statistics")
             assert rst.status_code == 200, rst.status_code
             stats = rst.json()["statistics"]
             for k in ("sample_size", "average_move", "win_rate", "typical_MFE",
-                      "typical_MAE", "expected_duration"):
+                      "typical_MAE", "expected_duration", "best_move", "worst_move",
+                      "max_drawdown", "reversal_probability", "average_holding_hours"):
                 assert k in stats, f"statistics missing {k}"
 
             rp = c.get("/history/probabilities")
             assert rp.status_code == 200, rp.status_code
-            lvls = rp.json()["probabilities"].get("levels", {})
+            probs = rp.json()["probabilities"]
+            lvls = probs.get("levels", {})
             for k in ("probability_reaches_target_1", "probability_reaches_stretch",
-                      "probability_hits_stop"):
+                      "probability_hits_stop", "probability_finishes_positive_today",
+                      "probability_finishes_positive_within_5d"):
                 assert k in lvls, f"probabilities missing {k}"
+            assert "evidence" in probs, "probabilities missing evidence detail"
 
         check("/health returns ok", health_ok)
         check("/market/usdmxn returns expanded data", market_ok)
@@ -795,6 +826,83 @@ def test_history_engine():
     check("confidence weights are configurable", confidence_weights_configurable)
 
 
+def test_evidence_engine():
+    from app.services.history import historical_statistics as hs
+    from app.services.history.importers import MockSampleImporter
+
+    def synthetic_library_is_large():
+        # The pattern library must be deep enough for top-25 nearest neighbors.
+        events = MockSampleImporter().fetch_events()
+        assert len(events) >= 50, len(events)
+
+    def wilson_interval_bounds():
+        ci = hs.wilson_interval(8, 10)
+        assert ci is not None and len(ci) == 2
+        lo, hi = ci
+        assert 0.0 <= lo <= 80.0 <= hi <= 100.0, ci
+        assert hs.wilson_interval(0, 0) is None
+
+    def expanded_outcome_stats():
+        matches = [
+            {"windows": {"1d": 0.5, "3d": 0.4, "5d": 0.3}, "similarity_score": 0.9,
+             "max_favorable_excursion": 0.7, "max_adverse_excursion": 0.2,
+             "time_to_peak_hours": 20.0, "reversal_behavior": "continuation"},
+            {"windows": {"1d": -0.2, "3d": 0.1, "5d": -0.3}, "similarity_score": 0.6,
+             "max_favorable_excursion": 0.3, "max_adverse_excursion": 0.5,
+             "time_to_peak_hours": 40.0, "reversal_behavior": "reversal"},
+        ]
+        stats = hs.aggregate_statistics(matches, direction="BUY_USD", current_price=18.0)
+        assert stats["best_move"] == 0.5 and stats["worst_move"] == -0.2, stats
+        assert stats["max_drawdown"] == 0.5, stats
+        assert stats["reversal_probability"] == 50.0, stats
+        assert stats["average_MFE"] is not None and stats["average_MAE"] is not None
+        assert stats["wins"] == 1, stats
+
+    def evidence_probabilities_have_detail():
+        matches = [
+            {"windows": {"1h": 0.2, "1d": 0.5, "3d": 0.6, "5d": 0.45}},
+            {"windows": {"1h": 0.3, "1d": 0.9, "3d": 0.4, "5d": 0.8}},
+        ]
+        targets = {"target_1": 100.5, "target_2": None, "stretch": 101.0, "stop": 99.6}
+        out = hs.probability_forecast(matches, 100.0, "BUY_USD", targets)
+        ev = out["evidence"]
+        rt = ev["reaches_target"]
+        assert rt["value"] == 100.0 and rt["sample_size"] == 2, rt
+        assert rt["confidence_interval"] and rt["basis"], rt
+        assert "finishes_positive_today" in ev and ev["finishes_positive_today"]
+        assert "probability_finishes_positive_today" in out["levels"]
+
+    def setup_percentile_ranks():
+        ref = [-1.0, -0.5, 0.0, 0.5, 1.0]
+        assert hs.setup_percentile(ref, 1.0) == 100.0
+        assert hs.setup_percentile(ref, -1.0) == 20.0
+        assert hs.setup_percentile([], 0.5) is None
+
+    def confidence_explained():
+        out = hs.blend_confidence({"signal": 80, "historical": 60, "regime": 70,
+                                   "volatility": 90, "data_quality": 50})
+        assert isinstance(out["explanation"], list) and out["explanation"]
+        assert "weighted blend" in out["formula"], out["formula"]
+        assert any("Current signals" in line for line in out["explanation"])
+
+    def narrative_reads_like_evidence():
+        stats = {"sample_size": 143, "wins": 108, "win_rate": 75.5,
+                 "average_move": 0.46, "median_move": 0.39,
+                 "average_holding_hours": 31.0, "max_drawdown": 0.18}
+        text = hs.evidence_narrative(stats, "BUY_USD", percentile=91.0)
+        assert text and "occurred 143 times" in text, text
+        assert "91" in text and "percentile" in text, text
+        assert hs.evidence_narrative({"sample_size": 0}, "BUY_USD") is None
+
+    check("evidence: synthetic library is large enough", synthetic_library_is_large)
+    check("evidence: Wilson interval bounds", wilson_interval_bounds)
+    check("evidence: expanded outcome statistics", expanded_outcome_stats)
+    check("evidence: probabilities carry sample/CI/basis", evidence_probabilities_have_detail)
+    check("evidence: setup percentile ranking", setup_percentile_ranks)
+    check("evidence: confidence breakdown is explained", confidence_explained)
+    check("evidence: historical narrative reads like evidence", narrative_reads_like_evidence)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -819,6 +927,7 @@ def main():
     test_strategist_narrative()
     test_multi_horizon()
     test_history_engine()
+    test_evidence_engine()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

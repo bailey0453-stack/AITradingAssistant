@@ -26,7 +26,10 @@ from app.services.history.historical_events import (
 from app.services.history.historical_statistics import (
     aggregate_statistics,
     blend_confidence,
+    evidence_narrative,
     probability_forecast,
+    setup_percentile,
+    wilson_interval,
 )
 from app.services.history.similarity_engine import (
     build_feature_vector,
@@ -40,7 +43,10 @@ __all__ = [
     "load_reactions",
     "aggregate_statistics",
     "blend_confidence",
+    "evidence_narrative",
     "probability_forecast",
+    "setup_percentile",
+    "wilson_interval",
     "build_feature_vector",
     "find_similar",
     "persist_matches",

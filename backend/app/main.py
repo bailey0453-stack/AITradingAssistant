@@ -40,10 +40,10 @@ settings = get_settings()
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.4.6",
+    version="0.5.0",
     description=(
         "Backend-only USD/MXN market intelligence assistant "
-        "(Phase 4.6 · multi-horizon outlook)."
+        "(Phase 5 · evidence-based forecasting)."
     ),
     lifespan=lifespan,
 )
@@ -114,7 +114,7 @@ DASHBOARD_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 4.6 · multi-horizon outlook)</span></h1>
+    <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 5 · evidence-based forecasting)</span></h1>
     <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
   </header>
   <main>
@@ -282,7 +282,8 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
-      <h2>Historical intelligence <span class="muted" id="histsrc">(sample data)</span></h2>
+      <h2>Historical evidence <span class="muted" id="histsrc">(sample data)</span></h2>
+      <p id="hevidence" style="margin:6px 0 14px;line-height:1.5"></p>
       <div class="row">
         <div class="stat"><div class="k">Historical similarity</div><div class="v" id="hsim">—</div></div>
         <div class="stat"><div class="k">Comparable events</div><div class="v" id="hcount">—</div></div>
@@ -291,20 +292,32 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Median move</div><div class="v" id="hmed">—</div></div>
       </div>
       <div class="row" style="margin-top:12px">
+        <div class="stat"><div class="k">Best move</div><div class="v lean-usd" id="hbestmove">—</div></div>
+        <div class="stat"><div class="k">Worst move</div><div class="v lean-mxn" id="hworst">—</div></div>
+        <div class="stat"><div class="k">Max drawdown</div><div class="v lean-mxn" id="hdd">—</div></div>
+        <div class="stat"><div class="k">Reversal prob</div><div class="v" id="hrev">—</div></div>
+        <div class="stat"><div class="k">Setup percentile</div><div class="v" id="hpctile">—</div></div>
+      </div>
+      <div class="row" style="margin-top:12px">
         <div class="stat"><div class="k">Expected holding</div><div class="v" id="hdur" style="font-size:15px">—</div></div>
         <div class="stat"><div class="k">Typical MFE</div><div class="v lean-usd" id="hmfe">—</div></div>
         <div class="stat"><div class="k">Typical MAE</div><div class="v lean-mxn" id="hmae">—</div></div>
         <div class="stat"><div class="k">Expected range</div><div class="v" id="hrange" style="font-size:15px">—</div></div>
       </div>
-      <div class="k muted" style="margin-top:12px">Best historical match</div>
+      <div class="k muted" style="margin-top:12px">Top historical analog</div>
       <p id="hbest" class="muted"></p>
-      <div class="k muted" style="margin-top:6px">Probability distribution</div>
+      <div class="k muted" style="margin-top:6px">Probability distribution (evidence-based, 95% CI)</div>
       <table style="margin-top:6px">
-        <thead><tr><th>Outcome</th><th>Level</th><th>Probability</th></tr></thead>
+        <thead><tr><th>Outcome</th><th>Level</th><th>Probability</th><th>95% CI</th><th>Sample</th></tr></thead>
         <tbody id="hprob"></tbody>
       </table>
-      <div class="k muted" style="margin-top:12px">Confidence blend</div>
+      <div class="k muted" style="margin-top:12px">Confidence breakdown</div>
       <ul id="hconf"></ul>
+    </div>
+
+    <div class="card">
+      <h2>How these numbers are calculated</h2>
+      <ul id="explains"></ul>
     </div>
 
     <div class="card">
@@ -432,15 +445,21 @@ DASHBOARD_HTML = """<!doctype html>
 
       listIntoEl('wwcm', d.what_would_change_my_mind, 'No invalidation conditions identified.');
 
-      // Historical intelligence (Phase 4)
+      // Historical evidence (Phase 5)
       const h = d.historical || {};
       const hstats = h.statistics || {};
       const pct = v => (v === null || v === undefined) ? '—' : ((v>0?'+':'') + v + '%');
+      $('hevidence').textContent = d.evidence_summary || h.evidence_summary || 'Insufficient comparable history for an evidence-based read.';
       $('hsim').textContent = (h.best_similarity != null) ? Math.round(h.best_similarity*100)+'%' : '—';
       fill('hcount', h.sample_size);
       $('hwin').textContent = (hstats.win_rate != null) ? hstats.win_rate+'%' : '—';
       $('havg').textContent = pct(hstats.average_move);
       $('hmed').textContent = pct(hstats.median_move);
+      $('hbestmove').textContent = pct(hstats.best_move);
+      $('hworst').textContent = pct(hstats.worst_move);
+      $('hdd').textContent = (hstats.max_drawdown != null) ? ('-'+hstats.max_drawdown+'%') : '—';
+      $('hrev').textContent = (hstats.reversal_probability != null) ? hstats.reversal_probability+'%' : '—';
+      $('hpctile').textContent = (h.setup_percentile != null) ? h.setup_percentile+'th' : '—';
       $('hdur').textContent = hstats.expected_duration || '—';
       $('hmfe').textContent = pct(hstats.typical_MFE);
       $('hmae').textContent = (hstats.typical_MAE != null) ? ('-'+hstats.typical_MAE+'%') : '—';
@@ -448,38 +467,53 @@ DASHBOARD_HTML = """<!doctype html>
       $('hrange').textContent = er ? (pct(er.low_pct)+' … '+pct(er.high_pct) + (er.low_price?(' ('+er.low_price+'–'+er.high_price+')'):'')) : '—';
       const bm = (h.top_matches || [])[0];
       $('hbest').textContent = bm ? ((bm.event_name||bm.event_type)+' · '+(bm.release_time||'').slice(0,10)+
-        ' · similarity '+Math.round((bm.similarity_score||0)*100)+'% · 1d '+pct((bm.windows||{})['1d'])+
+        ' · similarity '+Math.round((bm.similarity_score||0)*100)+'% (dist '+(bm.distance_score ?? '—')+') · 1d '+pct((bm.windows||{})['1d'])+
         ' · '+(bm.reversal_behavior||'')) : 'No comparable events yet.';
 
       const hp = $('hprob'); hp.innerHTML='';
-      const probs = (d.probabilities || {}).levels || {};
-      const targets = (d.probabilities || {}).targets || {};
+      const probObj = (d.probabilities || {});
+      const probs = probObj.levels || {};
+      const targets = probObj.targets || {};
+      const ev = probObj.evidence || {};
+      const ci = e => (e && e.confidence_interval) ? (e.confidence_interval[0]+'–'+e.confidence_interval[1]+'%') : '—';
+      const ss = e => (e && e.sample_size != null) ? e.sample_size : '—';
       const probRows = [
-        ['Reaches target 1', targets.target_1, probs.probability_reaches_target_1],
-        ['Reaches target 2', targets.target_2, probs.probability_reaches_target_2],
-        ['Reaches stretch', targets.stretch, probs.probability_reaches_stretch],
-        ['Hits stop', targets.stop, probs.probability_hits_stop],
+        ['Reaches target 1', targets.target_1, probs.probability_reaches_target_1, ev.reaches_target],
+        ['Reaches target 2', targets.target_2, probs.probability_reaches_target_2, null],
+        ['Reaches stretch', targets.stretch, probs.probability_reaches_stretch, ev.reaches_stretch],
+        ['Hits stop', targets.stop, probs.probability_hits_stop, ev.reaches_stop],
+        ['Positive by EOD', null, probs.probability_finishes_positive_today, ev.finishes_positive_today],
+        ['Positive next day', null, probs.probability_finishes_positive_tomorrow, ev.finishes_positive_tomorrow],
+        ['Positive within 5d', null, probs.probability_finishes_positive_within_5d, ev.finishes_positive_within_5d],
       ];
-      probRows.forEach(([label, lvl, p]) => {
+      probRows.forEach(([label, lvl, p, e]) => {
         if (p == null && lvl == null) return;
         const tr=document.createElement('tr');
-        tr.innerHTML = '<td>'+label+'</td><td>'+(lvl ?? '—')+'</td><td>'+(p != null ? p+'%' : '—')+'</td>';
+        tr.innerHTML = '<td>'+label+'</td><td>'+(lvl ?? '—')+'</td><td>'+(p != null ? p+'%' : '—')+'</td>'+
+          '<td class="muted">'+ci(e)+'</td><td class="muted">'+ss(e)+'</td>';
         hp.appendChild(tr);
       });
-      if (!hp.children.length) hp.innerHTML = '<tr><td colspan="3" class="muted">No probability data.</td></tr>';
+      if (!hp.children.length) hp.innerHTML = '<tr><td colspan="5" class="muted">No probability data.</td></tr>';
 
       const cb = (d.confidence_breakdown || {});
-      const cc = cb.components || {};
-      const labelMap = {signal:'Weighted signal', historical:'Historical similarity', regime:'Market regime', volatility:'Volatility quality', data_quality:'News/calendar quality'};
+      const expl = cb.explanation || [];
       const hc = $('hconf'); hc.innerHTML='';
-      Object.keys(labelMap).forEach(k => {
-        if (cc[k] == null) return;
-        const li=document.createElement('li');
-        li.textContent = labelMap[k]+': '+cc[k]+'/100';
-        hc.appendChild(li);
-      });
-      if (cb.value != null) { const li=document.createElement('li'); li.innerHTML='<b>Blended confidence: '+cb.value+'/100</b>'; hc.appendChild(li); }
+      expl.forEach(line => { const li=document.createElement('li'); li.textContent = line; hc.appendChild(li); });
+      if (cb.value != null) { const li=document.createElement('li'); li.innerHTML='<b>Blended confidence: '+cb.value+'/100</b>'+(cb.formula?(' — <span class="muted">'+cb.formula+'</span>'):''); hc.appendChild(li); }
       if (!hc.children.length) hc.innerHTML = '<li class="muted">Confidence uses the weighted signal only.</li>';
+
+      // Explain every number (Phase 5)
+      const ex = d.explanations || {};
+      const exMap = {trade_score:'Trade score', confidence:'Confidence', opportunity_grade:'Opportunity grade', historical_similarity:'Historical similarity', probability:'Probability'};
+      const exEl = $('explains'); exEl.innerHTML='';
+      Object.keys(exMap).forEach(k => {
+        if (!ex[k]) return;
+        const li=document.createElement('li');
+        li.style.marginBottom='8px';
+        li.innerHTML = '<b>'+exMap[k]+':</b> '+ex[k];
+        exEl.appendChild(li);
+      });
+      if (!exEl.children.length) exEl.innerHTML = '<li class="muted">Run an analysis to see score derivations.</li>';
       const md = $('mdrivers'); md.innerHTML = '';
       (d.market_drivers || []).forEach(x => {
         const tr=document.createElement('tr');

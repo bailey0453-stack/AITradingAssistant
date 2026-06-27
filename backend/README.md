@@ -1,4 +1,4 @@
-# AI Trading Assistant — Backend (Phase 4.6)
+# AI Trading Assistant — Backend (Phase 5)
 
 Backend-only **USD/MXN market intelligence engine**. It collects market + macro
 inputs, **live news**, and a **live economic calendar**, builds a structured
@@ -80,6 +80,35 @@ dataset) and exposes a JSON API plus a dashboard.
   expected range/duration, typical MFE/MAE), a **probability forecast** for
   hitting target/stop levels, and feeds a **configurable blended confidence**
   (signal + historical + regime + volatility + data quality).
+- **Evidence-based forecasting engine** (Phase 5): turns the assistant into an
+  evidence-led FX strategist. It expands the pattern library to a deep,
+  deterministic sample set (curated anchors + a synthetic 2019–2025 library) so
+  every analysis can run **nearest-neighbor matching over the top 25 analogs**
+  (each match carries a `similarity_score`, `distance_score`, and `rank`).
+  - **Outcome analysis** adds best/worst move, average + median move, win rate,
+    average holding time, average + typical MFE/MAE, **maximum drawdown**, and
+    **reversal probability** over the matched set.
+  - **Evidence-based probabilities**: `reaches target / stretch / stop` plus
+    `finishes positive today / tomorrow / within 5 days`, each with a
+    **sample size**, a **95% Wilson confidence interval**, and a plain-language
+    **historical basis** (`probabilities.evidence`).
+  - **Confidence model** stays a configurable weighted blend (current signals +
+    historical evidence + regime + volatility + data completeness), but now
+    exposes a full **`explanation`** (each term and contribution), the exact
+    **`formula`**, and the six conceptual **`inputs`** (incl. news quality &
+    calendar certainty).
+  - **Strategist evidence brief** (`evidence_summary`): e.g. *"Historically,
+    conditions similar to today occurred 143 times. USD strengthened in 108 of
+    those cases (75.5%). Average move +0.46%, median +0.39%. Average holding 31
+    hours. Largest adverse excursion -0.18%. Current setup ranks in the 91st
+    percentile of bullish historical setups."*
+  - **Explain every number** (`explanations`): trade score, confidence,
+    opportunity grade, historical similarity, and probability each expose how
+    they were calculated.
+  - **Import framework** is genuinely capable of loading from CSV (functional
+    `CSVImporter` via `CSV_HISTORY_DIR`) and standalone market series, with
+    Yahoo / FRED / Alpha Vantage / Polygon as modular stubs. No paid provider is
+    required — the sample library works out of the box.
 - **Richer analysis**: direction, trade_score, market_bias, confidence,
   momentum, historical_similarity (placeholder), risk_level, summary (now
   explains which indicators confirm vs push back), key_drivers, **market_drivers**
@@ -421,6 +450,7 @@ All config is environment-driven (see `.env.example`):
 | `SIMILARITY_WEIGHTS` | JSON override of history similarity feature weights | unset (uses defaults) |
 | `CONFIDENCE_WEIGHTS` | JSON override of blended-confidence weights | unset (uses defaults) |
 | `HISTORY_IMPORTER` | Backfill source (`mock` \| `csv` \| `yahoo` \| `fred` \| `alphavantage` \| `polygon`) | `mock` |
+| `CSV_HISTORY_DIR` | Directory with `events.csv` + `paths.csv` for the CSV importer | unset |
 | `MARKET_DATA_API_KEY` | Alternate market feed (future) | empty |
 | `FRED_API_KEY` | DXY / treasury yields (future) | empty |
 | `OPENAI_API_KEY` / `AI_MODEL` | LLM-backed analysis (future) | empty |

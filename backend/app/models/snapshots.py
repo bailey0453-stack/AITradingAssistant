@@ -123,6 +123,11 @@ class AnalysisSnapshot(Base):
     # Strategist narrative (Phase 4.5) — the 9 narrative fields as one JSON blob.
     strategist: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # Evidence engine (Phase 5) — per-score calculation explanations + the
+    # evidence-based historical brief sentence(s).
+    explanations: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    evidence_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Trade levels
     entry: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     target: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
