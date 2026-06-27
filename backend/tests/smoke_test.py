@@ -1175,9 +1175,12 @@ def test_research_lab():
             buy_1d = db.query(RecommendationOutcome).filter_by(
                 recommendation_id=buy_id, horizon="1d").one()
             assert buy_1d.actionable is True
-            exp_ret = round((18.20 - 18.00) / 18.00 * 100, 4)         # +1.1111
+            # Raw horizon (close) return is still recorded for research...
+            assert abs(buy_1d.return_pct - round((18.20 - 18.00) / 18.00 * 100, 4)) < 1e-3
+            # ...but the hedge exits at the target (18.15), which was touched first.
+            exp_ret = round((18.15 - 18.00) / 18.00 * 100, 4)         # +0.8333
             assert abs(buy_1d.hedge_return_pct - exp_ret) < 1e-3, buy_1d.hedge_return_pct
-            exp_gross = round(100000 * exp_ret / 100, 2)               # ~1111.11
+            exp_gross = round(100000 * exp_ret / 100, 2)               # ~833.33
             assert abs(buy_1d.gross_pnl_usd - exp_gross) < 0.5, buy_1d.gross_pnl_usd
             assert abs(buy_1d.net_pnl_usd - (exp_gross - 40)) < 0.5, buy_1d.net_pnl_usd
             assert buy_1d.holding_time_hours and buy_1d.time_to_target_hours is not None
@@ -1236,6 +1239,212 @@ def test_research_lab():
     check("research summary + calibration + model performance", research_summary_and_calibration)
     check("paper hedge totals + monthly statistics", paper_hedge_and_monthly_totals)
     check("research + performance endpoints respond", research_endpoints_respond)
+
+
+def test_evaluator_sparse_data():
+    """Verify evaluator behavior against sparse / market-closed price history."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
+    from app.services import recommendation_evaluator as rev
+
+    init_db()
+
+    def _reset(db):
+        db.query(RecommendationOutcome).delete()
+        db.query(Recommendation).delete()
+        db.query(MarketSnapshot).delete()
+        db.commit()
+
+    def nearest_after_snapshot_used_when_exact_missing():
+        db = SessionLocal()
+        try:
+            _reset(db)
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=3)).replace(hour=10, minute=0, second=0, microsecond=0)
+            reco = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                  direction="BUY_USD", confidence=70.0,
+                                  opportunity_grade="B", model_version="t",
+                                  target=18.50, stop=17.50)
+            db.add(reco)
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            # No snapshot exactly at the 1h due time; nearest one is 40 min later.
+            due_1h = rev.horizon_due_time(t0, "1h")
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.07,
+                                  created_at=due_1h + timedelta(minutes=40)))
+            db.commit()
+            rev.evaluate_due(db, now=now)
+            o = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=reco.id, horizon="1h").one()
+            assert abs(o.spot_at_evaluation - 18.07) < 1e-6, o.spot_at_evaluation
+        finally:
+            db.close()
+
+    def pending_when_no_future_price():
+        db = SessionLocal()
+        try:
+            _reset(db)
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+            reco = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                  direction="BUY_USD", confidence=70.0,
+                                  opportunity_grade="B", model_version="t",
+                                  target=18.5, stop=17.5)
+            db.add(reco)
+            # Only an entry-time price exists; nothing at/after the 1h horizon.
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            db.commit()
+            res = rev.evaluate_due(db, now=now)
+            assert res["evaluated"] == 0, res
+            db.refresh(reco)
+            assert reco.evaluation_status == "pending", reco.evaluation_status
+            assert db.query(RecommendationOutcome).count() == 0
+        finally:
+            db.close()
+
+    def market_closed_horizon_pending_then_uses_next_snapshot():
+        db = SessionLocal()
+        try:
+            _reset(db)
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=4)).replace(hour=10, minute=0, second=0, microsecond=0)
+            reco = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                  direction="BUY_USD", confidence=70.0,
+                                  opportunity_grade="B", model_version="t",
+                                  target=18.5, stop=17.5)
+            db.add(reco)
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            db.commit()
+            # First pass: no snapshot after the 1h horizon (market closed) -> pending.
+            rev.evaluate_due(db, now=now)
+            assert db.query(RecommendationOutcome).filter_by(
+                recommendation_id=reco.id, horizon="1h").count() == 0
+
+            # Market reopens: a valid next snapshot appears well after the horizon.
+            due_1h = rev.horizon_due_time(t0, "1h")
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.09,
+                                  created_at=due_1h + timedelta(days=2)))
+            db.commit()
+            rev.evaluate_due(db, now=now)
+            o = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=reco.id, horizon="1h").one()
+            assert abs(o.spot_at_evaluation - 18.09) < 1e-6, o.spot_at_evaluation
+        finally:
+            db.close()
+
+    def no_duplicate_evaluations():
+        db = SessionLocal()
+        try:
+            _reset(db)
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=6)).replace(hour=10, minute=0, second=0, microsecond=0)
+            reco = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                  direction="BUY_USD", confidence=70.0,
+                                  opportunity_grade="B", model_version="t",
+                                  target=18.5, stop=17.5)
+            db.add(reco)
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            for h in rev.HORIZONS:
+                db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.10,
+                                      created_at=rev.horizon_due_time(t0, h)))
+            db.commit()
+            first = rev.evaluate_due(db, now=now)
+            assert first["evaluated"] == len(rev.HORIZONS), first
+            second = rev.evaluate_due(db, now=now)
+            assert second["evaluated"] == 0, second  # nothing re-scored
+            assert db.query(RecommendationOutcome).filter_by(
+                recommendation_id=reco.id).count() == len(rev.HORIZONS)
+        finally:
+            db.close()
+
+    def hedge_exit_logic_target_stop_or_close():
+        db = SessionLocal()
+        try:
+            _reset(db)
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=6)).replace(hour=10, minute=0, second=0, microsecond=0)
+
+            # BUY where the STOP is touched first (price dips to 17.85 then recovers).
+            stop_first = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                        direction="BUY_USD", confidence=70.0,
+                                        opportunity_grade="B", model_version="t",
+                                        target=18.30, stop=17.90)
+            # BUY where the TARGET is touched first.
+            target_first = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                          direction="BUY_USD", confidence=70.0,
+                                          opportunity_grade="B", model_version="t",
+                                          target=18.10, stop=17.50)
+            # BUY where neither target nor stop is touched -> exit at close.
+            no_touch = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                      direction="BUY_USD", confidence=70.0,
+                                      opportunity_grade="B", model_version="t",
+                                      target=19.00, stop=17.00)
+            db.add_all([stop_first, target_first, no_touch])
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            # Intra-window path: dip to 17.85 (1h), recover to 18.20 (1d close).
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=17.85,
+                                  created_at=rev.horizon_due_time(t0, "1h")))
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.20,
+                                  created_at=rev.horizon_due_time(t0, "1d")))
+            db.commit()
+            rev.evaluate_due(db, now=now)
+
+            s = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=stop_first.id, horizon="1d").one()
+            # Stop (17.90) crossed at the 1h dip -> exit at stop, negative hedge.
+            assert abs(s.hedge_return_pct - round((17.90 - 18.00) / 18.00 * 100, 4)) < 1e-3, s.hedge_return_pct
+            assert s.net_pnl_usd < 0, s.net_pnl_usd
+
+            tgt = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=target_first.id, horizon="1d").one()
+            # Target (18.10) reached by the 18.20 close -> exit at target.
+            assert abs(tgt.hedge_return_pct - round((18.10 - 18.00) / 18.00 * 100, 4)) < 1e-3, tgt.hedge_return_pct
+
+            nt = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=no_touch.id, horizon="1d").one()
+            # No level touched -> exit at the nearest evaluation (close) price 18.20.
+            assert abs(nt.hedge_return_pct - round((18.20 - 18.00) / 18.00 * 100, 4)) < 1e-3, nt.hedge_return_pct
+        finally:
+            db.close()
+
+    def no_trade_stored_without_hedge_and_model_version_present():
+        db = SessionLocal()
+        try:
+            _reset(db)
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=2)).replace(hour=10, minute=0, second=0, microsecond=0)
+            nt = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                direction="NO_TRADE", confidence=40.0,
+                                opportunity_grade="PASS", model_version="t")
+            db.add(nt)
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.05,
+                                  created_at=rev.horizon_due_time(t0, "1d")))
+            db.commit()
+            rev.evaluate_due(db, now=now)
+            o = db.query(RecommendationOutcome).filter_by(
+                recommendation_id=nt.id, horizon="1d").one()
+            assert o.actionable is False
+            assert o.hedge_return_pct is None and o.gross_pnl_usd is None and o.net_pnl_usd is None
+            # model_version is stamped on every stored recommendation.
+            assert nt.model_version == "t"
+        finally:
+            db.close()
+
+    def live_analysis_stamps_model_version():
+        with TestClient(app) as c:
+            c.get("/analysis/usdmxn")
+            r = c.get("/recommendations/recent?limit=1").json()["recommendations"][0]
+            assert r.get("model_version"), r
+
+    check("nearest snapshot after horizon used when exact price missing", nearest_after_snapshot_used_when_exact_missing)
+    check("no future price -> outcome stays pending", pending_when_no_future_price)
+    check("market-closed horizon pending until a valid next snapshot exists", market_closed_horizon_pending_then_uses_next_snapshot)
+    check("no duplicate evaluations per recommendation + horizon", no_duplicate_evaluations)
+    check("paper hedge exit logic: target / stop first-touch else close", hedge_exit_logic_target_stop_or_close)
+    check("NO_TRADE stored for research but no hedge P/L", no_trade_stored_without_hedge_and_model_version_present)
+    check("model_version stored on every recommendation", live_analysis_stamps_model_version)
 
 
 def test_live_providers():
@@ -1433,6 +1642,7 @@ def main():
     test_market_infrastructure()
     test_recommendation_tracking()
     test_research_lab()
+    test_evaluator_sparse_data()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

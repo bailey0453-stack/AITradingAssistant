@@ -113,6 +113,31 @@ def _first_crossing_hours(
     return None
 
 
+def _exit_price(
+    spot_eval: float,
+    target: Optional[float],
+    stop: Optional[float],
+    time_to_target: Optional[float],
+    time_to_stop: Optional[float],
+) -> float:
+    """First-touch exit price for a paper hedge.
+
+    Exit at the target if it was hit first, at the stop if that was hit first,
+    otherwise at the nearest evaluation (horizon close) price. Ties (both levels
+    first crossed within the same observed snapshot) resolve to the stop, which
+    is the more conservative assumption for a risk-managed hedge.
+    """
+    hit_target = time_to_target is not None and target is not None
+    hit_stop = time_to_stop is not None and stop is not None
+    if hit_target and hit_stop:
+        return stop if time_to_stop <= time_to_target else target
+    if hit_target:
+        return target
+    if hit_stop:
+        return stop
+    return spot_eval
+
+
 def _score(reco: Recommendation, spot_eval: float,
            series: list[tuple[datetime, float]],
            created: datetime, eval_time: datetime) -> dict:
@@ -149,11 +174,14 @@ def _score(reco: Recommendation, spot_eval: float,
         mae = (lo - spot0) / spot0 * 100 if spot0 else None
         ttt = tts = None
 
-    # Paper hedge: actionable directions only; direction-adjusted return.
+    # Paper hedge: actionable directions only, with first-touch exit logic —
+    # exit at the target if it was hit first, at the stop if that was hit first,
+    # otherwise at the nearest evaluation (horizon close) price.
     actionable = direction in _ACTIONABLE
     hedge_ret = gross = net = None
-    if actionable and ret is not None:
-        hedge_ret = round(_DIR_SIGN[direction] * ret, 4)
+    if actionable and spot0:
+        exit_price = _exit_price(spot_eval, reco.target, reco.stop, ttt, tts)
+        hedge_ret = round(_DIR_SIGN[direction] * (exit_price - spot0) / spot0 * 100, 4)
         gross = round(PAPER_NOTIONAL_USD * hedge_ret / 100, 2)
         net = round(gross - PAPER_TOTAL_COST_USD, 2)
 
