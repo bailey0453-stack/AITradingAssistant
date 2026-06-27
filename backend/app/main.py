@@ -18,7 +18,16 @@ from fastapi.responses import HTMLResponse
 
 from app.config import get_settings
 from app.database import init_db
-from app.routers import analysis, calendar, health, history, market, news, timeline
+from app.routers import (
+    analysis,
+    calendar,
+    health,
+    history,
+    market,
+    news,
+    recommendations,
+    timeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +64,7 @@ app.include_router(news.router)
 app.include_router(calendar.router)
 app.include_router(timeline.router)
 app.include_router(history.router)
+app.include_router(recommendations.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -167,6 +177,31 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Provider health</h2>
         <div id="provhealth" style="margin-top:8px"></div>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Model performance <span class="muted" id="perf_note">(paper recommendations)</span></h2>
+      <div class="row">
+        <div class="stat"><div class="k">Recommendations</div><div class="v" id="perf_total">—</div></div>
+        <div class="stat"><div class="k">Evaluated</div><div class="v" id="perf_eval">—</div></div>
+        <div class="stat"><div class="k">Win rate</div><div class="v" id="perf_win">—</div></div>
+        <div class="stat"><div class="k">Target hit</div><div class="v" id="perf_target">—</div></div>
+        <div class="stat"><div class="k">Stop hit</div><div class="v" id="perf_stop">—</div></div>
+        <div class="stat"><div class="k">Avg return</div><div class="v" id="perf_ret">—</div></div>
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <div>
+          <div class="k muted">By confidence</div>
+          <table><thead><tr><th>Bucket</th><th>Win%</th><th>Avg ret</th><th>N</th></tr></thead><tbody id="perf_conf"></tbody></table>
+        </div>
+        <div>
+          <div class="k muted">By grade</div>
+          <table><thead><tr><th>Grade</th><th>Win%</th><th>Avg ret</th><th>N</th></tr></thead><tbody id="perf_grade"></tbody></table>
+        </div>
+      </div>
+      <div class="k muted" style="margin-top:10px">By horizon</div>
+      <table><thead><tr><th>Horizon</th><th>Win%</th><th>Target%</th><th>Stop%</th><th>Avg ret</th><th>N</th></tr></thead><tbody id="perf_horizon"></tbody></table>
+      <p class="muted" id="perf_empty" style="margin-top:8px"></p>
     </div>
 
     <div class="card" style="border-left:4px solid #2b6cb0">
@@ -683,6 +718,39 @@ DASHBOARD_HTML = """<!doctype html>
 
       $('newssrc').textContent = 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items';
       $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      loadPerformance();
+    }
+
+    function pctTxt(v){ return (v==null)?'—':(v+'%'); }
+    function retTxt(v){ return (v==null)?'—':((v>0?'+':'')+v+'%'); }
+    // Reads already-scored outcomes only; no evaluation is triggered on load.
+    async function loadPerformance(){
+      let p;
+      try { p = await (await fetch('/recommendations/performance')).json(); }
+      catch(e){ return; }
+      $('perf_total').textContent = p.total_recommendations ?? '—';
+      $('perf_eval').textContent = p.evaluated_outcomes ?? '—';
+      $('perf_win').textContent = pctTxt(p.win_rate);
+      $('perf_target').textContent = pctTxt(p.target_hit_rate);
+      $('perf_stop').textContent = pctTxt(p.stop_hit_rate);
+      $('perf_ret').textContent = retTxt(p.avg_return_pct);
+      const confBody=$('perf_conf'); confBody.innerHTML='';
+      Object.keys(p.by_confidence||{}).forEach(function(k){
+        const a=p.by_confidence[k];
+        confBody.innerHTML += '<tr><td>'+k+'</td><td>'+pctTxt(a.win_rate)+'</td><td>'+retTxt(a.avg_return_pct)+'</td><td>'+a.samples+'</td></tr>';
+      });
+      const gradeBody=$('perf_grade'); gradeBody.innerHTML='';
+      Object.keys(p.by_grade||{}).forEach(function(k){
+        const a=p.by_grade[k];
+        gradeBody.innerHTML += '<tr><td>'+k+'</td><td>'+pctTxt(a.win_rate)+'</td><td>'+retTxt(a.avg_return_pct)+'</td><td>'+a.samples+'</td></tr>';
+      });
+      const horBody=$('perf_horizon'); horBody.innerHTML='';
+      Object.keys(p.by_horizon||{}).forEach(function(k){
+        const a=p.by_horizon[k];
+        horBody.innerHTML += '<tr><td>'+k+'</td><td>'+pctTxt(a.win_rate)+'</td><td>'+pctTxt(a.target_hit_rate)+'</td><td>'+pctTxt(a.stop_hit_rate)+'</td><td>'+retTxt(a.avg_return_pct)+'</td><td>'+a.samples+'</td></tr>';
+      });
+      $('perf_empty').textContent = (p.evaluated_outcomes? '' :
+        'No outcomes scored yet — recommendations are evaluated once enough time passes (POST /recommendations/evaluate).');
     }
     refresh();
   </script>

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import AnalysisSnapshot
 from app.routers.market import capture_market_snapshot, serialize_market
+from app.routers.recommendations import store_recommendation
 from app.services import cache_manager
 from app.services.ai_analysis import get_analyzer
 from app.services.context_builder import build_context, build_timeline
@@ -379,6 +380,14 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         persist_matches(
             db, history.get("query_vector") or {}, history["matches"], analysis.id
         )
+
+    # Store a lean, indexed paper recommendation for later outcome evaluation
+    # (kept separate from any real trade). Never fail the request over this.
+    try:
+        store_recommendation(db, analysis, snapshot)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to store paper recommendation; continuing.")
+        db.rollback()
 
     payload = serialize_analysis(
         analysis, market={**serialize_market(snapshot), **market_meta}

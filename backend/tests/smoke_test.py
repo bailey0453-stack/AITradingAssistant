@@ -1032,6 +1032,99 @@ def test_market_infrastructure():
     check("live refresh auto-captures a historical snapshot + health", live_refresh_auto_captures_history)
 
 
+def test_recommendation_tracking():
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
+    from app.services import recommendation_evaluator as rev
+
+    init_db()
+
+    def analysis_stores_recommendation():
+        with TestClient(app) as c:
+            before = c.get("/recommendations/recent?limit=1").json()["count"]
+            c.get("/analysis/usdmxn")
+            body = c.get("/recommendations/recent?limit=5").json()
+            assert body["count"] >= 1, body
+            r = body["recommendations"][0]
+            for k in ("direction", "confidence", "opportunity_grade", "spot_price",
+                      "time_horizons", "strategist", "evaluation_status"):
+                assert k in r, (k, r)
+
+    def evaluator_scores_old_recommendations():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.query(MarketSnapshot).delete()
+            db.commit()
+
+            now = datetime.now(timezone.utc)
+            t0 = now - timedelta(days=6)
+            t0 = t0.replace(hour=10, minute=0, second=0, microsecond=0)
+
+            reco = Recommendation(
+                pair="USDMXN", created_at=t0, spot_price=18.00,
+                direction="BUY_USD", confidence=80.0, opportunity_grade="B",
+                trade_score=70.0, target=18.15, stretch_target=18.30, stop=17.90,
+            )
+            db.add(reco)
+            # Entry price + a price at each horizon's due time.
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            prices = {"1h": 18.05, "4h": 18.12, "end_of_day": 18.14,
+                      "1d": 18.20, "2d": 18.16, "5d": 18.40}
+            for h, px in prices.items():
+                due = rev.horizon_due_time(t0, h)
+                db.add(MarketSnapshot(pair="USDMXN", usdmxn=px, created_at=due))
+            db.commit()
+
+            result = rev.evaluate_due(db, now=now)
+            assert result["evaluated"] == 6, result
+
+            outs = {o.horizon: o for o in db.query(RecommendationOutcome)
+                    .filter(RecommendationOutcome.recommendation_id == reco.id).all()}
+            assert set(outs) == set(prices), list(outs)
+            assert outs["1h"].direction_correct is True
+            assert outs["1h"].target_hit is False, "target not hit within 1h"
+            assert outs["1d"].target_hit is True, "target hit by 1d"
+            assert outs["5d"].stretch_hit is True, "stretch hit by 5d"
+            assert all(o.stop_hit is False for o in outs.values())
+            assert abs(outs["1d"].return_pct - round((18.20-18.00)/18.00*100, 4)) < 1e-6
+            assert (outs["1d"].max_favorable_excursion or 0) > 0
+
+            db.refresh(reco)
+            assert reco.evaluation_status == "complete", reco.evaluation_status
+        finally:
+            db.close()
+
+    def performance_summary_is_fast_read():
+        db = SessionLocal()
+        try:
+            perf = rev.performance_summary(db)
+            for k in ("total_recommendations", "evaluated_outcomes", "win_rate",
+                      "target_hit_rate", "stop_hit_rate", "by_confidence",
+                      "by_grade", "by_horizon"):
+                assert k in perf, (k, perf)
+            assert perf["evaluated_outcomes"] >= 6, perf
+            assert set(perf["by_horizon"]) == set(rev.HORIZONS), perf["by_horizon"]
+        finally:
+            db.close()
+
+    def performance_endpoint_ok():
+        with TestClient(app) as c:
+            r = c.get("/recommendations/performance")
+            assert r.status_code == 200, r.status_code
+            assert "by_horizon" in r.json()
+            ev = c.post("/recommendations/evaluate")
+            assert ev.status_code == 200 and "evaluated" in ev.json(), ev.text
+
+    check("every analysis stores a paper recommendation", analysis_stores_recommendation)
+    check("evaluator scores old recommendations across horizons", evaluator_scores_old_recommendations)
+    check("performance summary is a fast aggregate read", performance_summary_is_fast_read)
+    check("recommendation endpoints respond", performance_endpoint_ok)
+
+
 def test_live_providers():
     def finnhub_filters_and_tags_live():
         # general + forex categories both return this list (deduped by headline).
@@ -1225,6 +1318,7 @@ def main():
     test_source_labeling()
     test_live_providers()
     test_market_infrastructure()
+    test_recommendation_tracking()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

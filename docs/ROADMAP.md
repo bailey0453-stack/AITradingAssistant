@@ -231,6 +231,27 @@ hours, and continuously builds the historical database.
       cover weekend no-fetch, holiday closure, cache-before-live,
       cache-before-mock, and automatic historical capture.
 
+## Phase 5.2 — Recommendation outcome tracking (built)
+
+Goal: store every AI market recommendation and later evaluate whether it was
+correct — paper signals, kept separate from real trades.
+
+- [x] `recommendations` table (lean + indexed on timestamp/direction/confidence/
+      opportunity_grade/last_evaluated_at); a row is stored on every
+      `/analysis/usdmxn`.
+- [x] `recommendation_outcomes` table (per horizon: 1h/4h/end_of_day/1d/2d/5d)
+      with return, direction_correct, target/stretch/stop hits, MFE/MAE; unique
+      per (recommendation, horizon).
+- [x] `recommendation_evaluator.py`: bounded `evaluate_due` (never heavy on
+      dashboard load) + fast `performance_summary` aggregation.
+- [x] Endpoints: `/recommendations/recent`, `/recommendations/performance`,
+      `POST /recommendations/evaluate`.
+- [x] Dashboard Model Performance panel (win/target/stop rates, avg return,
+      breakdowns by confidence bucket, grade, horizon).
+- [x] Real trades stay separate; a future real-trade row can link via
+      `recommendation_id`. Smoke tests cover storage, multi-horizon scoring, and
+      the fast performance read.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.

@@ -6,6 +6,7 @@ from app.models.history import (
     HistoricalMarketSnapshot,
     SimilarityMatch,
 )
+from app.models.recommendations import Recommendation, RecommendationOutcome
 from app.models.snapshots import AnalysisSnapshot, MarketSnapshot, NewsItem
 
 __all__ = [
@@ -16,4 +17,6 @@ __all__ = [
     "HistoricalEvent",
     "HistoricalEventReaction",
     "SimilarityMatch",
+    "Recommendation",
+    "RecommendationOutcome",
 ]

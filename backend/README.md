@@ -241,6 +241,36 @@ continuously builds the historical database.
   the periodic refreshes a future scheduler (e.g. Vercel Cron) would run.
   Nothing runs in the background yet — the interface is only prepared.
 
+### Recommendation outcome tracking (Phase 5.2)
+
+Every `/analysis/usdmxn` signal is stored as a **paper recommendation** (model
+signal) and later scored against the real USD/MXN price path. These are kept
+**separate from any real trade** — a future real-trade table can link back via
+`recommendation_id`, but the datasets never merge.
+
+- `recommendations` — one lean, indexed row per signal (spot price, direction,
+  confidence, opportunity_grade, trade_score, market_regime, target/stretch/stop,
+  time_horizons, key_drivers, historical_similarity, strategist). Indexed on
+  `created_at`, `direction`, `confidence`, `opportunity_grade`, `last_evaluated_at`.
+- `recommendation_outcomes` — one row per (recommendation, horizon) with
+  `evaluated_at`, `spot_at_evaluation`, `return_pct`, `direction_correct`,
+  `target_hit`, `stretch_hit`, `stop_hit`, `max_favorable_excursion`,
+  `max_adverse_excursion`. Horizons: `1h`, `4h`, `end_of_day`, `1d`, `2d`, `5d`.
+- **Evaluator** (`services/recommendation_evaluator.py`): scores recommendations
+  only once a horizon's time has passed and a post-horizon price exists. It is
+  **batched and bounded** (`evaluate_due(limit=...)`) so it never runs as a heavy
+  calculation on a dashboard load.
+- **Endpoints**: `GET /recommendations/recent`, `GET /recommendations/performance`
+  (fast aggregate over already-scored outcomes), `POST /recommendations/evaluate`
+  (score due rows — call manually or from a future scheduler).
+- **Dashboard**: a Model Performance panel (total, win rate, target/stop hit
+  rates, average return; breakdowns by confidence bucket, grade, and horizon).
+  The dashboard only *reads* performance; it never triggers evaluation.
+
+> Durable accumulation needs a persistent `DATABASE_URL` (Postgres). On the
+> default ephemeral SQLite the recommendation/outcome history resets per cold
+> start.
+
 ### Finnhub news
 
 Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from
