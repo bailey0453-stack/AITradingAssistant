@@ -1539,6 +1539,194 @@ def test_recommendation_history_and_pending():
     check("recommendation history: per-horizon status + paper P/L", history_rows_have_status_and_pnl)
 
 
+def test_decision_quality():
+    """Verify the Phase 5.3 decision-quality engine."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import Recommendation, RecommendationOutcome
+    from app.services import decision_quality as dq
+
+    init_db()
+
+    def pass_no_trade_is_wait():
+        db = SessionLocal()
+        try:
+            rec = {"direction": "NO_TRADE", "grade": "PASS", "trade_score": 20.0,
+                   "confidence": 35.0, "entry": None, "target": None, "stop": None,
+                   "vix": 15.0, "high_impact_event_count": 0}
+            out = dq.assess_recommendation(db, rec)
+            assert out["should_trade_now"] is False
+            assert out["trade_quality_label"] == "Wait", out["trade_quality_label"]
+            assert out["expected_value"]["expected_value_usd"] is None
+            assert "NO_TRADE" in (out["reason_to_wait"] or "")
+        finally:
+            db.close()
+
+    def weak_grade_explains_wait():
+        db = SessionLocal()
+        try:
+            # Grade C, even with a fine R/R, must not trade and must explain why.
+            rec = {"direction": "BUY_USD", "grade": "C", "trade_score": 45.0,
+                   "confidence": 55.0, "entry": 18.00, "target": 18.20, "stop": 17.90,
+                   "vix": 15.0, "prob_target": 50.0, "prob_stop": 40.0,
+                   "high_impact_event_count": 0}
+            out = dq.assess_recommendation(db, rec)
+            assert out["should_trade_now"] is False, out["should_trade_now"]
+            assert out["trade_quality_label"] in ("Marginal", "Poor", "Wait")
+            assert "below B" in (out["reason_to_wait"] or "")
+            assert out["better_entry_conditions"], "should suggest better conditions"
+        finally:
+            db.close()
+
+    def strong_grade_with_good_rr_can_trade():
+        db = SessionLocal()
+        try:
+            rec = {"direction": "BUY_USD", "grade": "A", "trade_score": 80.0,
+                   "confidence": 82.0, "entry": 18.00, "target": 18.20, "stop": 17.90,
+                   "vix": 13.0, "best_similarity": 0.82, "hist_win_rate": 66.0,
+                   "prob_target": 64.0, "prob_stop": 28.0, "high_impact_event_count": 0,
+                   "regime": "Trending"}
+            out = dq.assess_recommendation(db, rec)
+            assert out["reward_risk"]["reward_risk_ratio"] == 2.0, out["reward_risk"]
+            assert out["should_trade_now"] is True, out
+            assert out["trade_quality_label"] in ("Good", "Excellent")
+            assert out["reason_to_trade"] and out["reason_to_wait"] is None
+            assert out["expected_value"]["expected_value_usd"] is not None
+        finally:
+            db.close()
+
+    def expected_value_deducts_round_trip_cost():
+        ev = dq.expected_value("BUY_USD", 18.00, 18.18, 17.90, 60.0, 40.0)
+        # Recompute from the raw inputs (avoids rounding artifacts).
+        reward_pct = abs(18.18 - 18.00) / 18.00 * 100
+        risk_pct = abs(18.00 - 17.90) / 18.00 * 100
+        gross_pct = 0.60 * reward_pct - 0.40 * risk_pct
+        gross_usd = dq.PAPER_NOTIONAL_USD * gross_pct / 100.0
+        assert ev["round_trip_cost_usd"] == 40.0
+        assert abs(ev["expected_value_usd"] - round(gross_usd - 40.0, 2)) < 0.01, ev
+        # The cost is genuinely subtracted: EV-with-cost is exactly $40 below gross.
+        assert abs((gross_usd - ev["expected_value_usd"]) - 40.0) < 0.01, ev
+        # Min required win rate (breakeven) is risk/(reward+risk).
+        rr = dq.reward_risk("BUY_USD", 18.00, 18.18, 17.90)
+        assert rr["minimum_required_win_rate"] is not None and 0 < rr["minimum_required_win_rate"] < 100
+
+    def not_enough_history_is_not_overstated():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.commit()
+            tr = dq.similar_track_record(db, "BUY_USD", "A", "Trending")
+            assert tr["enough_history"] is False, tr
+            assert tr["similar_recommendation_count"] < dq._MIN_SIMILAR, tr
+            assert "Not enough similar history yet" in tr["note"], tr["note"]
+            # With no history these must not be fabricated.
+            assert tr["similar_win_rate"] is None and tr["similar_avg_pnl"] is None, tr
+            # ...and the quality blend must not lean on them.
+            rec = {"direction": "BUY_USD", "grade": "A", "trade_score": 80.0,
+                   "confidence": 82.0, "entry": 18.00, "target": 18.20, "stop": 17.90,
+                   "vix": 13.0, "prob_target": 60.0, "prob_stop": 30.0,
+                   "high_impact_event_count": 0}
+            out = dq.assess_recommendation(db, rec)
+            assert out["components"]["model_track_record"] is None, out["components"]
+            assert out["components"]["paper_hedge_similar"] is None, out["components"]
+        finally:
+            db.close()
+
+    def selective_makes_no_claims_at_zero_samples():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.commit()
+            s = dq.selective_performance(db)
+            assert s["all_trades"]["trades"] == 0, s["all_trades"]
+            assert s["all_trades"]["win_rate"] is None, s["all_trades"]
+            assert s["all_trades"]["return_on_notional_pct"] is None, s["all_trades"]
+            for f in s["filters"].values():
+                assert f["trades"] == 0 and f["win_rate"] is None, f
+        finally:
+            db.close()
+
+    def selective_works_with_limited_history():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.commit()
+            base = datetime.now(timezone.utc) - timedelta(days=10)
+            seeds = [  # (grade, conf, score, net, win)
+                ("A", 90, 88, 600.0, True),
+                ("B", 78, 72, 200.0, True),
+                ("B", 75, 70, -260.0, False),
+                ("C", 60, 50, -120.0, False),
+                ("A", 85, 80, 360.0, True),
+            ]
+            for i, (g, conf, score, net, win) in enumerate(seeds):
+                reco = Recommendation(
+                    pair="USDMXN", created_at=base + timedelta(hours=i),
+                    direction="BUY_USD", confidence=float(conf), opportunity_grade=g,
+                    trade_score=float(score), model_version="dq-test",
+                    spot_price=18.0, target=18.2, stop=17.9,
+                    evaluation_status="complete",
+                )
+                db.add(reco)
+                db.flush()
+                db.add(RecommendationOutcome(
+                    recommendation_id=reco.id, horizon="1d",
+                    direction_correct=win, target_hit=win, stop_hit=(not win),
+                    actionable=True, net_pnl_usd=net, gross_pnl_usd=net + 40.0,
+                    return_pct=(net / 1000.0),
+                ))
+            db.commit()
+
+            s = dq.selective_performance(db)
+            assert s["all_trades"]["trades"] == 5, s["all_trades"]
+            f = s["filters"]
+            for key in ("top_10pct", "top_20pct", "top_30pct", "grade_A_or_better",
+                        "grade_B_or_better", "confidence_over_70", "confidence_over_80"):
+                assert key in f, key
+            assert f["top_10pct"]["trades"] == 1, f["top_10pct"]      # 10% of 5 -> 1
+            assert f["grade_A_or_better"]["trades"] == 2, f["grade_A_or_better"]
+            assert f["grade_B_or_better"]["trades"] == 4, f["grade_B_or_better"]
+            assert f["confidence_over_80"]["trades"] == 2, f["confidence_over_80"]
+            # Selectivity should improve net P/L vs trading everything.
+            assert f["grade_A_or_better"]["net_pnl_usd"] >= s["all_trades"]["net_pnl_usd"]
+            assert s["all_trades"]["max_drawdown_usd"] >= 0.0
+        finally:
+            db.close()
+
+    def endpoints_and_payload_integration():
+        with TestClient(app) as c:
+            body = c.get("/analysis/usdmxn").json()
+            assert "decision_quality" in body, list(body)[:20]
+            dqp = body["decision_quality"]
+            for k in ("trade_quality_score", "trade_quality_label", "should_trade_now",
+                      "reward_risk", "expected_value", "similar_track_record"):
+                assert k in dqp, k
+            q = c.get("/decision/quality").json()
+            assert q.get("available") is True and "trade_quality_label" in q, q
+            # /decision/quality must agree with the latest /analysis recommendation.
+            assert q["direction"] == body["direction"], (q["direction"], body["direction"])
+            assert q["opportunity_grade"] == body["opportunity_grade"], q
+            assert q["should_trade_now"] == dqp["should_trade_now"], (q, dqp)
+            assert q["trade_quality_label"] == dqp["trade_quality_label"], (q, dqp)
+            cc = c.get("/decision/current-context").json()
+            assert cc.get("available") is True and "similar_track_record" in cc, cc
+            sp = c.get("/decision/selective-performance").json()
+            assert "filters" in sp and "all_trades" in sp, sp
+
+    check("PASS / NO_TRADE -> should_trade_now=false, label Wait", pass_no_trade_is_wait)
+    check("weak C grade explains why to wait", weak_grade_explains_wait)
+    check("B/A/A+ with supporting R/R -> should_trade_now=true", strong_grade_with_good_rr_can_trade)
+    check("expected value deducts $40 round-trip cost", expected_value_deducts_round_trip_cost)
+    check("not-enough similar history is not overstated", not_enough_history_is_not_overstated)
+    check("selective analysis makes no claims at zero samples", selective_makes_no_claims_at_zero_samples)
+    check("selective trading analysis works with limited history", selective_works_with_limited_history)
+    check("decision endpoints + analysis payload integration (agreement)", endpoints_and_payload_integration)
+
+
 def test_live_providers():
     def finnhub_filters_and_tags_live():
         # general + forex categories both return this list (deduped by headline).
@@ -1736,6 +1924,7 @@ def main():
     test_research_lab()
     test_evaluator_sparse_data()
     test_recommendation_history_and_pending()
+    test_decision_quality()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

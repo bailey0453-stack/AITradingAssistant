@@ -310,6 +310,41 @@ research observation, scores it, and measures model quality over time.
   `recommendation_uuid`, `model_version`, `confidence`, `opportunity_grade`,
   `regime`, `evaluation_status`, `evaluated_at`.
 
+### Decision quality engine (Phase 5.3)
+
+Decides not just *direction* but whether a trade is worth taking **now vs
+waiting**. Decision support only — never trading execution.
+
+- **Trade quality score + label** (`decision_quality.py`): a 0-100 score
+  *separate from confidence*, a weighted blend of signal strength, historical
+  evidence, reward/risk, event risk, volatility fit, model track record for
+  similar signals, and paper-hedge performance for similar recommendations.
+  Missing inputs renormalize the weights. Label: **Excellent / Good / Marginal
+  / Poor / Wait**.
+- **Conservative gate**: `should_trade_now` is true only for a genuinely
+  tradeable setup (actionable direction, grade **B or better**, and reward/risk
+  ≥ 1.0). PASS / NO_TRADE always produce `should_trade_now=false`, label
+  **Wait**, and a null expected value. When waiting, the engine returns
+  `reason_to_wait`, `better_entry_conditions`, and `what_to_watch_next`.
+- **Reward / risk & expected value**: `reward_to_target`, `risk_to_stop`,
+  `reward_risk_ratio`, `minimum_required_win_rate` (breakeven), and
+  `expected_value_usd` on $100,000 notional **net of the $40 round-trip cost**.
+- **Similar track record**: count, win rate, avg P/L, target/stop hit rates for
+  past recommendations matching direction (+ grade). Below the sample threshold
+  it is clearly flagged ("Not enough similar history yet"), the rates are marked
+  provisional, and they are excluded from the quality score.
+- **Selective trading analysis**: "if we only traded the top 10/20/30%, grade A
+  or better, grade B or better, confidence > 70/80" — trades, win rate, net P/L,
+  avg P/L, max drawdown, return on notional. Reads scored outcomes only and
+  makes no claims at zero samples.
+- **Endpoints**: `GET /decision/quality`, `GET /decision/selective-performance`,
+  `GET /decision/current-context`. The block is also embedded in
+  `/analysis/usdmxn` as `decision_quality`, and `/decision/quality` agrees with
+  the latest analysis.
+- **Dashboard**: a **Decision quality** panel (score, label, should-trade-now,
+  reward/risk, expected value, reason to wait/trade, component breakdown,
+  similar track record, selective-trading table), labeled decision support only.
+
 ### Finnhub news
 
 Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from

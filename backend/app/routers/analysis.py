@@ -429,6 +429,18 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         "calendar": context.get("calendar_source", "mock"),
         "historical": history.get("historical_source", "sample"),
     }
+
+    # Phase 5.3: decide whether this trade is worth taking now vs waiting.
+    # Never fail the analysis over the decision-quality overlay.
+    try:
+        from app.services import decision_quality
+
+        payload["decision_quality"] = decision_quality.assess_recommendation(
+            db, decision_quality.rec_from_payload(payload)
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Decision-quality assessment failed; continuing.")
+
     return payload
 
 

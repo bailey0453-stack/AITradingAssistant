@@ -276,6 +276,31 @@ permanent research observation, later scored and used to measure model quality.
       PERFORMANCE. Indexed for hundreds of thousands of rows. Smoke tests cover
       hedge math, research summary/calibration/model perf, and monthly totals.
 
+## Phase 5.4 — Decision quality engine (built)
+
+Goal: decide not only direction but whether a trade is worth taking now vs
+waiting. Decision support only — not trading execution.
+
+- [x] `decision_quality.py`: trade quality score (0-100, separate from
+      confidence) + label (Excellent/Good/Marginal/Poor/Wait), a weighted blend
+      of signal strength, historical evidence, reward/risk, event risk,
+      volatility fit, model track record, and similar-recommendation paper P/L.
+- [x] Conservative gate: `should_trade_now` only when actionable + grade B or
+      better + reward/risk ≥ 1.0; PASS/NO_TRADE -> Wait, null EV, with
+      reason_to_wait / better_entry_conditions / what_to_watch_next.
+- [x] Reward/risk, breakeven win rate, and expected value on $100k notional net
+      of the $40 round-trip cost.
+- [x] Similar-recommendation track record with explicit "not enough history yet"
+      flagging (provisional rates excluded from the score).
+- [x] Selective trading analysis (top 10/20/30%, grade A/B+, confidence > 70/80)
+      with win rate, net/avg P/L, max drawdown, return on notional; no claims at
+      zero samples.
+- [x] Endpoints `/decision/quality|selective-performance|current-context`;
+      `decision_quality` embedded in `/analysis/usdmxn` (and they agree).
+- [x] Dashboard Decision quality panel labeled decision support only. Smoke
+      tests cover PASS/NO_TRADE wait, weak-grade wait, B/A trade, EV cost
+      deduction, not-overstated history, zero-sample selectivity, and agreement.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.

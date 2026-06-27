@@ -21,6 +21,7 @@ from app.database import init_db
 from app.routers import (
     analysis,
     calendar,
+    decision,
     health,
     history,
     market,
@@ -69,6 +70,7 @@ app.include_router(history.router)
 app.include_router(recommendations.router)
 app.include_router(research.router)
 app.include_router(performance.router)
+app.include_router(decision.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -181,6 +183,48 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Provider health</h2>
         <div id="provhealth" style="margin-top:8px"></div>
       </div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #d69e2e">
+      <h2>Decision quality <span class="src sample">trade vs wait</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Decision support only — not trading execution. Helps judge whether a setup is worth taking now vs waiting; paper figures are simulated.</p>
+      <div class="row">
+        <div class="stat"><div class="k">Trade quality score</div><div class="v" id="dq_score">—</div></div>
+        <div class="stat"><div class="k">Quality label</div><div class="v" id="dq_label">—</div></div>
+        <div class="stat"><div class="k">Should trade now?</div><div class="v" id="dq_should">—</div></div>
+        <div class="stat"><div class="k">Reward / risk</div><div class="v" id="dq_rr">—</div></div>
+        <div class="stat"><div class="k">Min win rate</div><div class="v" id="dq_minwin">—</div></div>
+        <div class="stat"><div class="k">Expected value</div><div class="v" id="dq_ev">—</div></div>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <div>
+          <div class="k muted">Recommendation</div>
+          <p id="dq_reason" style="font-weight:600"></p>
+          <div class="k muted">Better entry conditions</div>
+          <ul id="dq_better"></ul>
+        </div>
+        <div>
+          <div class="k muted">What to watch next</div>
+          <ul id="dq_watch"></ul>
+          <div class="k muted">Quality components (weighted)</div>
+          <table><thead><tr><th>Component</th><th>Score</th></tr></thead><tbody id="dq_components"></tbody></table>
+        </div>
+      </div>
+      <div class="k muted" style="margin-top:8px">Similar recommendation track record</div>
+      <div class="row" id="dq_track_row">
+        <div class="stat"><div class="k">Similar count</div><div class="v" id="dq_simn">—</div></div>
+        <div class="stat"><div class="k">Win rate</div><div class="v" id="dq_simwin">—</div></div>
+        <div class="stat"><div class="k">Avg P/L</div><div class="v" id="dq_simpnl">—</div></div>
+        <div class="stat"><div class="k">Target hit</div><div class="v" id="dq_simtgt">—</div></div>
+        <div class="stat"><div class="k">Stop hit</div><div class="v" id="dq_simstop">—</div></div>
+      </div>
+      <p class="muted" id="dq_track_note" style="margin-top:4px"></p>
+      <div class="k muted" style="margin-top:8px">Selective trading analysis <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:11px">SIMULATED</span> — if we only traded ...</div>
+      <table>
+        <thead><tr><th>Filter</th><th>Trades</th><th>Win%</th><th>Net P/L</th><th>Avg P/L</th><th>Max DD</th><th>Ret/notional</th></tr></thead>
+        <tbody id="dq_selective"></tbody>
+      </table>
+      <p class="muted" id="dq_empty" style="margin-top:6px"></p>
     </div>
 
     <div class="card">
@@ -638,6 +682,10 @@ DASHBOARD_HTML = """<!doctype html>
       listIntoEl('sb_quote', d.quote_guidance, 'No specific guidance.');
       listIntoEl('sb_wwcm', d.what_would_change_my_mind, 'No invalidation conditions identified.');
 
+      // Decision quality (Phase 5.3)
+      renderDecision(d.decision_quality);
+      loadSelective();
+
       const reg = d.market_regime || {};
       $('regprimary').textContent = reg.primary || '—';
       $('regsecondary').textContent = reg.secondary || '—';
@@ -946,6 +994,63 @@ DASHBOARD_HTML = """<!doctype html>
       });
       $('rh_empty').textContent = (h.recommendations||[]).length ? '' :
         'No recommendations stored yet — load /analysis/usdmxn to create one.';
+    }
+
+    const DQ_LABELS = {Excellent:'#2f855a',Good:'#38a169',Marginal:'#d69e2e',Poor:'#dd6b20',Wait:'#718096'};
+    const HCAP = {signal_strength:'Signal strength',historical_evidence:'Historical evidence',reward_risk:'Reward / risk',event_risk:'Event risk',volatility_fit:'Volatility fit',model_track_record:'Model track record',paper_hedge_similar:'Paper hedge (similar)'};
+    function renderDecision(dq){
+      if(!dq){ return; }
+      const c = DQ_LABELS[dq.trade_quality_label]||'#8aa0c6';
+      $('dq_score').textContent = (dq.trade_quality_score==null?'—':dq.trade_quality_score);
+      const lbl=$('dq_label'); lbl.textContent = dq.trade_quality_label||'—'; lbl.style.color=c;
+      const should=$('dq_should');
+      should.textContent = dq.should_trade_now ? 'YES' : 'WAIT';
+      should.style.color = dq.should_trade_now ? '#2f855a' : '#dd6b20';
+      const rr = dq.reward_risk||{};
+      $('dq_rr').textContent = (rr.reward_risk_ratio==null?'—':(rr.reward_risk_ratio+' : 1'));
+      $('dq_minwin').textContent = pctTxt(rr.minimum_required_win_rate);
+      const ev = dq.expected_value||{};
+      $('dq_ev').textContent = (ev.expected_value_usd==null?'—':usd(ev.expected_value_usd));
+      $('dq_reason').textContent = dq.should_trade_now ? (dq.reason_to_trade||'') : (dq.reason_to_wait||'');
+      const bl=$('dq_better'); bl.innerHTML='';
+      (dq.better_entry_conditions||[]).forEach(function(x){ const li=document.createElement('li'); li.textContent=x; bl.appendChild(li); });
+      if(!(dq.better_entry_conditions||[]).length) bl.innerHTML='<li class="muted">—</li>';
+      const wl=$('dq_watch'); wl.innerHTML='';
+      (dq.what_to_watch_next||[]).forEach(function(x){ const li=document.createElement('li'); li.textContent=x; wl.appendChild(li); });
+      const comp=dq.components||{}; const cb=$('dq_components'); cb.innerHTML='';
+      Object.keys(HCAP).forEach(function(k){
+        cb.innerHTML += '<tr><td>'+HCAP[k]+'</td><td>'+(comp[k]==null?'<span class="muted">n/a</span>':comp[k])+'</td></tr>';
+      });
+      const tr=dq.similar_track_record||{};
+      $('dq_simn').textContent = tr.similar_recommendation_count ?? '—';
+      $('dq_simwin').textContent = pctTxt(tr.similar_win_rate);
+      $('dq_simpnl').textContent = (tr.similar_avg_pnl==null?'—':usd(tr.similar_avg_pnl));
+      $('dq_simtgt').textContent = pctTxt(tr.similar_target_hit_rate);
+      $('dq_simstop').textContent = pctTxt(tr.similar_stop_hit_rate);
+      $('dq_track_note').textContent = tr.note || '';
+    }
+    // Reads scored outcomes only; never evaluates on load.
+    async function loadSelective(){
+      let s;
+      try { s = await (await fetch('/decision/selective-performance')).json(); }
+      catch(e){ return; }
+      const rows = [
+        ['All actionable', s.all_trades],
+        ['Top 10%', (s.filters||{}).top_10pct],
+        ['Top 20%', (s.filters||{}).top_20pct],
+        ['Top 30%', (s.filters||{}).top_30pct],
+        ['Grade A or better', (s.filters||{}).grade_A_or_better],
+        ['Grade B or better', (s.filters||{}).grade_B_or_better],
+        ['Confidence > 70', (s.filters||{}).confidence_over_70],
+        ['Confidence > 80', (s.filters||{}).confidence_over_80],
+      ];
+      const body=$('dq_selective'); body.innerHTML='';
+      rows.forEach(function(r){
+        const a=r[1]||{};
+        body.innerHTML += '<tr><td>'+r[0]+'</td><td>'+(a.trades??0)+'</td><td>'+pctTxt(a.win_rate)+'</td><td>'+usd(a.net_pnl_usd)+'</td><td>'+(a.avg_pnl_usd==null?'—':usd(a.avg_pnl_usd))+'</td><td>'+usd(a.max_drawdown_usd)+'</td><td>'+retTxt(a.return_on_notional_pct)+'</td></tr>';
+      });
+      $('dq_empty').textContent = (s.all_trades && s.all_trades.trades) ? '' :
+        'No scored actionable trades yet — selective analysis populates as recommendations are evaluated.';
     }
     refresh();
   </script>
