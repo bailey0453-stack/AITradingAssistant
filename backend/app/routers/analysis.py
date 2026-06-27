@@ -441,6 +441,28 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
     except Exception:  # noqa: BLE001
         logger.exception("Decision-quality assessment failed; continuing.")
 
+    # Phase 5.4: provenance metadata (where each number came from + how
+    # trustworthy it is) plus an evidence summary. Never fail analysis over it.
+    try:
+        from app.services import provenance, research_lab
+
+        progress = research_lab.evaluation_progress(db)
+        measured_available = bool(progress.get("recommendations_evaluated"))
+        measured_accuracy = None
+        if measured_available:
+            measured_accuracy = research_lab.research_summary(db).get("overall_accuracy")
+        similar = (payload.get("decision_quality") or {}).get("similar_track_record") or {}
+        prov = provenance.build(
+            payload, market_meta,
+            measured_accuracy=measured_accuracy,
+            measured_available=measured_available,
+            similar_measured=bool(similar.get("enough_history")),
+        )
+        payload["provenance"] = prov
+        payload["evidence_overview"] = provenance.overview(prov)
+    except Exception:  # noqa: BLE001
+        logger.exception("Provenance build failed; continuing.")
+
     return payload
 
 

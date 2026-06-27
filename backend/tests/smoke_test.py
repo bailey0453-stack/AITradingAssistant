@@ -1727,6 +1727,120 @@ def test_decision_quality():
     check("decision endpoints + analysis payload integration (agreement)", endpoints_and_payload_integration)
 
 
+def test_provenance_engine():
+    """Verify the Phase 5.4 evidence & provenance engine."""
+    from app.services import provenance as pv
+
+    def _payload(market_source="live", field_sources=None, historical="sample"):
+        return {
+            "direction": "BUY_USD", "confidence": 70.0, "entry": 18.00,
+            "target": 18.20, "stretch_target": 18.30, "stop": 17.90,
+            "expected_move": "+0.5%",
+            "market": {
+                "usdmxn": 18.00, "dxy": 104.0, "vix": 15.0, "provider": "oxr",
+                "source": market_source,
+                "sources": field_sources or {"usdmxn": market_source, "dxy": "live", "vix": "mock"},
+                "created_at": "2026-06-27T12:00:00+00:00",
+            },
+            "data_sources": {"market": market_source, "historical": historical},
+            "historical": {"best_similarity": 0.80, "statistics": {"win_rate": 60.0}},
+            "probabilities": {"levels": {"probability_reaches_target_1": 62.0}},
+            "decision_quality": {
+                "trade_quality_score": 70.0,
+                "expected_value": {"expected_value_usd": 120.0},
+                "similar_track_record": {"enough_history": False, "similar_win_rate": None,
+                                         "note": "Not enough similar history yet — 0."},
+            },
+        }
+
+    def levels_map_correctly():
+        # Live market data -> LIVE (3); a mock field -> SAMPLE (0).
+        prov = pv.build(_payload(), {"cached": False, "provider": "oxr",
+                                     "fetched_at": "2026-06-27T12:00:00+00:00"})
+        assert prov["spot_rate"]["source"] == "live" and prov["spot_rate"]["evidence_level"] == 3
+        assert prov["dxy"]["source"] == "live"
+        assert prov["vix"]["source"] == "sample" and prov["vix"]["evidence_level"] == 0
+        # Trade plan is an estimate by default.
+        assert prov["target"]["source"] == "estimated" and prov["target"]["evidence_level"] == 1
+        # Cached market overlay downgrades live -> cached (2).
+        prov_c = pv.build(_payload(), {"cached": True, "provider": "oxr"})
+        assert prov_c["spot_rate"]["source"] == "cached" and prov_c["spot_rate"]["evidence_level"] == 2
+
+    def every_major_metric_has_provenance():
+        prov = pv.build(_payload(), {"cached": False})
+        required = ("spot_rate", "entry", "target", "stretch_target", "stop",
+                    "expected_move", "probabilities", "confidence",
+                    "historical_similarity", "historical_win_rate",
+                    "recommendation_accuracy", "trade_quality_score",
+                    "expected_value", "similar_track_record")
+        for f in required:
+            assert f in prov, f
+            for key in ("value", "source", "evidence_level", "badge", "explanation"):
+                assert key in prov[f], (f, key)
+            assert prov[f]["source"] in pv.LEVELS, prov[f]
+
+    def measured_and_estimated_stay_separate():
+        # No measured history: recommendation accuracy is NOT measured.
+        prov = pv.build(_payload(), {"cached": False},
+                        measured_available=False, similar_measured=False)
+        assert prov["recommendation_accuracy"]["source"] == "estimated"
+        assert prov["recommendation_accuracy"]["value"] is None
+        # Historical similarity is never "measured" — it's historical/sample.
+        assert prov["historical_similarity"]["source"] == "sample"
+        assert prov["historical_similarity"]["label"] == "Sample Historical Database"
+        # With measured outcomes, recommendation accuracy becomes measured (L5).
+        prov_m = pv.build(_payload(), {"cached": False},
+                          measured_available=True, measured_accuracy=61.0)
+        assert prov_m["recommendation_accuracy"]["source"] == "measured"
+        assert prov_m["recommendation_accuracy"]["evidence_level"] == 5
+        assert prov_m["recommendation_accuracy"]["value"] == 61.0
+        # ...but the similarity score stays historical/sample (not conflated).
+        assert prov_m["historical_similarity"]["source"] != "measured"
+
+    def historical_db_label_tracks_source():
+        s = pv.build(_payload(historical="sample"), {"cached": False})
+        assert s["historical_similarity"]["label"] == "Sample Historical Database"
+        b = pv.build(_payload(historical="backfilled"), {"cached": False})
+        assert b["historical_similarity"]["label"] == "Historical Database"
+        assert b["historical_similarity"]["source"] == "historical"
+
+    def estimated_upgrades_to_measured_when_history_supports():
+        base = pv.build(_payload(), {"cached": False}, similar_measured=False)
+        assert base["target"]["source"] == "estimated"
+        # Same value, only provenance changes once measured similar history exists.
+        up = pv.build(_payload(), {"cached": False}, similar_measured=True)
+        assert up["target"]["source"] == "measured", up["target"]
+        assert up["target"]["value"] == base["target"]["value"]  # value unchanged
+        assert up["probabilities"]["source"] == "measured"
+
+    def overview_summarizes_counts():
+        prov = pv.build(_payload(), {"cached": False})
+        ov = pv.overview(prov)
+        assert ov["total_metrics"] == len(prov)
+        assert sum(ov["counts"].values()) == len(prov)
+        assert ov["order"] == pv.SOURCE_ORDER
+        for s in pv.SOURCE_ORDER:
+            assert s in ov["by_source"] and "fields" in ov["by_source"][s]
+        assert 0.0 <= ov["evidence_backed_share_pct"] <= 100.0
+
+    def api_returns_provenance():
+        with TestClient(app) as c:
+            d = c.get("/analysis/usdmxn").json()
+            assert "provenance" in d and "evidence_overview" in d, list(d)[:25]
+            prov = d["provenance"]
+            assert "spot_rate" in prov and "evidence_level" in prov["spot_rate"], prov.get("spot_rate")
+            ov = d["evidence_overview"]
+            assert ov["total_metrics"] == sum(ov["counts"].values()), ov
+
+    check("evidence levels map correctly (live/cached/sample/estimated)", levels_map_correctly)
+    check("every major metric carries provenance", every_major_metric_has_provenance)
+    check("measured and estimated statistics stay separate", measured_and_estimated_stay_separate)
+    check("historical database label tracks the source", historical_db_label_tracks_source)
+    check("estimated upgrades to measured when history supports (value unchanged)", estimated_upgrades_to_measured_when_history_supports)
+    check("evidence summary overview counts add up", overview_summarizes_counts)
+    check("API returns provenance + evidence overview", api_returns_provenance)
+
+
 def test_live_providers():
     def finnhub_filters_and_tags_live():
         # general + forex categories both return this list (deduped by headline).
@@ -1925,6 +2039,7 @@ def main():
     test_evaluator_sparse_data()
     test_recommendation_history_and_pending()
     test_decision_quality()
+    test_provenance_engine()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

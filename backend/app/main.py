@@ -112,6 +112,13 @@ DASHBOARD_HTML = """<!doctype html>
     .src.imported, .src.backfilled, .src.cached { background:#15324a; color:#7fd0ff; }
     .src.fallback { background:#3d3416; color:#ffd98a; }
     .src.mock, .src.sample { background:#3a2236; color:#f0a6d6; }
+    .evb { display:inline-block; padding:0 6px; border-radius:8px; font-size:10px; font-weight:700; letter-spacing:.04em; vertical-align:middle; margin-left:6px; cursor:help; }
+    .evb.measured { background:#0f3d2e; color:#5be3a0; border:1px solid #1d6b48; }
+    .evb.historical { background:#15324a; color:#7fd0ff; border:1px solid #2a5a7a; }
+    .evb.live { background:#0f3d2e; color:#7df0b0; border:1px solid #1d6b48; }
+    .evb.cached { background:#3d3416; color:#ffd98a; border:1px solid #6b5e1d; }
+    .evb.estimated { background:#26314d; color:#9fb3d9; border:1px solid #34406a; }
+    .evb.sample { background:#3a2236; color:#f0a6d6; border:1px solid #6b3a55; }
     .hstat { display:inline-flex; gap:6px; align-items:center; margin:3px 10px 3px 0; font-size:12px; }
     .dot { width:9px; height:9px; border-radius:50%; display:inline-block; background:#5b6b8c; }
     .dot.healthy { background:#5be3a0; } .dot.using_cache { background:#7fd0ff; }
@@ -154,7 +161,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card">
       <h2>Market</h2>
       <div class="row">
-        <div class="stat"><div class="k">USD/MXN <span class="src" id="fs_usdmxn">—</span></div><div class="v" id="px">—</div></div>
+        <div class="stat"><div class="k">USD/MXN <span class="src" id="fs_usdmxn">—</span></div><div class="v" id="px">—<span id="pv_spot_rate"></span></div></div>
         <div class="stat"><div class="k">Inverse</div><div class="v" id="inv">—</div></div>
         <div class="stat"><div class="k">DXY <span class="src" id="fs_dxy">—</span></div><div class="v" id="dxy">—</div></div>
         <div class="stat"><div class="k">US 2Y <span class="src" id="fs_us2y">—</span></div><div class="v" id="us2y">—</div></div>
@@ -183,6 +190,25 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Provider health</h2>
         <div id="provhealth" style="margin-top:8px"></div>
       </div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #7fd0ff">
+      <h2>Evidence summary <span class="src sample">provenance</span></h2>
+      <p class="muted" style="margin:4px 0 10px">How much of today's analysis is backed by evidence vs inference. Every badge below explains itself on hover.</p>
+      <div class="row">
+        <div class="stat"><div class="k">Live</div><div class="v" id="es_live">—</div></div>
+        <div class="stat"><div class="k">Cached</div><div class="v" id="es_cached">—</div></div>
+        <div class="stat"><div class="k">Measured</div><div class="v" id="es_measured">—</div></div>
+        <div class="stat"><div class="k">Historical</div><div class="v" id="es_historical">—</div></div>
+        <div class="stat"><div class="k">Estimated</div><div class="v" id="es_estimated">—</div></div>
+        <div class="stat"><div class="k">Sample</div><div class="v" id="es_sample">—</div></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div class="stat"><div class="k">Evidence-backed</div><div class="v" id="es_backed">—</div></div>
+        <div class="stat"><div class="k">Estimated share</div><div class="v" id="es_estshare">—</div></div>
+        <div class="stat"><div class="k">Sample share</div><div class="v" id="es_smpshare">—</div></div>
+      </div>
+      <table style="margin-top:10px"><thead><tr><th>Source</th><th>Level</th><th>Metrics</th><th>Fields</th></tr></thead><tbody id="es_rows"></tbody></table>
     </div>
 
     <div class="card" style="border-left:4px solid #d69e2e">
@@ -258,7 +284,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Recommendations stored</div><div class="v" id="rl_stored">—</div></div>
         <div class="stat"><div class="k">Evaluated recommendations</div><div class="v" id="rl_evaluated">—</div></div>
         <div class="stat"><div class="k">Awaiting evaluation</div><div class="v" id="rl_pending">—</div></div>
-        <div class="stat"><div class="k">Overall accuracy (1d)</div><div class="v" id="rl_acc">—</div></div>
+        <div class="stat"><div class="k">Recommendation accuracy (1d) <span class="evb measured" title="Computed from stored recommendation outcomes.">MEASURED</span></div><div class="v" id="rl_acc">—</div></div>
         <div class="stat"><div class="k">Signal stability</div><div class="v" id="rl_stab">—</div></div>
         <div class="stat"><div class="k">Recommendation drift</div><div class="v" id="rl_drift">—</div></div>
       </div>
@@ -301,7 +327,7 @@ DASHBOARD_HTML = """<!doctype html>
           <table><thead><tr><th>Driver</th><th>Acc%</th><th>N</th></tr></thead><tbody id="rl_weakdrv"></tbody></table>
         </div>
       </div>
-      <div class="k muted" style="margin-top:8px">Historical similarity accuracy</div>
+      <div class="k muted" style="margin-top:8px">Historical similarity accuracy <span class="evb measured" title="Outcome accuracy grouped by similarity bucket — computed from stored recommendation outcomes.">MEASURED</span></div>
       <table><thead><tr><th>Similarity</th><th>Acc%</th><th>Avg ret</th><th>N</th></tr></thead><tbody id="rl_sim"></tbody></table>
       <div class="k muted" style="margin-top:8px">Provider reliability</div>
       <div id="rl_providers" style="margin-top:6px"></div>
@@ -429,7 +455,7 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
 
       <div class="card">
-        <h2>Primary Trade Plan</h2>
+        <h2>Primary Trade Plan <span id="pv_plan"></span></h2>
         <div class="row">
           <div class="stat"><div class="k">Entry</div><div class="v" id="entry">—</div></div>
           <div class="stat"><div class="k">Target</div><div class="v" id="tgt">—</div></div>
@@ -487,12 +513,12 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
 
     <div class="card">
-      <h2>Historical evidence <span id="histsrc" class="src">sample</span></h2>
+      <h2>Historical evidence <span id="histsrc" class="src">sample</span><span id="pv_histdb"></span></h2>
       <p id="hevidence" style="margin:6px 0 14px;line-height:1.5"></p>
       <div class="row">
-        <div class="stat"><div class="k">Historical similarity</div><div class="v" id="hsim">—</div></div>
+        <div class="stat"><div class="k">Historical similarity</div><div class="v" id="hsim">—<span id="pv_historical_similarity"></span></div></div>
         <div class="stat"><div class="k">Comparable events</div><div class="v" id="hcount">—</div></div>
-        <div class="stat"><div class="k">Win rate</div><div class="v" id="hwin">—</div></div>
+        <div class="stat"><div class="k">Win rate</div><div class="v" id="hwin">—<span id="pv_historical_win_rate"></span></div></div>
         <div class="stat"><div class="k">Avg move</div><div class="v" id="havg">—</div></div>
         <div class="stat"><div class="k">Median move</div><div class="v" id="hmed">—</div></div>
       </div>
@@ -685,6 +711,9 @@ DASHBOARD_HTML = """<!doctype html>
       // Decision quality (Phase 5.3)
       renderDecision(d.decision_quality);
       loadSelective();
+
+      // Evidence & provenance (Phase 5.4)
+      renderProvenance(d);
 
       const reg = d.market_regime || {};
       $('regprimary').textContent = reg.primary || '—';
@@ -994,6 +1023,43 @@ DASHBOARD_HTML = """<!doctype html>
       });
       $('rh_empty').textContent = (h.recommendations||[]).length ? '' :
         'No recommendations stored yet — load /analysis/usdmxn to create one.';
+    }
+
+    // --- Evidence & provenance (Phase 5.4) ---
+    function evBadge(meta){
+      if(!meta || !meta.source) return '';
+      const tip = (meta.explanation||'') + (meta.label? (' — '+meta.label):'') + (meta.note? (' '+meta.note):'');
+      return '<span class="evb '+meta.source+'" title="'+tip.replace(/"/g,'&quot;')+'">'+(meta.badge||meta.source.toUpperCase())+'</span>';
+    }
+    function setBadge(id, meta){ const el=$(id); if(el) el.innerHTML = evBadge(meta); }
+    function renderProvenance(d){
+      const p = d.provenance||{};
+      setBadge('pv_spot_rate', p.spot_rate);
+      setBadge('pv_plan', p.target);
+      setBadge('pv_historical_similarity', p.historical_similarity);
+      setBadge('pv_historical_win_rate', p.historical_win_rate);
+      // Historical database label badge (Sample / Historical / Measured).
+      const hs = p.historical_similarity;
+      const hp = $('pv_histdb');
+      if(hp) hp.innerHTML = hs ? ('<span class="evb '+hs.source+'" title="'+((hs.explanation||'')).replace(/"/g,'&quot;')+'">'+(hs.label||hs.badge)+'</span>') : '';
+
+      const ov = d.evidence_overview||{};
+      const c = ov.counts||{};
+      $('es_live').textContent = c.live ?? '—';
+      $('es_cached').textContent = c.cached ?? '—';
+      $('es_measured').textContent = c.measured ?? '—';
+      $('es_historical').textContent = c.historical ?? '—';
+      $('es_estimated').textContent = c.estimated ?? '—';
+      $('es_sample').textContent = c.sample ?? '—';
+      $('es_backed').textContent = (ov.evidence_backed_share_pct==null?'—':ov.evidence_backed_share_pct+'%');
+      $('es_estshare').textContent = (ov.estimated_share_pct==null?'—':ov.estimated_share_pct+'%');
+      $('es_smpshare').textContent = (ov.sample_share_pct==null?'—':ov.sample_share_pct+'%');
+      const body=$('es_rows'); if(body){ body.innerHTML='';
+        (ov.order||[]).forEach(function(s){
+          const b=(ov.by_source||{})[s]; if(!b) return;
+          body.innerHTML += '<tr><td>'+evBadge({source:s,badge:b.badge,explanation:b.explanation})+'</td><td>L'+b.evidence_level+'</td><td>'+b.count+'</td><td class="muted">'+(b.fields||[]).join(', ')+'</td></tr>';
+        });
+      }
     }
 
     const DQ_LABELS = {Excellent:'#2f855a',Good:'#38a169',Marginal:'#d69e2e',Poor:'#dd6b20',Wait:'#718096'};

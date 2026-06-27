@@ -345,6 +345,37 @@ waiting**. Decision support only — never trading execution.
   reward/risk, expected value, reason to wait/trade, component breakdown,
   similar track record, selective-trading table), labeled decision support only.
 
+### Evidence & provenance engine (Phase 5.4)
+
+Every major analysis output is annotated with *where it came from* and *how
+trustworthy it is*, so an AI estimate is never mistaken for real market data.
+
+- **Evidence levels** (`provenance.py`): `5 measured` (stored recommendation
+  outcomes) · `4 historical` (historical market DB) · `3 live` (current provider)
+  · `2 cached` (previously verified live) · `1 estimated` (reasoning engine) ·
+  `0 sample` (mock/demo).
+- **Provenance metadata**: `/analysis/usdmxn` returns a `provenance` map where
+  each field is `{value, source, evidence_level, badge, explanation, …}` —
+  covering spot rate + macro fields (live/cached/sample), the trade plan
+  (entry/target/stretch/stop/expected move/probabilities = estimated),
+  confidence + decision quality (estimated), historical similarity / win rate
+  (historical or sample), and recommendation accuracy / similar track record
+  (measured when outcomes exist).
+- **Evidence summary** (`evidence_overview`): counts and shares per source
+  (live / cached / measured / historical / estimated / sample) — an instant read
+  on how much of today's analysis is evidence vs inference.
+- **Measured vs estimated stay separate**: recommendation accuracy is *measured*;
+  the historical-similarity score is *historical/sample* — never conflated.
+- **Auto-upgrade (provenance only)**: estimated trade-plan metrics are *labeled*
+  measured once enough similar recommendation history exists. The value is never
+  changed — only the provenance.
+- **Historical database label**: "Sample Historical Database" (sample),
+  "Historical Database" (imported/backfilled), or "Measured Recommendation
+  History" (stored outcomes).
+- **Dashboard**: an **Evidence summary** card plus self-explaining evidence
+  badges (hover tooltips) beside the spot rate, trade plan, historical
+  similarity/win rate, and a MEASURED badge on recommendation accuracy.
+
 ### Finnhub news
 
 Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from

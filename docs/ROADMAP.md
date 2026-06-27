@@ -301,6 +301,25 @@ waiting. Decision support only — not trading execution.
       tests cover PASS/NO_TRADE wait, weak-grade wait, B/A trade, EV cost
       deduction, not-overstated history, zero-sample selectivity, and agreement.
 
+## Phase 5.5 — Evidence & provenance engine (built)
+
+Goal: every value identifies where it came from and how trustworthy it is.
+
+- [x] `provenance.py` evidence levels: measured(5)/historical(4)/live(3)/
+      cached(2)/estimated(1)/sample(0), with badges + tooltips.
+- [x] `/analysis/usdmxn` returns a `provenance` map (value/source/evidence_level/
+      badge/explanation) for spot + macro, trade plan, probabilities, confidence,
+      decision quality, historical similarity/win rate, recommendation accuracy.
+- [x] `evidence_overview` summary card: counts + shares per source.
+- [x] Measured vs estimated kept separate (recommendation accuracy = measured;
+      similarity score = historical/sample). Auto-upgrade estimated->measured by
+      provenance only (values never change).
+- [x] Historical DB label: Sample Historical Database / Historical Database /
+      Measured Recommendation History.
+- [x] Dashboard Evidence summary card + self-explaining badges on key metrics.
+      Smoke tests cover level mapping, full coverage, separation, label tracking,
+      auto-upgrade, and the overview totals.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.
