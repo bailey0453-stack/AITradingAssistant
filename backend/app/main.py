@@ -474,17 +474,17 @@ DASHBOARD_HTML = """<!doctype html>
       const probObj = (d.probabilities || {});
       const probs = probObj.levels || {};
       const targets = probObj.targets || {};
-      const ev = probObj.evidence || {};
+      const probEv = probObj.evidence || {};
       const ci = e => (e && e.confidence_interval) ? (e.confidence_interval[0]+'–'+e.confidence_interval[1]+'%') : '—';
       const ss = e => (e && e.sample_size != null) ? e.sample_size : '—';
       const probRows = [
-        ['Reaches target 1', targets.target_1, probs.probability_reaches_target_1, ev.reaches_target],
+        ['Reaches target 1', targets.target_1, probs.probability_reaches_target_1, probEv.reaches_target],
         ['Reaches target 2', targets.target_2, probs.probability_reaches_target_2, null],
-        ['Reaches stretch', targets.stretch, probs.probability_reaches_stretch, ev.reaches_stretch],
-        ['Hits stop', targets.stop, probs.probability_hits_stop, ev.reaches_stop],
-        ['Positive by EOD', null, probs.probability_finishes_positive_today, ev.finishes_positive_today],
-        ['Positive next day', null, probs.probability_finishes_positive_tomorrow, ev.finishes_positive_tomorrow],
-        ['Positive within 5d', null, probs.probability_finishes_positive_within_5d, ev.finishes_positive_within_5d],
+        ['Reaches stretch', targets.stretch, probs.probability_reaches_stretch, probEv.reaches_stretch],
+        ['Hits stop', targets.stop, probs.probability_hits_stop, probEv.reaches_stop],
+        ['Positive by EOD', null, probs.probability_finishes_positive_today, probEv.finishes_positive_today],
+        ['Positive next day', null, probs.probability_finishes_positive_tomorrow, probEv.finishes_positive_tomorrow],
+        ['Positive within 5d', null, probs.probability_finishes_positive_within_5d, probEv.finishes_positive_within_5d],
       ];
       probRows.forEach(([label, lvl, p, e]) => {
         if (p == null && lvl == null) return;
