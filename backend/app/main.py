@@ -238,7 +238,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card">
       <h2>Time Horizon Outlook</h2>
       <table>
-        <thead><tr><th>Horizon</th><th>Bias</th><th>Confidence</th><th>Target</th><th>Stretch</th><th>Stop</th><th>Rationale</th></tr></thead>
+        <thead><tr><th>Horizon</th><th>Bias</th><th>Confidence</th><th>Target</th><th>Stretch</th><th>Stop</th><th>Expected Move</th><th>Rationale</th></tr></thead>
         <tbody id="horizons"></tbody>
       </table>
       <p class="muted" style="margin-top:8px">Independent lean per timeframe. The Primary Trade Plan above is the single actionable recommendation; when it is NO_TRADE/PASS these horizons may still show a directional lean.</p>
@@ -380,10 +380,11 @@ DASHBOARD_HTML = """<!doctype html>
           '<td>'+(h.target ?? '—')+'</td>'+
           '<td>'+(h.stretch_target ?? '—')+'</td>'+
           '<td>'+(h.stop ?? '—')+'</td>'+
+          '<td class="muted">'+(h.expected_move||'—')+'</td>'+
           '<td class="muted">'+(h.rationale||'')+'</td>';
         hz.appendChild(tr);
       });
-      if (!(d.time_horizons||[]).length) hz.innerHTML = '<tr><td colspan="7" class="muted">No horizon data.</td></tr>';
+      if (!(d.time_horizons||[]).length) hz.innerHTML = '<tr><td colspan="8" class="muted">No horizon data.</td></tr>';
 
       $('summary').textContent = d.summary || '';
       const ul = $('drivers'); ul.innerHTML = '';
