@@ -211,10 +211,20 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="card" style="border-left:4px solid #6b46c1">
       <h2>AI Research Lab <span class="src sample">self-evaluation</span></h2>
       <div class="row">
+        <div class="stat"><div class="k">Recommendations stored</div><div class="v" id="rl_stored">—</div></div>
+        <div class="stat"><div class="k">Evaluated recommendations</div><div class="v" id="rl_evaluated">—</div></div>
+        <div class="stat"><div class="k">Awaiting evaluation</div><div class="v" id="rl_pending">—</div></div>
         <div class="stat"><div class="k">Overall accuracy (1d)</div><div class="v" id="rl_acc">—</div></div>
         <div class="stat"><div class="k">Signal stability</div><div class="v" id="rl_stab">—</div></div>
         <div class="stat"><div class="k">Recommendation drift</div><div class="v" id="rl_drift">—</div></div>
       </div>
+      <div class="k muted" style="margin-top:10px">Pending evaluations by horizon (read-only — evaluated once enough time passes)</div>
+      <table><thead><tr><th>Horizon</th><th>1h</th><th>4h</th><th>EOD</th><th>1d</th><th>2d</th><th>5d</th></tr></thead>
+        <tbody>
+          <tr><td>Evaluated</td><td id="ev_1h">—</td><td id="ev_4h">—</td><td id="ev_eod">—</td><td id="ev_1d">—</td><td id="ev_2d">—</td><td id="ev_5d">—</td></tr>
+          <tr><td>Pending</td><td id="pe_1h">—</td><td id="pe_4h">—</td><td id="pe_eod">—</td><td id="pe_1d">—</td><td id="pe_2d">—</td><td id="pe_5d">—</td></tr>
+        </tbody>
+      </table>
       <div class="k muted" style="margin-top:12px">Self-assessment (observations only — weights never change automatically)</div>
       <ul id="rl_assess"></ul>
       <div class="grid2" style="margin-top:8px">
@@ -268,6 +278,19 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
       <div class="k muted" style="margin-top:10px">Monthly net P/L</div>
       <table><thead><tr><th>Month</th><th>Recs</th><th>Actionable</th><th>Win%</th><th>Gross</th><th>Costs</th><th>Net</th><th>Best</th><th>Worst</th></tr></thead><tbody id="ph_monthly"></tbody></table>
+    </div>
+
+    <div class="card" style="border-left:4px solid #6b46c1">
+      <h2>Recommendation history <span class="src sample">stored signals</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Every analysis is stored as a paper recommendation. Horizon cells show evaluation status (Pending until enough time passes). Paper P/L is the 1d simulated net result; NO_TRADE / PASS show N/A.</p>
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Version</th><th>Signal</th><th>Grade</th><th>Conf</th>
+          <th>1h</th><th>4h</th><th>EOD</th><th>1d</th><th>2d</th><th>5d</th><th>Paper P/L</th>
+        </tr></thead>
+        <tbody id="rh_body"></tbody>
+      </table>
+      <p class="muted" id="rh_empty" style="margin-top:8px"></p>
     </div>
 
     <div class="card" style="border-left:4px solid #2b6cb0">
@@ -836,6 +859,19 @@ DASHBOARD_HTML = """<!doctype html>
         mo = await (await fetch('/performance/monthly')).json();
       } catch(e){ return; }
 
+      const ep = s.evaluation_progress || {};
+      $('rl_stored').textContent = ep.recommendations_stored ?? '—';
+      $('rl_evaluated').textContent = ep.recommendations_evaluated ?? '—';
+      $('rl_pending').textContent = ep.recommendations_pending ?? '—';
+      const evB = ep.evaluated_by_horizon || {}, peB = ep.pending_by_horizon || {};
+      const hmap = {'1h':'1h','4h':'4h','end_of_day':'eod','1d':'1d','2d':'2d','5d':'5d'};
+      Object.keys(hmap).forEach(function(h){
+        const sfx = hmap[h];
+        const ev=$('ev_'+sfx), pe=$('pe_'+sfx);
+        if(ev) ev.textContent = (evB[h] ?? 0);
+        if(pe) pe.textContent = (peB[h] ?? 0);
+      });
+
       $('rl_acc').textContent = pctTxt(s.overall_accuracy);
       $('rl_stab').textContent = pctTxt((s.signal_stability||{}).stability);
       $('rl_drift').textContent = pctTxt((s.signal_stability||{}).drift_rate);
@@ -874,6 +910,42 @@ DASHBOARD_HTML = """<!doctype html>
         mb.innerHTML += '<tr><td>'+k+'</td><td>'+m.total_recommendations+'</td><td>'+m.actionable_recommendations+'</td><td>'+pctTxt(m.win_rate)+'</td><td>'+usd(m.gross_pnl_usd)+'</td><td>'+usd(m.transaction_costs_usd)+'</td><td>'+usd(m.net_pnl_usd)+'</td><td>'+usd(m.best_trade_usd)+'</td><td>'+usd(m.worst_trade_usd)+'</td></tr>';
       });
       if(!Object.keys(months).length) mb.innerHTML='<tr><td colspan="9" class="muted">No evaluated months yet.</td></tr>';
+      loadHistory();
+    }
+
+    function statusPill(st){
+      const colors={Pending:'#718096',Win:'#2f855a',Target:'#2f855a',Loss:'#c53030',Stop:'#c53030','N/A':'#4a5568'};
+      const c=colors[st]||'#4a5568';
+      return '<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;background:'+c+'22;color:'+c+';border:1px solid '+c+'66">'+st+'</span>';
+    }
+    function signalPill(dir){
+      const c = dir==='BUY_USD'?'#3182ce':(dir==='SELL_USD'?'#dd6b20':'#718096');
+      return '<span style="color:'+c+';font-weight:600">'+(dir||'—')+'</span>';
+    }
+    // Reads stored recommendation + outcome data only; no evaluation on load.
+    async function loadHistory(){
+      let h;
+      try { h = await (await fetch('/recommendations/history?limit=50')).json(); }
+      catch(e){ return; }
+      const order = h.horizons || ['1h','4h','end_of_day','1d','2d','5d'];
+      const body=$('rh_body'); body.innerHTML='';
+      (h.recommendations||[]).forEach(function(r){
+        const t = r.created_at ? new Date(r.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+        const hs = r.horizon_status || {};
+        const cells = order.map(function(k){ return '<td>'+statusPill(hs[k]||'Pending')+'</td>'; }).join('');
+        const pnl = r.actionable ? (r.paper_pnl_usd==null ? '<span class="muted">Pending</span>' : usd(r.paper_pnl_usd)) : '<span class="muted">N/A</span>';
+        body.innerHTML += '<tr>'
+          + '<td>'+t+'</td>'
+          + '<td class="muted">'+(r.model_version||'—')+'</td>'
+          + '<td>'+signalPill(r.direction)+'</td>'
+          + '<td>'+(r.opportunity_grade||'—')+'</td>'
+          + '<td>'+(r.confidence==null?'—':r.confidence)+'</td>'
+          + cells
+          + '<td>'+pnl+'</td>'
+          + '</tr>';
+      });
+      $('rh_empty').textContent = (h.recommendations||[]).length ? '' :
+        'No recommendations stored yet — load /analysis/usdmxn to create one.';
     }
     refresh();
   </script>

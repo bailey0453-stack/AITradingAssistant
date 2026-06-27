@@ -16,6 +16,12 @@ def summary(db: Session = Depends(get_db)) -> dict:
     return research_lab.research_summary(db)
 
 
+@router.get("/pending")
+def pending(db: Session = Depends(get_db)) -> dict:
+    """Stored vs evaluated counts and pending evaluations by horizon (read-only)."""
+    return research_lab.evaluation_progress(db)
+
+
 @router.get("/calibration")
 def calibration(db: Session = Depends(get_db)) -> dict:
     return research_lab.calibration(db)

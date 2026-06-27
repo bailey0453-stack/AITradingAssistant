@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Callable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Recommendation, RecommendationOutcome
@@ -96,6 +96,42 @@ def _sim_value(hs) -> Optional[float]:
     return None
 
 
+# --- evaluation progress (cheap counts; no recalculation) -------------------
+def evaluation_progress(db: Session) -> dict:
+    """Counts of stored vs evaluated recommendations and pending-by-horizon.
+
+    Pure read of stored rows — never triggers an evaluation. ``pending`` for a
+    horizon is every stored recommendation that does not yet have a scored
+    outcome for that horizon (it may simply not be due yet).
+    """
+    total = db.execute(select(func.count(Recommendation.id))).scalar() or 0
+    with_any = db.execute(
+        select(func.count(func.distinct(RecommendationOutcome.recommendation_id)))
+    ).scalar() or 0
+    fully = db.execute(
+        select(func.count(Recommendation.id))
+        .where(Recommendation.evaluation_status == "complete")
+    ).scalar() or 0
+
+    scored_rows = db.execute(
+        select(RecommendationOutcome.horizon, func.count(RecommendationOutcome.id))
+        .group_by(RecommendationOutcome.horizon)
+    ).all()
+    scored = {h: c for h, c in scored_rows}
+
+    evaluated_by_horizon = {h: int(scored.get(h, 0)) for h in HORIZONS}
+    pending_by_horizon = {h: max(0, total - evaluated_by_horizon[h]) for h in HORIZONS}
+    return {
+        "recommendations_stored": int(total),
+        "recommendations_evaluated": int(with_any),
+        "recommendations_fully_evaluated": int(fully),
+        "recommendations_pending": max(0, int(total) - int(with_any)),
+        "horizons": list(HORIZONS),
+        "evaluated_by_horizon": evaluated_by_horizon,
+        "pending_by_horizon": pending_by_horizon,
+    }
+
+
 # --- accuracy / research summary -------------------------------------------
 def research_summary(db: Session) -> dict:
     pairs = _pairs(db, horizon=PRIMARY_HORIZON)
@@ -114,6 +150,7 @@ def research_summary(db: Session) -> dict:
     drivers = driver_stats(db)
     return {
         "primary_horizon": PRIMARY_HORIZON,
+        "evaluation_progress": evaluation_progress(db),
         "overall_accuracy": overall["accuracy"],
         "overall": overall,
         "accuracy_by_confidence": by_conf,

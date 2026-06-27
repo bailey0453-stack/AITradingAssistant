@@ -1447,6 +1447,98 @@ def test_evaluator_sparse_data():
     check("model_version stored on every recommendation", live_analysis_stamps_model_version)
 
 
+def test_recommendation_history_and_pending():
+    """Verify pending-evaluation counts and the recommendation history view."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
+    from app.services import recommendation_evaluator as rev
+
+    init_db()
+
+    def seed():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.query(MarketSnapshot).delete()
+            db.commit()
+
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=6)).replace(hour=10, minute=0, second=0, microsecond=0)
+
+            buy = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                 direction="BUY_USD", confidence=82.0,
+                                 opportunity_grade="A", model_version="hist-buy",
+                                 target=18.10, stretch_target=18.30, stop=17.80)
+            no_trade = Recommendation(pair="USDMXN", created_at=t0, spot_price=18.00,
+                                      direction="NO_TRADE", confidence=40.0,
+                                      opportunity_grade="PASS", model_version="hist-nt")
+            # Fresh actionable reco: no horizon is due yet -> fully pending.
+            fresh = Recommendation(pair="USDMXN", created_at=now, spot_price=18.00,
+                                   direction="SELL_USD", confidence=60.0,
+                                   opportunity_grade="C", model_version="hist-fresh",
+                                   target=17.80, stop=18.20)
+            db.add_all([buy, no_trade, fresh])
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            # Prices only through the 1d horizon (2d/5d remain pending).
+            for h, px in {"1h": 18.05, "4h": 18.08, "end_of_day": 18.09, "1d": 18.20}.items():
+                db.add(MarketSnapshot(pair="USDMXN", usdmxn=px,
+                                      created_at=rev.horizon_due_time(t0, h)))
+            db.commit()
+            rev.evaluate_due(db, now=now)
+        finally:
+            db.close()
+
+    seed()
+
+    def pending_counts_are_correct():
+        with TestClient(app) as c:
+            p = c.get("/research/pending").json()
+            assert p["recommendations_stored"] == 3, p
+            assert p["recommendations_evaluated"] == 2, p   # buy + no_trade scored
+            assert p["recommendations_pending"] == 1, p     # the fresh reco
+            ev, pe = p["evaluated_by_horizon"], p["pending_by_horizon"]
+            for h in ("1h", "4h", "end_of_day", "1d"):
+                assert ev[h] == 2, (h, ev)
+                assert pe[h] == 1, (h, pe)   # 3 stored - 2 scored
+            for h in ("2d", "5d"):
+                assert ev[h] == 0, (h, ev)
+                assert pe[h] == 3, (h, pe)
+            # Same block is also surfaced inside the research summary.
+            s = c.get("/research/summary").json()
+            assert s["evaluation_progress"]["recommendations_stored"] == 3, s["evaluation_progress"]
+
+    def history_rows_have_status_and_pnl():
+        with TestClient(app) as c:
+            h = c.get("/recommendations/history?limit=50").json()
+            assert h["count"] == 3, h
+            assert h["horizons"] == list(rev.HORIZONS), h["horizons"]
+            rows = {r["model_version"]: r for r in h["recommendations"]}
+
+            buy = rows["hist-buy"]
+            assert buy["direction"] == "BUY_USD" and buy["actionable"] is True
+            assert buy["horizon_status"]["1h"] == "Win"      # up, target not yet hit
+            assert buy["horizon_status"]["1d"] == "Target"   # target 18.10 reached
+            assert buy["horizon_status"]["2d"] == "Pending"  # not due / no price
+            assert buy["paper_pnl_usd"] is not None          # 1d evaluated
+
+            nt = rows["hist-nt"]
+            assert nt["actionable"] is False
+            assert nt["paper_pnl_usd"] is None, "NO_TRADE must show N/A paper P/L"
+            assert nt["horizon_status"]["1d"] == "N/A"
+            assert nt["horizon_status"]["2d"] == "Pending"
+
+            fresh = rows["hist-fresh"]
+            assert fresh["actionable"] is True
+            assert all(v == "Pending" for v in fresh["horizon_status"].values()), fresh["horizon_status"]
+            assert fresh["paper_pnl_usd"] is None             # actionable but pending
+
+    check("pending evaluation counts (stored/evaluated/by-horizon)", pending_counts_are_correct)
+    check("recommendation history: per-horizon status + paper P/L", history_rows_have_status_and_pnl)
+
+
 def test_live_providers():
     def finnhub_filters_and_tags_live():
         # general + forex categories both return this list (deduped by headline).
@@ -1643,6 +1735,7 @@ def main():
     test_recommendation_tracking()
     test_research_lab()
     test_evaluator_sparse_data()
+    test_recommendation_history_and_pending()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

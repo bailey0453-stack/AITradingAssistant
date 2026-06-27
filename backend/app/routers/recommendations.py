@@ -14,10 +14,19 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AnalysisSnapshot, MarketSnapshot, Recommendation
-from app.services.recommendation_evaluator import evaluate_due, performance_summary
+from app.services.recommendation_evaluator import (
+    HORIZONS,
+    evaluate_due,
+    performance_summary,
+)
 from app.versions import version_tags
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+
+_ACTIONABLE = {"BUY_USD", "SELL_USD"}
+# Paper P/L is reported at this horizon in the history table (matches the
+# AI Research Lab's primary horizon for paper-hedge performance).
+PAPER_PNL_HORIZON = "1d"
 
 
 def _news_category(market_snapshot: MarketSnapshot) -> str | None:
@@ -134,6 +143,81 @@ def serialize_recommendation(reco: Recommendation, with_outcomes: bool = False) 
             for o in sorted(reco.outcomes, key=lambda x: x.horizon)
         ]
     return data
+
+
+def _horizon_status(outcome, direction: str) -> str:
+    """Compact per-horizon status: Pending / Target / Stop / Win / Loss / N/A."""
+    if outcome is None:
+        return "Pending"
+    if direction not in _ACTIONABLE:
+        return "N/A"  # NO_TRADE / PASS — no tradeable result
+    target_hit = bool(outcome.target_hit)
+    stop_hit = bool(outcome.stop_hit)
+    if target_hit and stop_hit:
+        # Both touched within the window — report whichever was reached first.
+        tt, ts = outcome.time_to_target_hours, outcome.time_to_stop_hours
+        if ts is not None and (tt is None or ts <= tt):
+            return "Stop"
+        return "Target"
+    if stop_hit:
+        return "Stop"
+    if target_hit:
+        return "Target"
+    if outcome.direction_correct is True:
+        return "Win"
+    if outcome.direction_correct is False:
+        return "Loss"
+    return "N/A"
+
+
+def serialize_history_row(reco: Recommendation) -> dict:
+    """Compact row for the Recommendation History table (reads stored data only)."""
+    by_h = {o.horizon: o for o in (reco.outcomes or [])}
+    horizon_status = {h: _horizon_status(by_h.get(h), reco.direction) for h in HORIZONS}
+    actionable = reco.direction in _ACTIONABLE
+    pnl_outcome = by_h.get(PAPER_PNL_HORIZON)
+    paper_pnl_usd = (
+        pnl_outcome.net_pnl_usd
+        if (actionable and pnl_outcome is not None) else None
+    )
+    return {
+        "created_at": reco.created_at.isoformat() if reco.created_at else None,
+        "recommendation_id": reco.recommendation_uuid,
+        "model_version": reco.model_version,
+        "direction": reco.direction,
+        "opportunity_grade": reco.opportunity_grade,
+        "confidence": reco.confidence,
+        "trade_score": reco.trade_score,
+        "entry": reco.spot_price,
+        "target": reco.target,
+        "stop": reco.stop,
+        "evaluation_status": reco.evaluation_status,
+        "horizon_status": horizon_status,
+        "actionable": actionable,
+        "paper_pnl_horizon": PAPER_PNL_HORIZON,
+        "paper_pnl_usd": paper_pnl_usd,
+    }
+
+
+@router.get("/history")
+def recommendation_history(
+    limit: int = Query(default=50, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Recent recommendations with per-horizon evaluation status and paper P/L.
+
+    Read-only: it never evaluates outcomes on load — call
+    ``POST /recommendations/evaluate`` (or a scheduler) to score due rows.
+    """
+    rows = db.execute(
+        select(Recommendation).order_by(Recommendation.created_at.desc()).limit(limit)
+    ).scalars().all()
+    return {
+        "count": len(rows),
+        "horizons": list(HORIZONS),
+        "paper_pnl_horizon": PAPER_PNL_HORIZON,
+        "recommendations": [serialize_history_row(r) for r in rows],
+    }
 
 
 @router.get("/recent")
