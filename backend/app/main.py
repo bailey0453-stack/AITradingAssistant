@@ -621,9 +621,16 @@ DASHBOARD_HTML = """<!doctype html>
         }
       }
 
-      fill('px', m.usdmxn); fill('inv', m.inverse_usdmxn); fill('dxy', m.dxy);
-      fill('us2y', m.us2y, '%'); fill('us10y', m.us10y, '%'); fill('oil', m.oil);
-      fill('gold', m.gold); fill('vix', m.vix);
+      if (unavailable) {
+        // Never show a fabricated/stale number — say so explicitly.
+        ['px','inv','dxy','us2y','us10y','oil','gold','vix'].forEach(function(id){
+          const el = $(id); if (el) el.textContent = 'Unavailable';
+        });
+      } else {
+        fill('px', m.usdmxn); fill('inv', m.inverse_usdmxn); fill('dxy', m.dxy);
+        fill('us2y', m.us2y, '%'); fill('us10y', m.us10y, '%'); fill('oil', m.oil);
+        fill('gold', m.gold); fill('vix', m.vix);
+      }
       $('src').textContent = 'source: ' + (m.source || '—') + ' · ' + (m.provider || '');
 
       // Per-market-field provenance badges (live/fallback/mock).
