@@ -540,16 +540,73 @@ becomes the recommendation's `confidence`, with the full breakdown in
 
 ### Backfill workflow
 
-Importers share one interface (`fetch_events` + `fetch_price_path`); the base
-`run()` persists events, the reaction price path, and computed reactions
-idempotently. `ensure_history_seeded(db)` seeds the sample dataset once (skipped
-if events already exist) and is called lazily by the history + analysis
-endpoints, so the system is always populated.
+Importers share one interface. Event importers implement `fetch_events` +
+`fetch_price_path` (populating `historical_events`, `historical_event_reactions`,
+and event-linked `historical_market_snapshots`); series importers implement
+`fetch_series` (populating standalone `historical_market_snapshots`). The base
+`run_all()` runs whichever the importer declares (`provides_events` /
+`provides_series`).
 
-- **Free / now:** `MockSampleImporter` (built in). Future free options: CSV,
-  Yahoo Finance (yfinance, daily only), FRED (macro), Alpha Vantage (rate-limited).
-- **Paid (optional):** Polygon.io for true intraday FX bars; Trading Economics /
-  Finnhub for richer event history. Selected via `HISTORY_IMPORTER`.
+`ensure_history_seeded(db)` keeps the system always populated: it auto-runs only
+*lazy-safe* importers (`mock`/`csv` — local, no network) on demand when history
+is empty, and otherwise seeds the mock sample so similarity always has data.
+**Expensive provider backfill never runs on a page load** — use the CLI.
+
+#### Run a real backfill (CLI)
+
+```bash
+# Uses HISTORY_IMPORTER (default: mock)
+python -m app.scripts.backfill_history
+
+# Real, no API key — drop CSVs in CSV_HISTORY_DIR
+CSV_HISTORY_DIR=/path/to/csv python -m app.scripts.backfill_history --importer csv --reset
+
+# Alpha Vantage (USD/MXN + WTI oil + S&P proxy daily history)
+ALPHA_VANTAGE_API_KEY=... python -m app.scripts.backfill_history --importer alphavantage
+
+# FRED (US 2Y/10Y yields, dollar-index proxy, VIX, WTI)
+FRED_API_KEY=... python -m app.scripts.backfill_history --importer fred
+```
+
+`--reset` wipes the historical tables first (safe-guarded behind the flag).
+API keys are read from the environment and **never printed or logged** (every
+provider error is scrubbed). On Vercel the SQLite DB is ephemeral, so run
+backfill against a persistent `DATABASE_URL` (Postgres) for durable history.
+
+#### Importers + required keys
+
+| `HISTORY_IMPORTER` | Data | Key | Populates |
+|---|---|---|---|
+| `mock` (default) | Synthetic sample | none | events + reactions |
+| `csv` | Your CSV exports | none | events + reactions + series |
+| `alphavantage` | USD/MXN, oil, S&P proxy (daily) | `ALPHA_VANTAGE_API_KEY` | series |
+| `fred` | US2Y/US10Y, DXY proxy, VIX, oil | `FRED_API_KEY` | series |
+| `yahoo` / `polygon` | (stubs) | — | — |
+
+#### CSV format (`CSV_HISTORY_DIR`)
+
+- `events.csv` (required): `event_key,event_type,event_name,country,release_time,
+  forecast,actual,previous,importance,currency_impact,baseline,dxy,us2y,us10y,oil,
+  gold,vix,sp_futures,momentum,regime,news_tags` (`release_time` ISO-8601,
+  `news_tags` pipe-separated).
+- `paths.csv` (optional): `event_key,hours,price` reaction paths.
+- `series.csv` (optional): `series,ts,value` where `series` ∈ USDMXN, DXY, US2Y,
+  US10Y, OIL, GOLD, VIX, SP_FUTURES.
+
+#### Verify counts + sample vs real
+
+```bash
+curl -s localhost:8000/history/diagnostics | python -m json.tool
+```
+
+Returns the active importer, per-table counts (`historical_events`,
+`historical_event_reactions`, `historical_market_snapshots`,
+`similarity_matches`), the `data_class` (`sample` | `imported` | `live`), the
+last-imported timestamp, and a **warning when only sample data is present**.
+Similarity matching uses `historical_event_reactions`; once any real
+(imported/live) reactions exist, sample reactions are excluded so matching runs
+against real data only — the dashboard then shows "Historical Database" instead
+of "Sample Historical Database".
 
 ### Limitations of the sample data
 

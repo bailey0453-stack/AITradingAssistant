@@ -320,6 +320,30 @@ Goal: every value identifies where it came from and how trustworthy it is.
       Smoke tests cover level mapping, full coverage, separation, label tracking,
       auto-upgrade, and the overview totals.
 
+## Phase 5.6 — Real historical backfill infrastructure (built)
+
+Goal: replace sample similarity data with real imported history.
+
+- [x] `HISTORY_IMPORTER` now actually selects the importer (mock | csv |
+      alphavantage | fred | yahoo); default stays mock. Lazy seeding only
+      auto-runs lazy-safe importers (mock/csv) — never network on page load.
+- [x] Importer framework: `provides_events` / `provides_series` / `lazy_safe`
+      flags + `run_all()`; `run_series()` routes each series value to the right
+      snapshot column.
+- [x] CSV importer (events + paths + optional `series.csv`) — real, no key.
+- [x] Alpha Vantage importer: USD/MXN, WTI oil, S&P proxy daily history
+      (rate-limited, throttled). FRED importer: US2Y/US10Y, DXY proxy, VIX, WTI.
+      Keys read from env, scrubbed from every error (never logged).
+- [x] `GET /history/diagnostics` (read-only): active importer, counts,
+      data_class (sample/imported/live), last imported, sample-only warning.
+- [x] CLI `python -m app.scripts.backfill_history [--importer …] [--reset]`
+      (no expensive backfill on page load).
+- [x] Similarity engine prefers imported/live reactions; falls back to mock only
+      when no real history exists.
+- [x] README: how to backfill, keys, CSV format, verify counts, sample vs real.
+      Smoke tests cover diagnostics, mock default, CSV fixtures, imported>mock
+      priority, and no-key-leak scrubbing.
+
 ## Phase 7 — Smarter analysis
 
 - [ ] Technical features (moving averages, ATR, RSI) over the stored time series.

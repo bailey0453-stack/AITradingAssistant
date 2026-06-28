@@ -85,12 +85,41 @@ SUPPORTED_SERIES: tuple[str, ...] = (
     "SP_FUTURES",
 )
 
+# Standalone series name -> the snapshot column its scalar value belongs in, so
+# a US2Y bar lands in `us2y` (not `usdmxn`) and similarity context stays clean.
+SERIES_COLUMN: dict[str, str] = {
+    "USDMXN": "usdmxn",
+    "USDMXN_1H": "usdmxn",
+    "DXY": "dxy",
+    "US2Y": "us2y",
+    "US10Y": "us10y",
+    "OIL": "oil",
+    "GOLD": "gold",
+    "VIX": "vix",
+    "SP_FUTURES": "sp_futures",
+}
+
 
 class HistoricalImporter(ABC):
-    """Base importer: subclasses supply data, this class persists + computes."""
+    """Base importer: subclasses supply data, this class persists + computes.
+
+    Two capabilities, declared per importer so the orchestrator (`run_all`)
+    knows what to call:
+
+      - ``provides_events``  -> implements ``fetch_events`` + ``fetch_price_path``
+        (populates events + reactions + event-linked snapshots via ``run``).
+      - ``provides_series``  -> implements ``fetch_series`` (populates standalone
+        ``historical_market_snapshots`` rows via ``run_series``).
+
+    ``lazy_safe`` marks importers cheap enough to run on a page load when the DB
+    is empty (local/no-network: mock, csv). Network importers are CLI-only.
+    """
 
     name = "base"
     source_quality = "unknown"
+    provides_events = True
+    provides_series = False
+    lazy_safe = False
 
     @abstractmethod
     def fetch_events(self) -> list[dict]:
@@ -116,27 +145,68 @@ class HistoricalImporter(ABC):
         n = 0
         for bar in bars:
             series = bar.get("series", "USDMXN")
+            column = SERIES_COLUMN.get(series)
+            fields = {
+                "usdmxn": bar.get("usdmxn"),
+                "dxy": bar.get("dxy"),
+                "us2y": bar.get("us2y"),
+                "us10y": bar.get("us10y"),
+                "oil": bar.get("oil"),
+                "gold": bar.get("gold"),
+                "vix": bar.get("vix"),
+                "sp_futures": bar.get("sp_futures"),
+            }
+            # Route a generic scalar `value` into the right column for its series.
+            value = bar.get("value")
+            if column and value is not None and fields.get(column) is None:
+                fields[column] = value
             db.add(
                 HistoricalMarketSnapshot(
                     series=series,
                     ts=bar["ts"],
-                    usdmxn=bar.get("usdmxn") if series == "USDMXN" else bar.get("value"),
-                    dxy=bar.get("dxy"),
-                    us2y=bar.get("us2y"),
-                    us10y=bar.get("us10y"),
-                    oil=bar.get("oil"),
-                    gold=bar.get("gold"),
-                    vix=bar.get("vix"),
-                    sp_futures=bar.get("sp_futures"),
                     regime=bar.get("regime"),
                     source=self.name,
                     source_quality=self.source_quality,
+                    **fields,
                 )
             )
             n += 1
         if n:
             db.commit()
         return {"importer": self.name, "series_points": n}
+
+    def run_all(self, db: Session) -> dict:
+        """Run every capability this importer declares; never raise.
+
+        Returns a combined summary with per-stage errors collected (scrubbed by
+        the providers themselves) so a CLI/diagnostics caller can report cleanly.
+        """
+        out = {
+            "importer": self.name,
+            "source_quality": self.source_quality,
+            "events": 0,
+            "reactions": 0,
+            "price_points": 0,
+            "series_points": 0,
+            "errors": [],
+        }
+        if self.provides_events:
+            try:
+                r = self.run(db)
+                out["events"] = r.get("events", 0)
+                out["reactions"] = r.get("reactions", 0)
+                out["price_points"] = r.get("price_points", 0)
+            except Exception as exc:  # noqa: BLE001 - report, don't crash
+                db.rollback()
+                out["errors"].append(f"events: {exc}")
+        if self.provides_series:
+            try:
+                r = self.run_series(db)
+                out["series_points"] = r.get("series_points", 0)
+            except Exception as exc:  # noqa: BLE001 - report, don't crash
+                db.rollback()
+                out["errors"].append(f"series: {exc}")
+        return out
 
     def run(self, db: Session) -> dict:
         """Import events + reaction paths into the historical tables."""
@@ -250,6 +320,9 @@ class MockSampleImporter(HistoricalImporter):
 
     name = "mock"
     source_quality = "sample"
+    provides_events = True
+    provides_series = False
+    lazy_safe = True  # no network, no key — safe to seed on demand
 
     SAMPLE_EVENTS: list[dict] = [
         {
@@ -525,6 +598,9 @@ class _NotConfiguredImporter(HistoricalImporter):
     """Shared stub: raises a clear error until the provider is implemented."""
 
     docs = ""
+    provides_events = False
+    provides_series = True
+    lazy_safe = False
 
     def fetch_events(self) -> list[dict]:
         raise NotImplementedError(
@@ -534,6 +610,12 @@ class _NotConfiguredImporter(HistoricalImporter):
 
     def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
         raise NotImplementedError(f"{self.name} importer is not implemented yet.")
+
+    def fetch_series(self) -> list[dict]:
+        raise NotImplementedError(
+            f"{self.name} importer is not implemented yet. {self.docs} "
+            "Use 'csv', 'alphavantage', or 'fred' for real backfill."
+        )
 
 
 class CSVImporter(HistoricalImporter):
@@ -547,14 +629,21 @@ class CSVImporter(HistoricalImporter):
         vix,sp_futures,momentum,regime,news_tags`` (``news_tags`` pipe-separated,
         ``release_time`` ISO-8601).
       - ``paths.csv`` — reaction paths with columns ``event_key,hours,price``.
+      - ``series.csv`` (optional) — standalone market time-series with columns
+        ``series,ts,value`` where ``series`` is one of USDMXN, DXY, US2Y, US10Y,
+        OIL, GOLD, VIX, SP_FUTURES and ``ts`` is ISO-8601. Loaded into
+        ``historical_market_snapshots`` independently of events.
 
     This is a real, no-paid-provider loader: drop CSVs exported from any source
-    (Yahoo, FRED, broker, manual) and import them. Missing dir/files raise a
-    clear, actionable error.
+    (Yahoo, FRED, broker, manual) and import them. ``events.csv`` is required;
+    ``paths.csv`` and ``series.csv`` are optional.
     """
 
     name = "csv"
     source_quality = "imported"
+    provides_events = True
+    provides_series = True
+    lazy_safe = True  # local files only — no network, safe to seed on demand
 
     def __init__(self, directory: str | None = None) -> None:
         import os
@@ -662,6 +751,39 @@ class CSVImporter(HistoricalImporter):
         baseline = float(event.get("baseline") or 0.0)
         return [(0.0, baseline)] if baseline else []
 
+    def fetch_series(self) -> list[dict]:
+        """Load optional standalone market series from ``series.csv``.
+
+        Returns an empty list when the file is absent (events-only import is a
+        valid configuration), so ``run_series`` simply adds nothing.
+        """
+        import csv
+        import os
+        from datetime import datetime as _datetime
+
+        directory = self._require_dir()
+        series_file = os.path.join(directory, "series.csv")
+        if not os.path.isfile(series_file):
+            return []
+
+        bars: list[dict] = []
+        with open(series_file, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                series = (row.get("series") or "USDMXN").strip().upper()
+                raw_ts = (row.get("ts") or "").strip()
+                raw_val = (row.get("value") or "").strip()
+                if not raw_ts or raw_val == "":
+                    continue
+                try:
+                    ts = _datetime.fromisoformat(raw_ts)
+                    value = float(raw_val)
+                except ValueError:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                bars.append({"series": series, "ts": ts, "value": value})
+        return bars
+
 
 class YahooFinanceImporter(_NotConfiguredImporter):
     name = "yahoo"
@@ -669,16 +791,241 @@ class YahooFinanceImporter(_NotConfiguredImporter):
     docs = "Free daily bars via yfinance (no intraday; daily reaction windows only)."
 
 
-class FREDImporter(_NotConfiguredImporter):
+# --------------------------------------------------------------------------- #
+# FRED — official macro series (treasury yields, dollar index proxy, VIX).
+# --------------------------------------------------------------------------- #
+class FREDImporter(HistoricalImporter):
+    """Backfill official macro series from FRED into ``historical_market_snapshots``.
+
+    Series-only (no economic-event reactions). Needs ``FRED_API_KEY``. Each FRED
+    series is one request returning its full observation history; we limit the
+    lookback window to keep the import bounded. The API key is sent as a query
+    param (FRED requirement) and is scrubbed from every error before it surfaces.
+    """
+
     name = "fred"
     source_quality = "official"
-    docs = "Macro series (DXY proxy, yields) via FRED API (FRED_API_KEY)."
+    provides_events = False
+    provides_series = True
+    lazy_safe = False
+    docs = "Macro series (yields, dollar-index proxy, VIX) via FRED API (FRED_API_KEY)."
+
+    URL = "https://api.stlouisfed.org/fred/series/observations"
+    # series_name -> FRED series id
+    SERIES = {
+        "US2Y": "DGS2",
+        "US10Y": "DGS10",
+        "DXY": "DTWEXBGS",     # Nominal Broad U.S. Dollar Index (proxy)
+        "VIX": "VIXCLS",
+        "OIL": "DCOILWTICO",   # WTI spot
+    }
+
+    def __init__(self, settings=None, lookback_days: int = 1825) -> None:
+        from app.config import get_settings
+
+        self.settings = settings or get_settings()
+        self.lookback_days = lookback_days
+
+    def fetch_events(self) -> list[dict]:
+        raise NotImplementedError(f"{self.name} importer is series-only (no events).")
+
+    def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
+        raise NotImplementedError(f"{self.name} importer is series-only (no events).")
+
+    def _scrub(self, text: str) -> str:
+        from app.services.secrets import scrub
+
+        return scrub(text, getattr(self.settings, "fred_api_key", None))
+
+    def _observations(self, series_id: str) -> list[tuple[datetime, float]]:
+        import httpx
+
+        key = getattr(self.settings, "fred_api_key", None)
+        if not key:
+            raise RuntimeError("FRED_API_KEY is not configured.")
+        start = (datetime.now(timezone.utc) - timedelta(days=self.lookback_days)).date()
+        params = {
+            "series_id": series_id,
+            "api_key": key,
+            "file_type": "json",
+            "observation_start": start.isoformat(),
+            "sort_order": "asc",
+        }
+        try:
+            resp = httpx.get(self.URL, params=params,
+                             timeout=getattr(self.settings, "http_timeout_seconds", 8.0))
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 - re-raise scrubbed
+            raise RuntimeError(f"FRED request failed: {self._scrub(str(exc))}") from None
+
+        out: list[tuple[datetime, float]] = []
+        for obs in (data or {}).get("observations", []):
+            raw = (obs.get("value") or "").strip()
+            day = (obs.get("date") or "").strip()
+            if not raw or raw == "." or not day:
+                continue
+            try:
+                ts = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+                out.append((ts, float(raw)))
+            except ValueError:
+                continue
+        return out
+
+    def fetch_series(self) -> list[dict]:
+        bars: list[dict] = []
+        errors: list[str] = []
+        for series_name, series_id in self.SERIES.items():
+            try:
+                for ts, value in self._observations(series_id):
+                    bars.append({"series": series_name, "ts": ts, "value": value})
+            except Exception as exc:  # noqa: BLE001 - degrade per series
+                logger.info("FRED %s (%s) unavailable: %s",
+                            series_name, series_id, self._scrub(str(exc)))
+                errors.append(series_name)
+        if not bars and errors:
+            raise RuntimeError(
+                f"FRED returned no observations for: {', '.join(errors)}."
+            )
+        return bars
 
 
-class AlphaVantageImporter(_NotConfiguredImporter):
+# --------------------------------------------------------------------------- #
+# Alpha Vantage — FX + commodity + equity daily history (rate-limited free tier).
+# --------------------------------------------------------------------------- #
+class AlphaVantageImporter(HistoricalImporter):
+    """Backfill daily history from Alpha Vantage into ``historical_market_snapshots``.
+
+    Series-only. Needs ``ALPHA_VANTAGE_API_KEY``. The free tier is ~25 req/day
+    and ~5 req/min, so we make a *small fixed* number of requests (USD/MXN, WTI
+    oil, an S&P proxy) and throttle between them. The key is sent as a query
+    param (provider requirement) and scrubbed from every error.
+    """
+
     name = "alphavantage"
     source_quality = "vendor_free"
-    docs = "FX + some intraday via Alpha Vantage (rate-limited free tier)."
+    provides_events = False
+    provides_series = True
+    lazy_safe = False
+    docs = "FX + commodity + equity daily history via Alpha Vantage (ALPHA_VANTAGE_API_KEY)."
+
+    URL = "https://www.alphavantage.co/query"
+    # Seconds between requests to respect the ~5 req/min free-tier limit.
+    MIN_INTERVAL_SECONDS = 13.0
+
+    def __init__(self, settings=None, *, throttle: bool = True, outputsize: str = "compact") -> None:
+        from app.config import get_settings
+
+        self.settings = settings or get_settings()
+        self.throttle = throttle
+        self.outputsize = outputsize  # "compact" (~100 pts) or "full"
+
+    def fetch_events(self) -> list[dict]:
+        raise NotImplementedError(f"{self.name} importer is series-only (no events).")
+
+    def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
+        raise NotImplementedError(f"{self.name} importer is series-only (no events).")
+
+    def _scrub(self, text: str) -> str:
+        from app.services.secrets import scrub
+
+        return scrub(text, getattr(self.settings, "alpha_vantage_api_key", None))
+
+    def _get(self, params: dict) -> dict:
+        import httpx
+
+        key = getattr(self.settings, "alpha_vantage_api_key", None)
+        if not key:
+            raise RuntimeError("ALPHA_VANTAGE_API_KEY is not configured.")
+        params = {**params, "apikey": key}
+        try:
+            resp = httpx.get(self.URL, params=params,
+                             timeout=getattr(self.settings, "http_timeout_seconds", 8.0))
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001 - re-raise scrubbed
+            raise RuntimeError(f"Alpha Vantage request failed: {self._scrub(str(exc))}") from None
+        if not isinstance(data, dict):
+            raise RuntimeError("Alpha Vantage returned an unexpected payload.")
+        for note_key in ("Note", "Information", "Error Message"):
+            if data.get(note_key):
+                raise RuntimeError(f"Alpha Vantage unavailable: {self._scrub(str(data[note_key]))}")
+        return data
+
+    def _sleep(self) -> None:
+        import time
+
+        if self.throttle:
+            time.sleep(self.MIN_INTERVAL_SECONDS)
+
+    def _fx_daily(self, from_ccy: str, to_ccy: str, series_name: str) -> list[dict]:
+        data = self._get({
+            "function": "FX_DAILY", "from_symbol": from_ccy,
+            "to_symbol": to_ccy, "outputsize": self.outputsize,
+        })
+        block = data.get("Time Series FX (Daily)") or {}
+        return self._bars_from_daily(block, series_name, close_key="4. close")
+
+    def _equity_daily(self, symbol: str, series_name: str) -> list[dict]:
+        data = self._get({
+            "function": "TIME_SERIES_DAILY", "symbol": symbol,
+            "outputsize": self.outputsize,
+        })
+        block = data.get("Time Series (Daily)") or {}
+        return self._bars_from_daily(block, series_name, close_key="4. close")
+
+    def _commodity_daily(self, function: str, series_name: str) -> list[dict]:
+        data = self._get({"function": function, "interval": "daily"})
+        bars: list[dict] = []
+        for row in data.get("data", []):
+            day = (row.get("date") or "").strip()
+            raw = (row.get("value") or "").strip()
+            if not day or not raw or raw == ".":
+                continue
+            try:
+                ts = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+                bars.append({"series": series_name, "ts": ts, "value": float(raw)})
+            except ValueError:
+                continue
+        return bars
+
+    @staticmethod
+    def _bars_from_daily(block: dict, series_name: str, close_key: str) -> list[dict]:
+        bars: list[dict] = []
+        for day, fields in (block or {}).items():
+            raw = (fields.get(close_key) or "").strip() if isinstance(fields, dict) else ""
+            if not raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+                bars.append({"series": series_name, "ts": ts, "value": float(raw)})
+            except ValueError:
+                continue
+        return bars
+
+    def fetch_series(self) -> list[dict]:
+        # Small, fixed request set to stay within the free-tier daily cap.
+        plan = [
+            ("USDMXN", lambda: self._fx_daily("USD", "MXN", "USDMXN")),
+            ("OIL", lambda: self._commodity_daily("WTI", "OIL")),
+            ("SP_FUTURES", lambda: self._equity_daily("SPY", "SP_FUTURES")),
+        ]
+        bars: list[dict] = []
+        errors: list[str] = []
+        for i, (series_name, fetch) in enumerate(plan):
+            if i > 0:
+                self._sleep()
+            try:
+                bars.extend(fetch())
+            except Exception as exc:  # noqa: BLE001 - degrade per series
+                logger.info("Alpha Vantage %s unavailable: %s",
+                            series_name, self._scrub(str(exc)))
+                errors.append(series_name)
+        if not bars and errors:
+            raise RuntimeError(
+                f"Alpha Vantage returned no data for: {', '.join(errors)}."
+            )
+        return bars
 
 
 class PolygonImporter(_NotConfiguredImporter):

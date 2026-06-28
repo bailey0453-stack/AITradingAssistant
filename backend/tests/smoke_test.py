@@ -2006,6 +2006,189 @@ def test_evidence_engine():
     check("evidence: historical narrative reads like evidence", narrative_reads_like_evidence)
 
 
+def test_historical_backfill():
+    """Phase 5.5: real historical backfill infrastructure."""
+    import os
+    import tempfile
+
+    from app.database import SessionLocal, init_db
+    from app.models import (
+        HistoricalEvent,
+        HistoricalEventReaction,
+        HistoricalMarketSnapshot,
+        SimilarityMatch,
+    )
+    from app.services.history import history_diagnostics
+    from app.services.history.historical_events import ensure_history_seeded, load_reactions
+    from app.services.history.importers import CSVImporter, get_importer
+
+    init_db()
+
+    def _wipe(db):
+        for model in (SimilarityMatch, HistoricalEventReaction,
+                      HistoricalMarketSnapshot, HistoricalEvent):
+            db.query(model).delete()
+        db.commit()
+
+    def mock_is_the_default():
+        from app.config import Settings
+        assert Settings().history_importer == "mock"
+        # Registry resolves real classes; unknown -> mock.
+        assert get_importer("alphavantage").name == "alphavantage"
+        assert get_importer("fred").name == "fred"
+        assert get_importer("csv").name == "csv"
+        assert get_importer("does-not-exist").name == "mock"
+
+    def lazy_seed_uses_mock_and_diagnostics_report_sample():
+        db = SessionLocal()
+        try:
+            _wipe(db)
+            seeded = ensure_history_seeded(db)
+            assert seeded.get("seeded") is True, seeded
+            diag = history_diagnostics(db)
+            assert diag["active_importer"] == "mock"
+            assert diag["counts"]["historical_events"] > 0
+            assert diag["counts"]["historical_event_reactions"] > 0
+            assert diag["data_class"] == "sample", diag
+            assert diag["is_sample_only"] is True
+            assert any("SAMPLE" in w for w in diag["warnings"]), diag["warnings"]
+            assert diag["last_imported"] is not None
+        finally:
+            db.close()
+
+    def diagnostics_endpoint_works():
+        with TestClient(app) as c:
+            r = c.get("/history/diagnostics")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            for key in ("active_importer", "counts", "data_class",
+                        "similarity_uses", "warnings"):
+                assert key in body, (key, list(body))
+            assert set(body["counts"]) == {
+                "historical_events", "historical_event_reactions",
+                "historical_market_snapshots", "similarity_matches",
+            }, body["counts"]
+
+    def csv_importer_loads_fixtures_and_takes_priority():
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "events.csv"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    "event_key,event_type,event_name,country,release_time,forecast,actual,"
+                    "previous,importance,currency_impact,baseline,dxy,us2y,us10y,oil,gold,"
+                    "vix,sp_futures,momentum,regime,news_tags\n"
+                    "e1,us_cpi,US CPI (MoM),US,2024-06-12T12:30:00,0.1,0.3,0.2,high,USD,"
+                    "18.30,104.0,4.7,4.3,78.0,2330.0,13.0,5400.0,0.02,Inflation Driven,inflation|cpi\n"
+                    "e2,us_nfp,US Nonfarm Payrolls,US,2024-07-05T12:30:00,190,206,218,high,USD,"
+                    "18.10,105.0,4.6,4.2,83.0,2390.0,12.5,5500.0,0.01,Trending,jobs|nfp\n"
+                )
+            with open(os.path.join(d, "paths.csv"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    "event_key,hours,price\n"
+                    "e1,0,18.30\ne1,1,18.36\ne1,24,18.45\ne1,120,18.52\n"
+                    "e2,0,18.10\ne2,1,18.05\ne2,24,17.98\ne2,120,17.90\n"
+                )
+            with open(os.path.join(d, "series.csv"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    "series,ts,value\n"
+                    "USDMXN,2024-06-01T00:00:00,18.40\n"
+                    "US2Y,2024-06-01T00:00:00,4.72\n"
+                    "DXY,2024-06-01T00:00:00,104.3\n"
+                )
+            db = SessionLocal()
+            try:
+                _wipe(db)
+                # Seed mock first, then import CSV — imported must take priority.
+                ensure_history_seeded(db)
+                assert history_diagnostics(db)["data_class"] == "sample"
+
+                result = CSVImporter(directory=d).run_all(db)
+                assert result["events"] == 2, result
+                assert result["reactions"] == 2, result
+                assert result["series_points"] == 3, result
+                assert not result["errors"], result["errors"]
+
+                # series.csv routed scalar values into the right columns.
+                us2y_row = (
+                    db.query(HistoricalMarketSnapshot)
+                    .filter(HistoricalMarketSnapshot.series == "US2Y").first()
+                )
+                assert us2y_row is not None and us2y_row.us2y == 4.72
+                assert us2y_row.usdmxn is None, "scalar leaked into usdmxn column"
+
+                # Imported reactions now exist -> load_reactions excludes sample.
+                reactions = load_reactions(db)
+                assert reactions, "expected imported reactions"
+                qualities = {r["source_quality"] for r in reactions}
+                assert qualities == {"imported"}, qualities
+
+                diag = history_diagnostics(db)
+                assert diag["data_class"] == "imported", diag
+                assert diag["reactions_data_class"] == "imported"
+                assert diag["is_sample_only"] is False
+            finally:
+                db.close()
+
+    def network_importers_never_leak_keys():
+        # Force httpx to raise with the key embedded; the importer must scrub it.
+        import httpx as _httpx
+
+        from app.config import Settings
+        from app.services.history import importers as imp
+
+        secret = "SUPERSECRETKEY123"
+
+        def boom(*a, **k):
+            raise RuntimeError(f"connection failed for apikey={secret}")
+
+        # AlphaVantage
+        av = imp.AlphaVantageImporter(
+            Settings(alpha_vantage_api_key=secret), throttle=False
+        )
+        _httpx_get = _httpx.get
+        try:
+            _httpx.get = boom
+            try:
+                av._get({"function": "FX_DAILY"})
+                raised = False
+            except RuntimeError as exc:
+                raised = True
+                assert secret not in str(exc), "Alpha Vantage leaked the API key!"
+                assert "REDACTED" in str(exc)
+            assert raised
+            # FRED
+            fr = imp.FREDImporter(Settings(fred_api_key=secret))
+            try:
+                fr._observations("DGS2")
+                raised = False
+            except RuntimeError as exc:
+                raised = True
+                assert secret not in str(exc), "FRED leaked the API key!"
+                assert "REDACTED" in str(exc)
+            assert raised
+        finally:
+            _httpx.get = _httpx_get
+
+    def network_importers_are_series_only_and_not_lazy():
+        from app.services.history.importers import AlphaVantageImporter, FREDImporter
+        for cls in (AlphaVantageImporter, FREDImporter):
+            assert cls.provides_events is False
+            assert cls.provides_series is True
+            assert cls.lazy_safe is False
+        # No key configured -> clear error, no crash, no leak.
+        try:
+            AlphaVantageImporter(Settings(alpha_vantage_api_key=None))._get({"function": "X"})
+            assert False, "expected missing-key error"
+        except RuntimeError as exc:
+            assert "not configured" in str(exc)
+
+    check("mock remains the default importer", mock_is_the_default)
+    check("lazy seed uses mock; diagnostics report SAMPLE", lazy_seed_uses_mock_and_diagnostics_report_sample)
+    check("GET /history/diagnostics works", diagnostics_endpoint_works)
+    check("CSV importer loads fixtures; imported takes priority over mock", csv_importer_loads_fixtures_and_takes_priority)
+    check("network importers never log/leak API keys", network_importers_never_leak_keys)
+    check("network importers are series-only and not lazy", network_importers_are_series_only_and_not_lazy)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -2040,6 +2223,7 @@ def main():
     test_recommendation_history_and_pending()
     test_decision_quality()
     test_provenance_engine()
+    test_historical_backfill()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

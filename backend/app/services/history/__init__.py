@@ -20,6 +20,7 @@ Everything degrades to mock/sample data and never requires a paid provider.
 
 from app.services.history.historical_events import (
     ensure_history_seeded,
+    history_diagnostics,
     list_events,
     load_reactions,
 )
@@ -39,6 +40,7 @@ from app.services.history.similarity_engine import (
 
 __all__ = [
     "ensure_history_seeded",
+    "history_diagnostics",
     "list_events",
     "load_reactions",
     "aggregate_statistics",

@@ -24,7 +24,7 @@ from app.services.history import (
     list_events,
     probability_forecast,
 )
-from app.services.history.historical_events import ensure_history_seeded
+from app.services.history.historical_events import ensure_history_seeded, history_diagnostics
 from app.services.market_data import get_market_data
 from app.services.signals import compute_signal
 
@@ -58,6 +58,16 @@ def _live_context_and_signal(db: Session) -> tuple[dict, dict]:
     context["market_regime"] = regime
     signal["_regime"] = regime
     return context, signal
+
+
+@router.get("/diagnostics")
+def history_diagnostics_endpoint(db: Session = Depends(get_db)) -> dict:
+    """Read-only: what historical data exists, its provenance, and counts.
+
+    Does NOT seed or import — it reflects the database exactly as-is so an
+    operator can verify whether a real backfill has actually run.
+    """
+    return history_diagnostics(db)
 
 
 @router.get("/events")
