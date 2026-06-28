@@ -23,6 +23,7 @@ from app.services.market_data import (
 )
 from app.services.market_hours import MarketCalendar, get_market_state, parse_holidays
 from app.services.news import get_news_provider
+from app.services.secrets import scrub
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,18 @@ def _market_calendar(settings: Settings) -> MarketCalendar:
     return MarketCalendar(holidays=parse_holidays(settings.market_holidays))
 
 
+def _scrub_secrets(text: str, settings: Settings) -> str:
+    """Redact every known provider key from a string before it is logged."""
+    return scrub(
+        text,
+        settings.fx_api_key,
+        getattr(settings, "fred_api_key", None),
+        getattr(settings, "alpha_vantage_api_key", None),
+        getattr(settings, "news_api_key", None),
+        getattr(settings, "calendar_api_key", None),
+    )
+
+
 def _latest_snapshot(db: Session) -> MarketSnapshot | None:
     return db.execute(
         select(MarketSnapshot)
@@ -75,6 +88,72 @@ def _latest_snapshot(db: Session) -> MarketSnapshot | None:
         .order_by(MarketSnapshot.created_at.desc())
         .limit(1)
     ).scalars().first()
+
+
+def _latest_real_snapshot(db: Session) -> MarketSnapshot | None:
+    """Latest snapshot sourced from a real *live* provider quote (never mock/fallback).
+
+    This is the only kind of cache that may stand in for current market data in
+    production — mock/fallback rows are never persisted in production, but this
+    guard keeps stale demo/legacy rows from masquerading as real quotes.
+    """
+    return db.execute(
+        select(MarketSnapshot)
+        .where(MarketSnapshot.pair == "USDMXN")
+        .where(MarketSnapshot.source == "live")
+        .order_by(MarketSnapshot.created_at.desc())
+        .limit(1)
+    ).scalars().first()
+
+
+def _max_age_seconds(settings: Settings) -> float:
+    return max(0.0, float(getattr(settings, "market_max_age_minutes", 180)) * 60.0)
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _cache_is_usable(
+    row: MarketSnapshot | None, state, max_age_secs: float, *, mock_mode: bool
+) -> bool:
+    """Freshness rules for serving a cached quote as current market data.
+
+    - Mock mode: any cached row is fine (local/demo).
+    - Production: only a real ``live`` row, and:
+        * market open  -> age must be within ``max_age_secs``;
+        * market closed -> the row must be from the most recent session (no
+          older than ``max_age_secs`` before the last market close), so a
+          months-old quote is never shown as "last close".
+    """
+    if row is None:
+        return False
+    if mock_mode:
+        return True
+    if (row.source or "") != "live":
+        return False
+    age = _age_seconds(row)
+    if age is None:
+        return False
+    if state.is_open:
+        return age <= max_age_secs
+    last_close = _parse_iso(getattr(state, "last_market_close", None))
+    if last_close is None:
+        return age <= max_age_secs
+    created = row.created_at
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if created is None:
+        return False
+    from datetime import timedelta
+
+    return created >= (last_close - timedelta(seconds=max_age_secs))
 
 
 def _age_seconds(row) -> float | None:
@@ -265,20 +344,81 @@ def _build_meta(
         "last_market_close": state.last_market_close,
         "next_market_open": state.next_market_open,
         "is_stale": is_stale,
+        "market_data_unavailable": False,
+    }
+
+
+def _unavailable_marketdata() -> MarketData:
+    """A market result with no usable quote — never a fabricated/stale number."""
+    return MarketData(
+        pair="USDMXN",
+        usdmxn=None,
+        inverse_usdmxn=None,
+        provider="unavailable",
+        source="unavailable",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        field_sources={f: "unavailable" for f in ("usdmxn", *MACRO_FIELDS)},
+    )
+
+
+_UNAVAILABLE_WARNING = (
+    "Live market data unavailable and no recent cached real quote exists."
+)
+
+
+def _build_unavailable_meta(state, settings: Settings, latest_real: MarketSnapshot | None) -> dict:
+    refresh_secs = cache_manager.get_refresh_seconds("usdmxn", settings)
+    last_real_at = (
+        latest_real.created_at.isoformat()
+        if latest_real and latest_real.created_at else None
+    )
+    last_real_age_min = None
+    if latest_real is not None:
+        age = _age_seconds(latest_real)
+        last_real_age_min = None if age is None else round(age / 60, 2)
+    return {
+        "market_status": state.market_status,
+        "market_reason": state.market_reason,
+        "is_open": state.is_open,
+        "provider": "unavailable",
+        "source": "unavailable",
+        "cached": False,
+        "fetched_at": None,
+        "cached_at": None,
+        "age_minutes": None,
+        "refresh_interval_seconds": refresh_secs,
+        "refresh_interval_minutes": round(refresh_secs / 60, 2),
+        "next_refresh": state.next_expected_refresh,
+        "last_market_close": state.last_market_close,
+        "next_market_open": state.next_market_open,
+        "is_stale": True,
+        "market_data_unavailable": True,
+        "last_real_quote_at": last_real_at,
+        "last_real_quote_age_minutes": last_real_age_min,
+        "warning": _UNAVAILABLE_WARNING,
     }
 
 
 def get_market_intelligence(db: Session, settings: Settings | None = None) -> dict:
     """Resolve the current market view honoring market hours + refresh policies.
 
-    Decision order: serve fresh live data when due and the market is open;
-    otherwise serve the latest valid stored snapshot; only fall back to mock
-    when no snapshot exists at all. Returns market + news + rich metadata and
-    records per-provider health. A successful live refresh auto-captures a
+    Stale-fallback safety (production, ``USE_MOCK_DATA=false``):
+
+      1. Serve a fresh **live** quote when due and the fetch succeeds.
+      2. Else serve the latest **real cached** quote if it is fresh enough
+         (market open: within ``market_max_age_minutes``; closed: the most
+         recent session's quote).
+      3. Else return ``market_data_unavailable`` — never a hardcoded/stale rate.
+
+    Hardcoded mock rates are used only in mock mode (``USE_MOCK_DATA=true``) for
+    local development / demos, and mock/fallback quotes are never persisted as
+    real snapshots in production. A successful live refresh auto-captures a
     historical snapshot.
     """
     settings = settings or get_settings()
+    mock_mode = settings.is_mock
     refresh_secs = cache_manager.get_refresh_seconds("usdmxn", settings)
+    max_age_secs = _max_age_seconds(settings)
     state = get_market_state(
         calendar=_market_calendar(settings), refresh_seconds=refresh_secs
     )
@@ -292,13 +432,19 @@ def get_market_intelligence(db: Session, settings: Settings | None = None) -> di
     news: list[dict] = []
     news_source = "cached"
 
+    # 1) Fresh fetch when due. In production only a real *live* result is
+    #    accepted; a fallback (mock-valued) result is rejected so it is never
+    #    stored or shown as current data.
     if do_fetch:
         try:
             market = get_market_data(settings)
-        except Exception as exc:  # noqa: BLE001 - degrade to cache/mock
-            logger.warning("Market fetch failed (%s); serving cache/mock.", exc)
+        except Exception as exc:  # noqa: BLE001 - degrade to cache/unavailable
+            logger.warning(
+                "Market fetch failed (%s); serving cache/unavailable.",
+                _scrub_secrets(str(exc), settings),
+            )
             market = None
-        if market is not None:
+        if market is not None and (mock_mode or market.source == "live"):
             news, news_source = _fetch_news_if_due(db, settings)
             calendar = _safe_calendar(settings)
             snapshot = _store_snapshot(db, market, news, calendar)
@@ -312,37 +458,48 @@ def get_market_intelligence(db: Session, settings: Settings | None = None) -> di
                 "meta": _build_meta(state, snapshot, market, cached=False, settings=settings),
                 "state": state,
             }
+        # Production fetch failed/unavailable -> fall through to cache/unavailable.
 
-    # Not fetching (market closed / within interval) OR fetch failed: use cache.
-    if latest is not None:
-        market = market_data_from_snapshot(latest)
+    # 2) Serve cache when usable. Production requires a fresh *real* quote.
+    cache_row = latest if mock_mode else _latest_real_snapshot(db)
+    if _cache_is_usable(cache_row, state, max_age_secs, mock_mode=mock_mode):
+        market = market_data_from_snapshot(cache_row)
         news, news_source = _fetch_news_if_due(db, settings)
         _report_market_health(market, cached=True)
-        meta = _build_meta(state, latest, market, cached=True, settings=settings)
+        meta = _build_meta(state, cache_row, market, cached=True, settings=settings)
         return {
-            "snapshot": latest, "market": market, "news": news or (latest.news or []),
+            "snapshot": cache_row, "market": market,
+            "news": news or (cache_row.news or []),
             "news_source": news_source, "meta": meta, "state": state,
         }
 
-    # No cache exists at all -> mock fallback (and store it as the new baseline).
-    market = get_market_data(settings) if settings.is_mock else _mock_marketdata()
+    # 3) Mock mode with no usable cache -> seed mock (local/demo only).
+    if mock_mode:
+        market = get_market_data(settings)
+        news, news_source = _fetch_news_if_due(db, settings)
+        calendar = _safe_calendar(settings)
+        snapshot = _store_snapshot(db, market, news, calendar)
+        _report_market_health(market, cached=False)
+        return {
+            "snapshot": snapshot, "market": market, "news": news,
+            "news_source": news_source,
+            "meta": _build_meta(state, snapshot, market, cached=False, settings=settings),
+            "state": state,
+        }
+
+    # 4) Production: live unavailable and no recent real quote -> UNAVAILABLE.
+    #    Never fabricate or persist a stale rate. News/calendar may still load.
+    cache_manager.report_health(
+        "fx", cache_manager.ProviderHealth.OFFLINE,
+        "live unavailable; no recent real quote",
+    )
     news, news_source = _fetch_news_if_due(db, settings)
-    calendar = _safe_calendar(settings)
-    snapshot = _store_snapshot(db, market, news, calendar)
-    _report_market_health(market, cached=False)
+    market = _unavailable_marketdata()
+    meta = _build_unavailable_meta(state, settings, _latest_real_snapshot(db))
     return {
-        "snapshot": snapshot, "market": market, "news": news,
-        "news_source": news_source,
-        "meta": _build_meta(state, snapshot, market, cached=False, settings=settings),
-        "state": state,
+        "snapshot": None, "market": market, "news": news,
+        "news_source": news_source, "meta": meta, "state": state,
     }
-
-
-def _mock_marketdata() -> MarketData:
-    md = MockMarketDataProvider().get_usdmxn()
-    md.source = "fallback"
-    md.field_sources = {f: "fallback" for f in ("usdmxn", *MACRO_FIELDS)}
-    return md
 
 
 def _safe_calendar(settings: Settings) -> list[dict]:
@@ -412,7 +569,25 @@ def get_usdmxn(db: Session = Depends(get_db)) -> dict:
     latest stored session is served and no live request is made.
     """
     intel = get_market_intelligence(db, get_settings())
-    payload = serialize_market(intel["snapshot"])
+    snapshot = intel["snapshot"]
+    if snapshot is None:
+        # Market data unavailable: never emit a fabricated/stale quote.
+        market = intel["market"]
+        payload = {
+            "pair": "USDMXN",
+            "usdmxn": None,
+            "inverse_usdmxn": None,
+            "dxy": None, "us2y": None, "us10y": None, "treasury_yield": None,
+            "oil": None, "gold": None, "sp_futures": None, "vix": None,
+            "news": intel.get("news") or [],
+            "economic_calendar": [],
+            "provider": "unavailable",
+            "source": "unavailable",
+            "sources": market.field_sources or {},
+        }
+        payload.update(intel["meta"])
+        return payload
+    payload = serialize_market(snapshot)
     payload.update(intel["meta"])
     return payload
 

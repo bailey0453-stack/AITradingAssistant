@@ -184,6 +184,29 @@ Every live provider degrades safely: if a fetch fails or the key is missing,
 the service returns mock data (tagged `source="fallback"` for market) and never
 breaks.
 
+#### Stale-fallback safety (USD/MXN)
+
+To avoid ever presenting an outdated hardcoded rate as the current market, the
+USD/MXN spot follows strict freshness rules in production (`USE_MOCK_DATA=false`):
+
+1. **Live first** — a successful live fetch is served and stored.
+2. **Recent real cache** — otherwise the latest *real* (`source="live"`)
+   snapshot is served if it is fresh enough: while the market is **open** it
+   must be within `MARKET_MAX_AGE_MINUTES` (default `180`); while **closed** it
+   must be from the most recent session (no older than that window before the
+   last market close).
+3. **Unavailable** — if neither exists, the API returns
+   `market_data_unavailable=true`, `source="unavailable"`, and **no** price.
+   The dashboard shows "Market data unavailable", the analysis returns a safe
+   `NO_TRADE` / `WAIT` response with no target/stretch/stop, and no actionable
+   paper recommendation is stored.
+
+Mock/fallback quotes are **never persisted as real snapshots** in production and
+the hardcoded mock baselines (e.g. USD/MXN `17.85`, DXY `104.2`, US 2Y `4.70`,
+US 10Y `4.32`, oil `76.5`, gold `2380.0`, VIX `14.5` in
+`MockMarketDataProvider`) are only used when `USE_MOCK_DATA=true` for local
+development / demos.
+
 ### Live macro indicators (per-field)
 
 Macro drivers are fetched **independently per field**, so one unavailable

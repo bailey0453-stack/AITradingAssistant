@@ -11,7 +11,13 @@ Covers:
   - /analysis/usdmxn still works end to end
 """
 
+import os
 import sys
+
+# Run the end-to-end endpoint tests deterministically in mock mode (the
+# documented test default), independent of any developer ``.env`` that enables
+# live data. Set before importing the app / settings so it wins over .env.
+os.environ["USE_MOCK_DATA"] = "true"
 
 from fastapi.testclient import TestClient
 
@@ -2189,6 +2195,195 @@ def test_historical_backfill():
     check("network importers are series-only and not lazy", network_importers_are_series_only_and_not_lazy)
 
 
+def test_stale_fallback():
+    """Stale-fallback safety: never present an outdated/mock rate as current."""
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import MarketSnapshot
+    from app.routers import analysis as analysis_mod
+    from app.routers import market as market_mod
+    from app.services import cache_manager
+    from app.services import market_hours as mh
+
+    init_db()
+
+    def _state(is_open, status="OPEN"):
+        return mh.MarketState(
+            market_status=status, market_reason="test", is_open=is_open,
+            last_market_close="2026-06-26T21:00:00+00:00",
+            next_market_open="2026-06-28T21:00:00+00:00",
+            next_expected_refresh="2026-06-28T21:00:00+00:00",
+        )
+
+    def _clear(db):
+        db.query(MarketSnapshot).delete(); db.commit()
+
+    def _run(db, settings, *, open_market, fetch):
+        orig_state, orig_md = market_mod.get_market_state, market_mod.get_market_data
+        market_mod.get_market_state = lambda **k: _state(open_market)
+        market_mod.get_market_data = fetch
+        try:
+            return market_mod.get_market_intelligence(db, settings)
+        finally:
+            market_mod.get_market_state, market_mod.get_market_data = orig_state, orig_md
+
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+
+    PROD = dict(use_mock_data=False, fx_api_key="k", refresh_policies={"usdmxn": 0})
+
+    def failure_no_cache_is_unavailable_not_fallback():
+        db = SessionLocal()
+        try:
+            _clear(db)
+            intel = _run(db, Settings(**PROD), open_market=True, fetch=boom)
+            assert intel["snapshot"] is None, "no fabricated snapshot stored"
+            assert intel["meta"]["market_data_unavailable"] is True, intel["meta"]
+            assert intel["meta"]["source"] == "unavailable", intel["meta"]
+            assert intel["market"].usdmxn is None, "must not show a stale/mock rate"
+            # The mock baseline (17.85) must never leak through as current data.
+            assert intel["market"].usdmxn != 17.85
+        finally:
+            db.close()
+
+    def failure_with_recent_cache_uses_cache():
+        db = SessionLocal()
+        try:
+            _clear(db)
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.42, source="live",
+                                  provider="oxr", sources={"usdmxn": "live"}))
+            db.commit()
+            intel = _run(db, Settings(**PROD), open_market=True, fetch=boom)
+            assert intel["meta"]["cached"] is True, intel["meta"]
+            assert intel["meta"]["market_data_unavailable"] is False
+            assert intel["market"].usdmxn == 18.42, "served recent real cache"
+        finally:
+            db.close()
+
+    def stale_cache_open_market_is_unavailable():
+        db = SessionLocal()
+        try:
+            _clear(db)
+            old = datetime.now(timezone.utc) - timedelta(hours=10)
+            row = MarketSnapshot(pair="USDMXN", usdmxn=18.42, source="live",
+                                 provider="oxr", sources={"usdmxn": "live"})
+            row.created_at = old
+            db.add(row); db.commit()
+            # max age 180 min (default); 10h old while OPEN -> stale -> unavailable.
+            intel = _run(db, Settings(use_mock_data=False, fx_api_key="k",
+                                      refresh_policies={"usdmxn": 0}),
+                         open_market=True, fetch=boom)
+            assert intel["meta"]["market_data_unavailable"] is True, intel["meta"]
+            assert intel["market"].usdmxn is None
+        finally:
+            db.close()
+
+    def production_never_uses_hardcoded_mock_rates():
+        db = SessionLocal()
+        try:
+            _clear(db)
+            # No key, no cache: must be unavailable, never the 17.85 mock baseline.
+            intel = _run(db, Settings(use_mock_data=False, fx_api_key=None),
+                         open_market=True, fetch=boom)
+            assert intel["meta"]["source"] == "unavailable", intel["meta"]
+            assert intel["market"].usdmxn is None
+        finally:
+            db.close()
+
+    def mock_mode_still_works_for_demos():
+        db = SessionLocal()
+        try:
+            _clear(db)
+            # Mock mode uses get_market_data normally (not patched to boom here).
+            orig_state = market_mod.get_market_state
+            market_mod.get_market_state = lambda **k: _state(True)
+            try:
+                intel = market_mod.get_market_intelligence(
+                    db, Settings(use_mock_data=True)
+                )
+            finally:
+                market_mod.get_market_state = orig_state
+            assert intel["meta"]["market_data_unavailable"] is False, intel["meta"]
+            assert intel["market"].usdmxn is not None, "mock demo data should exist"
+            assert intel["market"].source == "mock"
+        finally:
+            db.close()
+
+    def no_api_key_logged_on_failure():
+        db = SessionLocal()
+        SECRET = "super-secret-key-123"
+
+        class _Rec(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.text = ""
+
+            def emit(self, record):
+                self.text += self.format(record) + "\n"
+
+        handler = _Rec()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            _clear(db)
+
+            def boom_with_key(*a, **k):
+                raise RuntimeError(f"FX request failed: token={SECRET}")
+
+            _run(db, Settings(use_mock_data=False, fx_api_key=SECRET,
+                              refresh_policies={"usdmxn": 0}),
+                 open_market=True, fetch=boom_with_key)
+            assert SECRET not in handler.text, "API key leaked into logs!"
+        finally:
+            root.removeHandler(handler)
+            db.close()
+
+    def analysis_endpoint_returns_safe_no_trade():
+        # Force a production, market-open, provider-down scenario over HTTP.
+        orig_settings = market_mod.get_settings
+        orig_state, orig_md = market_mod.get_market_state, market_mod.get_market_data
+        market_mod.get_settings = lambda: Settings(
+            use_mock_data=False, fx_api_key="k", refresh_policies={"usdmxn": 0}
+        )
+        market_mod.get_market_state = lambda **k: _state(True)
+        market_mod.get_market_data = boom
+        db = SessionLocal()
+        try:
+            _clear(db)
+        finally:
+            db.close()
+        try:
+            with TestClient(app) as c:
+                body = c.get("/analysis/usdmxn").json()
+        finally:
+            market_mod.get_settings = orig_settings
+            market_mod.get_market_state, market_mod.get_market_data = orig_state, orig_md
+        assert body.get("market_data_unavailable") is True, body.get("market_data_unavailable")
+        assert body["direction"] == "NO_TRADE", body["direction"]
+        assert body["target"] is None and body["stretch_target"] is None and body["stop"] is None
+        assert body["market"]["usdmxn"] is None, body["market"]
+        dq = body.get("decision_quality") or {}
+        assert dq.get("should_trade_now") is False, dq
+        assert dq.get("decision") == "WAIT", dq
+        assert body["data_sources"]["market"] == "unavailable", body["data_sources"]
+
+    check("provider failure + no cache -> unavailable (not fallback)",
+          failure_no_cache_is_unavailable_not_fallback)
+    check("provider failure + recent real cache -> uses cache",
+          failure_with_recent_cache_uses_cache)
+    check("stale cache while market open -> unavailable",
+          stale_cache_open_market_is_unavailable)
+    check("production never substitutes hardcoded mock rates",
+          production_never_uses_hardcoded_mock_rates)
+    check("mock mode still works for local demos", mock_mode_still_works_for_demos)
+    check("no API key logged on FX failure", no_api_key_logged_on_failure)
+    check("analysis returns safe no-trade when market data unavailable",
+          analysis_endpoint_returns_safe_no_trade)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -2224,6 +2419,7 @@ def main():
     test_decision_quality()
     test_provenance_engine()
     test_historical_backfill()
+    test_stale_fallback()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

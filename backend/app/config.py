@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     # Which importer seeds historical backfill (mock | csv | yahoo | fred | ...).
     history_importer: str = "mock"
 
+    # --- Market data freshness (stale-fallback safety) ---
+    # Max age (MINUTES) a cached real FX quote may be while the market is OPEN
+    # before it is considered stale and the dashboard shows "Market data
+    # unavailable" instead of an outdated number. When the market is closed the
+    # most recent real session quote is served (it is not moving), but a quote
+    # older than the last market close by more than this is still treated as
+    # stale. Production never substitutes hardcoded mock rates for live data.
+    market_max_age_minutes: int = 180
+
     # --- Market hours + refresh policies (Phase 5.1) ---
     # Per-provider refresh cadence override, in MINUTES, as a JSON object, e.g.
     # REFRESH_POLICIES='{"usdmxn": 30, "news": 10}'. Unknown keys ignored.

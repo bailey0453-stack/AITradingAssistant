@@ -303,10 +303,94 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
     return payload
 
 
+def _unavailable_analysis_payload(market, market_meta: dict, news_source: str) -> dict:
+    """Safe no-trade response when no usable current market quote exists.
+
+    Never invents a price, target, stretch, stop, or actionable recommendation.
+    The dashboard renders an explicit "Market data unavailable" warning.
+    """
+    warning = market_meta.get("warning") or (
+        "Live market data unavailable and no recent cached real quote exists."
+    )
+    payload = {
+        "pair": "USDMXN",
+        "market_data_unavailable": True,
+        "direction": "NO_TRADE",
+        "trade_score": None,
+        "market_bias": "NEUTRAL",
+        "confidence": None,
+        "momentum_status": None,
+        "risk_level": None,
+        "summary": warning,
+        "key_drivers": [],
+        "market_drivers": [],
+        "bullish_factors": [],
+        "bearish_factors": [],
+        "upcoming_risks": [],
+        "historical_similarity": {"status": "unavailable", "note": warning},
+        # No actionable trade plan without a real current price.
+        "entry": None, "target": None, "stretch_target": None, "stop": None,
+        "expected_move": None, "expected_duration": None,
+        "invalidation_level": None, "time_horizons": [],
+        "opportunity_grade": "PASS",
+        "strategist": None,
+        "trader_action": (
+            "Do not initiate a trade. Market data is unavailable; wait for a "
+            "live quote before acting."
+        ),
+        "market": {
+            "pair": "USDMXN", "usdmxn": None, "inverse_usdmxn": None,
+            "dxy": None, "us2y": None, "us10y": None, "treasury_yield": None,
+            "oil": None, "gold": None, "sp_futures": None, "vix": None,
+            "provider": "unavailable", "source": "unavailable",
+            "sources": getattr(market, "field_sources", {}) or {},
+            **market_meta,
+        },
+        "market_state": {
+            k: market_meta.get(k)
+            for k in (
+                "market_status", "market_reason", "is_open", "cached", "is_stale",
+                "fetched_at", "age_minutes", "next_refresh", "last_market_close",
+                "next_market_open", "refresh_interval_minutes",
+                "market_data_unavailable", "last_real_quote_at",
+            )
+        },
+        "market_status_note": warning,
+        "warning": warning,
+        "provider_health": cache_manager.health_snapshot(),
+        "data_sources": {
+            "market": "unavailable",
+            "news": news_source,
+            "calendar": "unavailable",
+            "historical": "unavailable",
+        },
+        # Explicit, conservative decision overlay: never tradeable.
+        "decision_quality": {
+            "should_trade_now": False,
+            "decision": "WAIT",
+            "decision_label": "WAIT",
+            "trade_quality_label": "WAIT",
+            "trade_quality_score": None,
+            "reason": warning,
+            "reason_to_wait": warning,
+            "better_entry_conditions": [
+                "Wait for a live USD/MXN quote (or a recent cached real quote).",
+            ],
+            "what_to_watch_next": ["Live FX provider connectivity"],
+        },
+    }
+    return payload
+
+
 @router.get("/usdmxn")
 def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
     """Capture market + news + calendar context, analyze, store, and return."""
     snapshot, market, news, news_source, market_meta = capture_market_snapshot(db)
+
+    # Stale-fallback safety: with no usable current quote, return a safe
+    # no-trade response and never persist an actionable recommendation.
+    if market_meta.get("market_data_unavailable") or snapshot is None:
+        return _unavailable_analysis_payload(market, market_meta, news_source)
 
     context = build_context(db, market, fresh_news=news)
     timeline = build_timeline(db, context)

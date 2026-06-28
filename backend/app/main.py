@@ -104,6 +104,8 @@ DASHBOARD_HTML = """<!doctype html>
     li { margin:3px 0; }
     button { background:#2563eb; color:#fff; border:0; padding:9px 14px; border-radius:8px; cursor:pointer; font-weight:600; }
     .muted { color:#8aa0c6; font-size:13px; }
+    .mkt-unavail { background:#3d1626; border:1px solid #7d2a44; color:#ffd0dc; padding:12px 16px; border-radius:10px; margin-bottom:16px; font-size:14px; }
+    .mkt-unavail b { color:#ff9bb5; }
     .tl { border-left:2px solid #1d2740; padding-left:14px; margin-left:4px; }
     .tl .item { margin-bottom:12px; }
     .tl .label { font-weight:600; }
@@ -158,6 +160,11 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </header>
   <main>
+    <div id="mkt_unavail" class="mkt-unavail" style="display:none">
+      <b>Market data unavailable.</b>
+      <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
+      No actionable trade recommendation is shown.
+    </div>
     <div class="card">
       <h2>Market</h2>
       <div class="row">
@@ -599,6 +606,21 @@ DASHBOARD_HTML = """<!doctype html>
     async function refresh() {
       const d = await (await fetch('/analysis/usdmxn')).json();
       const m = d.market || {};
+
+      // Stale-fallback safety: show an explicit warning and never present a
+      // fabricated/stale quote or actionable recommendation.
+      const unavailable = !!(d.market_data_unavailable || (m.source === 'unavailable')
+        || ((d.market_state || {}).market_data_unavailable));
+      const banner = $('mkt_unavail');
+      if (banner) {
+        banner.style.display = unavailable ? '' : 'none';
+        if (unavailable) {
+          const msg = d.warning || (d.market_state || {}).warning
+            || 'Live market data unavailable and no recent cached real quote exists.';
+          $('mkt_unavail_msg').textContent = msg;
+        }
+      }
+
       fill('px', m.usdmxn); fill('inv', m.inverse_usdmxn); fill('dxy', m.dxy);
       fill('us2y', m.us2y, '%'); fill('us10y', m.us10y, '%'); fill('oil', m.oil);
       fill('gold', m.gold); fill('vix', m.vix);
