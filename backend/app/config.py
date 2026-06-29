@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # --- HTTP ---
     http_timeout_seconds: float = 8.0
 
+    # --- Scheduled jobs (cron) ---
+    # Shared secret protecting the scheduled job endpoints. Vercel Cron sends it
+    # as `Authorization: Bearer <CRON_SECRET>`. When unset, job endpoints are
+    # rejected in production and allowed only in mock/dev mode (for local runs).
+    cron_secret: Optional[str] = None
+
     # --- Signal weighting engine ---
     # Optional override of the default signal weights, as a JSON object in the
     # SIGNAL_WEIGHTS env var, e.g. SIGNAL_WEIGHTS='{"dxy": 9, "oil": 6}'. Unknown

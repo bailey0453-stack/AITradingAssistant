@@ -2384,6 +2384,214 @@ def test_stale_fallback():
           analysis_endpoint_returns_safe_no_trade)
 
 
+def test_scheduled_jobs():
+    """Scheduled hourly recommendation generation (cron job)."""
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import (
+        JobRun, MarketSnapshot, Recommendation, RecommendationOutcome,
+    )
+    from app.routers import market as market_mod
+    from app.services import market_hours as mh
+    from app.services import recommendation_evaluator as rev
+    from app.services import scheduled_jobs as sj
+
+    init_db()
+
+    def _state(is_open, status="OPEN"):
+        return mh.MarketState(
+            market_status=status, market_reason="test", is_open=is_open,
+            last_market_close="2026-06-26T21:00:00+00:00",
+            next_market_open="2026-06-28T21:00:00+00:00",
+            next_expected_refresh="2026-06-28T21:00:00+00:00",
+        )
+
+    def _reset():
+        db = SessionLocal()
+        try:
+            db.query(RecommendationOutcome).delete()
+            db.query(Recommendation).delete()
+            db.query(MarketSnapshot).delete()
+            db.query(JobRun).delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def _run_job(open_market, status="OPEN"):
+        orig_sj, orig_mkt = sj.get_market_state, market_mod.get_market_state
+        sj.get_market_state = lambda **k: _state(open_market, status)
+        market_mod.get_market_state = lambda **k: _state(open_market, status)
+        try:
+            db = SessionLocal()
+            try:
+                return sj.run_hourly_usdmxn_job(db)
+            finally:
+                db.close()
+        finally:
+            sj.get_market_state, market_mod.get_market_state = orig_sj, orig_mkt
+
+    def creates_one_recommendation():
+        _reset()
+        summary = _run_job(True)
+        assert summary["created_recommendation"] is True, summary
+        assert summary["recommendation_id"], summary
+        assert summary["skipped_reason"] is None, summary
+        assert summary["market_status"] == "OPEN", summary
+        db = SessionLocal()
+        try:
+            assert db.query(Recommendation).filter_by(pair="USDMXN").count() == 1
+            # The run is logged for the dashboard.
+            assert db.query(JobRun).count() == 1
+        finally:
+            db.close()
+
+    def duplicate_same_hour_does_not_duplicate():
+        _reset()
+        first = _run_job(True)
+        second = _run_job(True)
+        assert first["created_recommendation"] is True, first
+        assert second["created_recommendation"] is False, second
+        assert second["skipped_reason"] == "duplicate_this_hour", second
+        db = SessionLocal()
+        try:
+            assert db.query(Recommendation).filter_by(pair="USDMXN").count() == 1
+        finally:
+            db.close()
+
+    def weekend_skips_and_burns_no_fx_quota():
+        _reset()
+        calls = {"n": 0}
+        orig_fetch = market_mod.get_market_data
+
+        def counting_fetch(*a, **k):
+            calls["n"] += 1
+            return orig_fetch(*a, **k)
+
+        market_mod.get_market_data = counting_fetch
+        try:
+            summary = _run_job(False, status="WEEKEND")
+        finally:
+            market_mod.get_market_data = orig_fetch
+        assert summary["created_recommendation"] is False, summary
+        assert summary["skipped_reason"] == "weekend", summary
+        assert summary["market_status"] == "WEEKEND", summary
+        assert calls["n"] == 0, f"FX provider must not be called when closed: {calls}"
+        db = SessionLocal()
+        try:
+            assert db.query(Recommendation).count() == 0
+        finally:
+            db.close()
+
+    def evaluates_due_prior_recommendations():
+        _reset()
+        db = SessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            t0 = (now - timedelta(days=3)).replace(
+                hour=10, minute=0, second=0, microsecond=0
+            )
+            reco = Recommendation(
+                pair="USDMXN", created_at=t0, spot_price=18.00, direction="BUY_USD",
+                confidence=70.0, opportunity_grade="B", model_version="t",
+                target=18.5, stop=17.5,
+            )
+            db.add(reco)
+            db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.00, created_at=t0))
+            for h in rev.HORIZONS:
+                db.add(MarketSnapshot(pair="USDMXN", usdmxn=18.10,
+                                      created_at=rev.horizon_due_time(t0, h)))
+            db.commit()
+        finally:
+            db.close()
+        # Closed-market run: no generation, but due outcomes are still scored.
+        summary = _run_job(False, status="WEEKEND")
+        assert summary["created_recommendation"] is False, summary
+        assert summary["evaluated_outcomes_count"] >= 1, summary
+        db = SessionLocal()
+        try:
+            assert db.query(RecommendationOutcome).count() >= 1
+        finally:
+            db.close()
+
+    def status_endpoint_reports_schedule():
+        _reset()
+        _run_job(True)
+        with TestClient(app) as c:
+            body = c.get("/jobs/status").json()
+        assert body["last_scheduled_run"] is not None, body
+        assert body["next_expected_run"], body
+        assert body["last_recommendation_at"], body
+
+    def cron_secret_auth_enforced():
+        os.environ["CRON_SECRET"] = "test-cron-secret"
+        try:
+            with TestClient(app) as c:
+                assert c.post("/jobs/hourly-usdmxn-analysis").status_code == 401
+                assert c.post(
+                    "/jobs/hourly-usdmxn-analysis",
+                    headers={"Authorization": "Bearer nope"},
+                ).status_code == 401
+                ok = c.post(
+                    "/jobs/hourly-usdmxn-analysis",
+                    headers={"Authorization": "Bearer test-cron-secret"},
+                )
+                assert ok.status_code == 200, (ok.status_code, ok.text)
+                body = ok.json()
+                for key in ("created_recommendation", "recommendation_id",
+                            "market_status", "market_source",
+                            "evaluated_outcomes_count", "skipped_reason"):
+                    assert key in body, (key, body)
+                # GET + X-Cron-Secret also works (Vercel Cron issues GET).
+                assert c.get(
+                    "/jobs/hourly-usdmxn-analysis",
+                    headers={"X-Cron-Secret": "test-cron-secret"},
+                ).status_code == 200
+        finally:
+            del os.environ["CRON_SECRET"]
+
+    def cron_secret_never_logged():
+        secret = "cron-secret-must-not-leak-9z"
+        os.environ["CRON_SECRET"] = secret
+
+        class _Rec(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.text = ""
+
+            def emit(self, record):
+                self.text += self.format(record) + "\n"
+
+        handler = _Rec()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            with TestClient(app) as c:
+                c.post("/jobs/hourly-usdmxn-analysis",
+                       headers={"Authorization": f"Bearer {secret}"})
+                c.post("/jobs/hourly-usdmxn-analysis",
+                       headers={"Authorization": "Bearer wrong"})
+            assert secret not in handler.text, "cron secret leaked into logs!"
+        finally:
+            root.removeHandler(handler)
+            del os.environ["CRON_SECRET"]
+
+    check("cron job creates one recommendation (market open)",
+          creates_one_recommendation)
+    check("duplicate call in same hour does not duplicate",
+          duplicate_same_hour_does_not_duplicate)
+    check("weekend skips generation and burns no FX quota",
+          weekend_skips_and_burns_no_fx_quota)
+    check("due prior recommendations are evaluated",
+          evaluates_due_prior_recommendations)
+    check("GET /jobs/status reports schedule + last run",
+          status_endpoint_reports_schedule)
+    check("CRON_SECRET auth is enforced", cron_secret_auth_enforced)
+    check("cron secret is never logged", cron_secret_never_logged)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -2420,6 +2628,7 @@ def main():
     test_provenance_engine()
     test_historical_backfill()
     test_stale_fallback()
+    test_scheduled_jobs()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

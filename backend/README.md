@@ -399,6 +399,37 @@ trustworthy it is*, so an AI estimate is never mistaken for real market data.
   badges (hover tooltips) beside the spot rate, trade plan, historical
   similarity/win rate, and a MEASURED badge on recommendation accuracy.
 
+### Scheduled hourly recommendation generation
+
+Recommendations no longer depend on someone opening the dashboard — a cron job
+generates and stores them automatically every hour, and scores prior ones as
+they come due.
+
+- **Endpoint**: `POST /jobs/hourly-usdmxn-analysis` (also accepts `GET` so
+  Vercel Cron — which issues GET — can trigger it). The job:
+  1. checks market hours (no provider fetch, so no quota is risked);
+  2. if the market is **closed/weekend**, it skips generation (burning no FX
+     quota) but still evaluates any due recommendations;
+  3. if **open**, it runs the `/analysis/usdmxn` pipeline (one fetch at most,
+     respecting refresh limits), stores the paper recommendation, and evaluates
+     due ones.
+- **De-duplication**: at most one job-generated recommendation per clock hour
+  for a given pair + model version (`skipped_reason="duplicate_this_hour"`).
+- **Auth (`CRON_SECRET`)**: requests must present the secret as
+  `Authorization: Bearer <CRON_SECRET>` (what Vercel Cron sends automatically),
+  an `X-Cron-Secret` header, or `?secret=`. Missing/incorrect → `401`. When no
+  secret is configured the endpoint is rejected in production and allowed only
+  in mock/dev mode for local runs.
+- **Job summary** (returned + persisted to `job_runs`): `created_recommendation`,
+  `recommendation_id`, `market_status`, `market_source`,
+  `evaluated_outcomes_count`, and `skipped_reason`.
+- **Vercel Cron**: configured in `vercel.json` (`"0 * * * *"`, hourly UTC). The
+  weekend gate lives in the job, so an hourly schedule is safe — it just
+  evaluates due outcomes and skips generation while closed.
+- **Status / dashboard**: `GET /jobs/status` (read-only, no auth) reports the
+  last scheduled run, the last recommendation time, and the next expected run; a
+  **Scheduler** card on the dashboard surfaces the same.
+
 ### Finnhub news
 
 Set `NEWS_PROVIDER=finnhub` + `NEWS_API_KEY` to pull live financial news from
@@ -861,6 +892,7 @@ Optional live providers (omit to keep mock news/calendar):
 | `FRED_API_KEY` | `<FRED key>` | **Secret** — enables live US 2Y / 10Y |
 | `ALPHA_VANTAGE_API_KEY` | `<Alpha Vantage key>` | **Secret** — enables live oil / gold |
 | `CALENDAR_API_KEY` | `<Trading Economics key>` | **Secret** — enables live calendar |
+| `CRON_SECRET` | `<random string>` | **Secret** — protects `/jobs/*`; Vercel Cron sends it as `Authorization: Bearer`. Required for the hourly job in production. |
 
 Optional: set `DATABASE_URL` to a Postgres URL for durable storage. By default
 the app uses SQLite; on Vercel it writes to `/tmp/aitrading.db`, which is

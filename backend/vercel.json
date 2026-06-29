@@ -13,5 +13,11 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/jobs/hourly-usdmxn-analysis",
+      "schedule": "0 * * * *"
+    }
   ]
 }

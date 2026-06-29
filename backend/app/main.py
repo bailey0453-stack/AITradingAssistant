@@ -24,6 +24,7 @@ from app.routers import (
     decision,
     health,
     history,
+    jobs,
     market,
     news,
     performance,
@@ -71,6 +72,7 @@ app.include_router(recommendations.router)
 app.include_router(research.router)
 app.include_router(performance.router)
 app.include_router(decision.router)
+app.include_router(jobs.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -197,6 +199,17 @@ DASHBOARD_HTML = """<!doctype html>
         <h2>Provider health</h2>
         <div id="provhealth" style="margin-top:8px"></div>
       </div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #38a169">
+      <h2>Scheduler <span id="sch_badge" class="src">—</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Recommendations are generated automatically every hour (UTC) — even when nobody opens this page.</p>
+      <div class="row">
+        <div class="stat"><div class="k">Last scheduled run</div><div class="v" id="sch_last_run">—</div></div>
+        <div class="stat"><div class="k">Last recommendation</div><div class="v" id="sch_last_reco">—</div></div>
+        <div class="stat"><div class="k">Next expected run</div><div class="v" id="sch_next_run">—</div></div>
+      </div>
+      <p id="sch_last_detail" class="muted" style="margin-top:10px"></p>
     </div>
 
     <div class="card" style="border-left:4px solid #7fd0ff">
@@ -914,6 +927,34 @@ DASHBOARD_HTML = """<!doctype html>
       $('newssrc').textContent = 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items';
       $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
       loadPerformance();
+      loadScheduler();
+    }
+
+    // Scheduler status — when the hourly job last ran on its own.
+    async function loadScheduler(){
+      let s;
+      try { s = await (await fetch('/jobs/status')).json(); }
+      catch(e){ return; }
+      const run = s.last_scheduled_run;
+      $('sch_last_run').textContent = run ? fmtTime(run.ran_at) : 'Never run yet';
+      $('sch_last_reco').textContent = fmtTime(s.last_recommendation_at);
+      $('sch_next_run').textContent = fmtTime(s.next_expected_run);
+      const badge = $('sch_badge');
+      if (!run) {
+        badge.textContent = 'idle'; badge.className = 'src';
+        $('sch_last_detail').textContent = 'No scheduled run recorded yet (cron may not be configured).';
+        return;
+      }
+      if (run.created_recommendation) {
+        badge.textContent = 'active'; badge.className = 'src live';
+        $('sch_last_detail').textContent = 'Last run stored recommendation #' + run.recommendation_id +
+          ' (market ' + (run.market_status||'?') + ' · source ' + (run.market_source||'?') + ').';
+      } else {
+        badge.textContent = (run.skipped_reason || 'skipped').replace(/_/g,' '); badge.className = 'src';
+        $('sch_last_detail').textContent = 'Last run did not create a recommendation: ' +
+          (run.skipped_reason||'').replace(/_/g,' ') + ' (market ' + (run.market_status||'?') + ').' +
+          (run.evaluated_outcomes_count ? ' Evaluated ' + run.evaluated_outcomes_count + ' due outcome(s).' : '');
+      }
     }
 
     function pctTxt(v){ return (v==null)?'—':(v+'%'); }
