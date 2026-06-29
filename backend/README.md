@@ -399,6 +399,29 @@ trustworthy it is*, so an AI estimate is never mistaken for real market data.
   badges (hover tooltips) beside the spot rate, trade plan, historical
   similarity/win rate, and a MEASURED badge on recommendation accuracy.
 
+### Topline Rate Forecast
+
+A compact, top-of-dashboard view of the expected USD/MXN **rate path** and
+**bailout (thesis-invalidation) levels**. Decision support only — never an
+executable quote or trade instruction.
+
+- **Source**: derived from the existing multi-horizon outlook (`time_horizons`)
+  in `services/topline_forecast.py`. 1h/2h are interpolated from the 1–4h
+  intraday horizon; 4h uses that horizon's target; End of day and 24h use the
+  End-of-day and 1–2 day horizons.
+- **API**: `/analysis/usdmxn` returns `topline_forecast`:
+  `{ now, horizons: [{ horizon, expected_rate, bias, confidence,
+  expected_move_pct }], long_usd_bailout, short_usd_bailout, explanation }`.
+  Columns: Now / 1 hour / 2 hours / 4 hours / End of day / 24 hours.
+- **Bailouts**: `long_usd_bailout` sits below spot (a BUY_USD thesis fails as
+  price falls); `short_usd_bailout` sits above spot (a SELL_USD thesis fails as
+  price rises). With a `NO_TRADE` primary they are `null` (shown N/A); the
+  primary side is anchored to the primary stop when present.
+- **Provenance**: projected rates and bailout levels are **ESTIMATED**; the
+  current spot carries its own LIVE / CACHED / FALLBACK / SAMPLE badge.
+- **Dashboard**: rendered as the first card (above Market) with green/red/gray
+  bias pills, large expected rates, and clearly labeled bailout levels.
+
 ### Scheduled hourly recommendation generation
 
 Recommendations no longer depend on someone opening the dashboard — a cron job

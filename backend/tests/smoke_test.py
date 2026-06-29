@@ -2384,6 +2384,138 @@ def test_stale_fallback():
           analysis_endpoint_returns_safe_no_trade)
 
 
+def test_topline_forecast():
+    """Topline Rate Forecast: expected-rate path + bailout levels."""
+    import logging
+
+    from app.services import topline_forecast as tf
+
+    def buy_path_goes_above_spot():
+        payload = {
+            "direction": "BUY_USD", "stop": 17.95,
+            "market": {"usdmxn": 18.00, "source": "live"},
+            "time_horizons": [
+                {"horizon": "1-4 hours", "bias": "BUY_USD", "confidence": 60.0,
+                 "target": 18.05, "stretch_target": 18.09, "stop": 17.96},
+                {"horizon": "End of day", "bias": "BUY_USD", "confidence": 55.0,
+                 "target": 18.07},
+                {"horizon": "1-2 days", "bias": "BUY_USD", "confidence": 50.0,
+                 "target": 18.11},
+                {"horizon": "Beyond 2 days", "bias": "NO_TRADE", "confidence": 40.0,
+                 "target": None},
+            ],
+        }
+        out = tf.build(payload)
+        assert out["now"] == 18.00, out["now"]
+        labels = [h["horizon"] for h in out["horizons"]]
+        assert labels == ["1 hour", "2 hours", "4 hours", "End of day", "24 hours"], labels
+        intraday = [h["expected_rate"] for h in out["horizons"][:3]]
+        assert all(r > 18.00 for r in intraday), intraday  # BUY path above spot
+        assert intraday[0] < intraday[1] < intraday[2], intraday  # interpolated
+        assert abs(out["horizons"][2]["expected_rate"] - 18.05) < 1e-9  # 4h == intraday target
+        assert out["horizons"][3]["expected_rate"] == 18.07  # EOD horizon
+        assert out["horizons"][4]["expected_rate"] == 18.11  # 24h from 1-2 days
+        assert out["horizons"][0]["expected_move_pct"] > 0
+        # Long bailout is the primary stop (below spot); reverse short level above.
+        assert out["long_usd_bailout"] == 17.95, out["long_usd_bailout"]
+        assert out["long_usd_bailout"] < 18.00 < out["short_usd_bailout"], out
+
+    def sell_path_goes_below_spot():
+        payload = {
+            "direction": "SELL_USD", "stop": 18.05,
+            "market": {"usdmxn": 18.00, "source": "cached"},
+            "time_horizons": [
+                {"horizon": "1-4 hours", "bias": "SELL_USD", "confidence": 58.0,
+                 "target": 17.95},
+                {"horizon": "End of day", "bias": "SELL_USD", "confidence": 50.0,
+                 "target": 17.93},
+                {"horizon": "1-2 days", "bias": "SELL_USD", "confidence": 48.0,
+                 "target": 17.89},
+            ],
+        }
+        out = tf.build(payload)
+        intraday = [h["expected_rate"] for h in out["horizons"][:3]]
+        assert all(r < 18.00 for r in intraday), intraday  # SELL path below spot
+        assert intraday[0] > intraday[1] > intraday[2], intraday
+        assert out["horizons"][0]["expected_move_pct"] < 0
+        # Short bailout is the primary stop (above spot); reverse long level below.
+        assert out["short_usd_bailout"] == 18.05, out["short_usd_bailout"]
+        assert out["long_usd_bailout"] < 18.00 < out["short_usd_bailout"], out
+
+    def no_trade_has_no_actionable_bailouts():
+        payload = {
+            "direction": "NO_TRADE", "stop": None,
+            "market": {"usdmxn": 18.00, "source": "live"},
+            "time_horizons": [
+                {"horizon": "1-4 hours", "bias": "NO_TRADE", "confidence": 20.0,
+                 "target": None},
+                {"horizon": "End of day", "bias": "NO_TRADE", "confidence": 18.0,
+                 "target": None},
+                {"horizon": "1-2 days", "bias": "NO_TRADE", "confidence": 30.0,
+                 "target": None},
+            ],
+        }
+        out = tf.build(payload)
+        assert all(h["expected_rate"] is None for h in out["horizons"]), out["horizons"]
+        assert out["long_usd_bailout"] is None and out["short_usd_bailout"] is None, out
+        assert "N/A" in out["explanation"] or "range-bound" in out["explanation"]
+
+    def unavailable_market_is_safe():
+        out = tf.build({"direction": "NO_TRADE", "market": {"usdmxn": None},
+                        "time_horizons": []})
+        assert out["now"] is None
+        assert all(h["expected_rate"] is None for h in out["horizons"])
+        assert out["long_usd_bailout"] is None and out["short_usd_bailout"] is None
+
+    def build_logs_nothing():
+        # Pure function: must never log (and therefore never leak a key).
+        class _Rec(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.text = ""
+
+            def emit(self, record):
+                self.text += self.format(record) + "\n"
+
+        handler = _Rec()
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            tf.build({"direction": "BUY_USD", "stop": 17.9,
+                      "market": {"usdmxn": 18.0},
+                      "time_horizons": [{"horizon": "1-4 hours", "bias": "BUY_USD",
+                                         "confidence": 50.0, "target": 18.05}]})
+        finally:
+            root.removeHandler(handler)
+        assert handler.text == "", handler.text
+
+    def api_returns_topline_and_keeps_outlook():
+        with TestClient(app) as c:
+            body = c.get("/analysis/usdmxn").json()
+        tfp = body.get("topline_forecast")
+        assert tfp is not None, "missing topline_forecast"
+        for key in ("now", "horizons", "long_usd_bailout", "short_usd_bailout",
+                    "explanation"):
+            assert key in tfp, (key, tfp)
+        assert [h["horizon"] for h in tfp["horizons"]] == [
+            "1 hour", "2 hours", "4 hours", "End of day", "24 hours"]
+        for h in tfp["horizons"]:
+            assert {"horizon", "expected_rate", "bias", "confidence",
+                    "expected_move_pct"}.issubset(h.keys()), h
+        # Existing Time Horizon Outlook still present and unmodified in shape.
+        assert isinstance(body.get("time_horizons"), list) and body["time_horizons"], \
+            "time_horizons missing"
+
+    check("BUY_USD topline path goes above spot", buy_path_goes_above_spot)
+    check("SELL_USD topline path goes below spot", sell_path_goes_below_spot)
+    check("NO_TRADE shows no actionable bailout levels",
+          no_trade_has_no_actionable_bailouts)
+    check("unavailable market -> safe range-bound topline", unavailable_market_is_safe)
+    check("topline build logs nothing (no key leak)", build_logs_nothing)
+    check("API returns topline_forecast and keeps Time Horizon Outlook",
+          api_returns_topline_and_keeps_outlook)
+
+
 def test_scheduled_jobs():
     """Scheduled hourly recommendation generation (cron job)."""
     import logging
@@ -2628,6 +2760,7 @@ def main():
     test_provenance_engine()
     test_historical_backfill()
     test_stale_fallback()
+    test_topline_forecast()
     test_scheduled_jobs()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")

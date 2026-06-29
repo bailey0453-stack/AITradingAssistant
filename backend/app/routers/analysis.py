@@ -25,6 +25,7 @@ from app.services.history import (
     setup_percentile,
 )
 from app.services.history.historical_events import load_reactions
+from app.services import topline_forecast
 
 # Direction sign for "favorable" USD/MXN moves (BUY_USD wants up, SELL_USD down).
 _DIR_SIGN = {"BUY_USD": 1.0, "SELL_USD": -1.0, "NO_TRADE": 1.0}
@@ -379,6 +380,8 @@ def _unavailable_analysis_payload(market, market_meta: dict, news_source: str) -
             "what_to_watch_next": ["Live FX provider connectivity"],
         },
     }
+    # Safe, non-actionable topline (no spot -> range-bound rates, N/A bailouts).
+    payload["topline_forecast"] = topline_forecast.build(payload)
     return payload
 
 
@@ -476,6 +479,9 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
     payload = serialize_analysis(
         analysis, market={**serialize_market(snapshot), **market_meta}
     )
+    # Topline Rate Forecast: compact expected-rate path + bailout levels derived
+    # from the multi-horizon outlook (decision support only; all rates ESTIMATED).
+    payload["topline_forecast"] = topline_forecast.build(payload)
     # Market-state awareness: prices may be from the latest session when closed,
     # but news / calendar / historical / regime / strategist are still evaluated.
     payload["market_state"] = {

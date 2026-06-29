@@ -98,6 +98,11 @@ DASHBOARD_HTML = """<!doctype html>
     .BUY_USD { background:#0f3d2e; color:#5be3a0; }
     .SELL_USD { background:#3d1626; color:#ff9bb5; }
     .NO_TRADE { background:#26314d; color:#9fb3d9; }
+    .tl-col { flex:1; min-width:108px; background:#0d1730; border:1px solid #1d2740; border-radius:10px; padding:10px 12px; }
+    .tl-col.now { border-color:#2a5a7a; }
+    .tl-rate { font-size:24px; font-weight:700; margin:6px 0 4px; letter-spacing:-.01em; }
+    .tl-meta { font-size:11px; color:#8aa0c6; margin-top:6px; }
+    .tl-bail { flex:1; min-width:150px; background:#0d1730; border:1px solid #1d2740; border-radius:10px; padding:10px 12px; }
     .pill { display:inline-block; padding:2px 8px; border-radius:6px; font-size:12px; background:#1b2542; color:#9fb3d9; }
     .pill.high { background:#3d1626; color:#ff9bb5; }
     .pill.elevated { background:#3d3416; color:#ffd98a; }
@@ -166,6 +171,24 @@ DASHBOARD_HTML = """<!doctype html>
       <b>Market data unavailable.</b>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
+    </div>
+    <div class="card" id="toplineCard" style="border-left:4px solid #7fd0ff">
+      <h2>Topline Rate Forecast <span class="evb estimated" title="Projected rates and bailout levels are model estimates — not executable quotes or trade instructions.">ESTIMATED</span></h2>
+      <p class="muted" style="margin:4px 0 12px">Decision support only — expected USD/MXN path and thesis-invalidation (bailout) levels. Not a trade instruction or executable quote.</p>
+      <div class="row" id="tl_row"></div>
+      <div class="row" style="margin-top:14px">
+        <div class="tl-bail">
+          <div class="k">Long USD bailout <span class="evb estimated" title="Rate where a BUY_USD (long) thesis is invalidated. Estimated.">EST</span></div>
+          <div class="tl-rate" id="tl_long_bailout" style="font-size:20px">—</div>
+          <div class="tl-meta">BUY_USD thesis invalidated below this rate</div>
+        </div>
+        <div class="tl-bail">
+          <div class="k">Short USD bailout <span class="evb estimated" title="Rate where a SELL_USD (short) thesis is invalidated. Estimated.">EST</span></div>
+          <div class="tl-rate" id="tl_short_bailout" style="font-size:20px">—</div>
+          <div class="tl-meta">SELL_USD thesis invalidated above this rate</div>
+        </div>
+      </div>
+      <p class="muted" id="tl_explain" style="margin-top:12px"></p>
     </div>
     <div class="card">
       <h2>Market</h2>
@@ -616,6 +639,38 @@ DASHBOARD_HTML = """<!doctype html>
     function fill(id, v, suffix){ $(id).textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—'; }
     function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+v; }
     function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(); }catch(e){ return iso; } }
+    function tlRate4(v){ return (v==null)?'—':Number(v).toFixed(4); }
+    function tlMovePct(v){ return (v==null)?'':((v>0?'+':'')+v+'%'); }
+    function tlBiasPill(bias){ const b=bias||'NO_TRADE'; return '<span class="tag '+b+'" style="font-size:11px;padding:2px 8px">'+b+'</span>'; }
+    // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
+    // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
+    function renderTopline(d){
+      const row = $('tl_row'); if(!row) return;
+      const tf = d.topline_forecast;
+      if(!tf){ row.innerHTML = '<div class="muted">No forecast available.</div>'; return; }
+      let nowBadge = '';
+      const sp = (d.provenance || {}).spot_rate;
+      if (sp && typeof evBadge === 'function') { nowBadge = evBadge(sp); }
+      else { const src = ((d.market||{}).source || 'unknown'); nowBadge = '<span class="src '+src+'">'+src.toUpperCase()+'</span>'; }
+      let html = '<div class="tl-col now"><div class="k">Now '+nowBadge+'</div>'+
+        '<div class="tl-rate">'+tlRate4(tf.now)+'</div>'+
+        '<div class="tl-meta">current spot</div></div>';
+      (tf.horizons || []).forEach(function(h){
+        const mv = tlMovePct(h.expected_move_pct);
+        const conf = (h.confidence==null?'—':h.confidence);
+        const rate = (h.expected_rate==null)
+          ? '<span class="muted" style="font-size:15px">range-bound</span>'
+          : tlRate4(h.expected_rate);
+        html += '<div class="tl-col"><div class="k">'+(h.horizon||'')+
+          ' <span class="evb estimated" title="Projected rate — model estimate, not an executable quote.">EST</span></div>'+
+          '<div class="tl-rate">'+rate+'</div>'+ tlBiasPill(h.bias)+
+          '<div class="tl-meta">conf '+conf+(mv?(' · '+mv):'')+'</div></div>';
+      });
+      row.innerHTML = html;
+      $('tl_long_bailout').textContent = (tf.long_usd_bailout==null)?'N/A':tlRate4(tf.long_usd_bailout);
+      $('tl_short_bailout').textContent = (tf.short_usd_bailout==null)?'N/A':tlRate4(tf.short_usd_bailout);
+      $('tl_explain').textContent = tf.explanation || '';
+    }
     async function refresh() {
       const d = await (await fetch('/analysis/usdmxn')).json();
       const m = d.market || {};
@@ -664,6 +719,9 @@ DASHBOARD_HTML = """<!doctype html>
       $('mkt_provider').textContent = m.provider || '—';
       $('mkt_source').textContent = (ms.cached ? 'cached · ' : '') + (m.source || '—');
       $('mkt_closed_note').textContent = ms.is_open ? '' : 'Using latest available market data.';
+
+      // Topline Rate Forecast (top card) — decision support only.
+      renderTopline(d);
 
       // Provider health panel.
       const ph = d.provider_health || {}; const box = $('provhealth'); box.innerHTML='';
