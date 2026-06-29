@@ -843,13 +843,44 @@ Open Exchange Rates returns USD-based rates, so `USD/MXN = rates["MXN"]`. To use
 a different provider, implement a new branch/class in
 `services/market_data.py` and point `FX_BASE_URL` / `FX_PROVIDER` at it.
 
-### Switching to Postgres
+### Persistent storage (Postgres)
+
+By default the app uses SQLite (`sqlite:///./aitrading.db`, redirected to
+`/tmp/aitrading.db` on read-only serverless filesystems). SQLite on Vercel is
+**ephemeral and per-instance**, so recommendation/outcome history is lost on
+cold starts. For durable storage set a Postgres connection string:
 
 ```bash
 DATABASE_URL=postgresql+psycopg://user:password@localhost:5432/aitrading
 ```
 
-(Install a driver, e.g. `pip install "psycopg[binary]"`.)
+The driver (`psycopg[binary]`) is included in `requirements.txt`. The app
+accepts the `postgres://` / `postgresql://` URLs that Vercel/Neon hand out and
+automatically rewrites the scheme to use psycopg (v3). When `DATABASE_URL` is
+unset it also falls back to any `POSTGRES_URL` / `POSTGRES_PRISMA_URL` /
+`POSTGRES_URL_NON_POOLING` env var that a Vercel Postgres integration provides.
+
+Tables are created automatically at startup (`init_db()` →
+`Base.metadata.create_all`), so no manual migration step is needed for the
+initial schema. The hourly cron and the dashboard share the same engine, so
+they always read/write the same database.
+
+**Verify the active database** with the read-only diagnostics endpoint:
+
+```bash
+curl https://<deployment>/diagnostics/db
+# {
+#   "database_type": "postgres",          # or "sqlite"
+#   "persistent": true,
+#   "total_recommendations": 12,
+#   "total_evaluated_recommendations": 5,
+#   "total_market_snapshots": 40,
+#   "total_job_runs": 11
+# }
+```
+
+The dashboard shows the active database type under **Provider health**
+(`Postgres · PERSISTENT` vs. `sqlite · EPHEMERAL`).
 
 ### Live news (NewsAPI.org)
 

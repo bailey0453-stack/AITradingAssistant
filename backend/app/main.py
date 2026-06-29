@@ -22,6 +22,7 @@ from app.routers import (
     analysis,
     calendar,
     decision,
+    diagnostics,
     health,
     history,
     jobs,
@@ -73,6 +74,7 @@ app.include_router(research.router)
 app.include_router(performance.router)
 app.include_router(decision.router)
 app.include_router(jobs.router)
+app.include_router(diagnostics.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -221,6 +223,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="card">
         <h2>Provider health</h2>
         <div id="provhealth" style="margin-top:8px"></div>
+        <div id="db_status" class="muted" style="margin-top:12px;border-top:1px solid #1d2740;padding-top:10px">Database: <span id="db_kind">—</span></div>
       </div>
     </div>
 
@@ -986,6 +989,25 @@ DASHBOARD_HTML = """<!doctype html>
       $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
       loadPerformance();
       loadScheduler();
+      loadDiagnostics();
+    }
+
+    // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).
+    async function loadDiagnostics(){
+      const el = $('db_kind'); if(!el) return;
+      let dg;
+      try { dg = await (await fetch('/diagnostics/db')).json(); }
+      catch(e){ el.textContent = 'unknown'; return; }
+      const kind = dg.database_type === 'postgres' ? 'Postgres' : (dg.database_type || 'unknown');
+      if (dg.persistent) {
+        el.innerHTML = '<b style="color:#5fd08a">'+kind+'</b> <span class="src live">PERSISTENT</span>';
+      } else {
+        el.innerHTML = '<b style="color:#f6c177">'+kind+'</b> <span class="src">EPHEMERAL</span>';
+      }
+      const note = $('db_status');
+      if (note) note.title = (dg.storage_note||'') +
+        ' · recs '+(dg.total_recommendations ?? '?')+' · evaluated '+(dg.total_evaluated_recommendations ?? '?')+
+        ' · snapshots '+(dg.total_market_snapshots ?? '?')+' · job runs '+(dg.total_job_runs ?? '?');
     }
 
     // Scheduler status — when the hourly job last ran on its own.

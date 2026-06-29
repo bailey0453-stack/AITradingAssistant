@@ -1,6 +1,9 @@
 """Database setup (SQLAlchemy 2.0).
 
-SQLite for local development; Postgres-ready by changing DATABASE_URL.
+SQLite for local development; **persistent Postgres in production** whenever a
+Postgres connection URL is provided (Vercel/Neon sets ``DATABASE_URL``). When no
+Postgres URL is configured the app falls back to ephemeral SQLite under ``/tmp``
+on read-only serverless filesystems — fine for local/demo, not durable.
 """
 
 from __future__ import annotations
@@ -21,6 +24,17 @@ settings = get_settings()
 # Writable fallback for read-only serverless filesystems (Vercel, AWS Lambda),
 # where only /tmp is writable. Ephemeral per instance.
 _TMP_SQLITE_URL = "sqlite:////tmp/aitrading.db"
+_DEFAULT_SQLITE_URL = "sqlite:///./aitrading.db"
+
+# Vercel/Neon expose the connection string under several names. ``DATABASE_URL``
+# is the pooled URL (best for serverless); the rest are fallbacks.
+_POSTGRES_ENV_FALLBACKS = (
+    "DATABASE_URL",
+    "POSTGRES_URL",
+    "POSTGRES_PRISMA_URL",
+    "POSTGRES_URL_NON_POOLING",
+    "DATABASE_URL_UNPOOLED",
+)
 
 
 def _sqlite_path(url: str) -> str | None:
@@ -32,6 +46,40 @@ def _sqlite_path(url: str) -> str | None:
     if not path or path == ":memory:":
         return None
     return path
+
+
+def _normalize_db_url(url: str) -> str:
+    """Force the psycopg (v3) driver for Postgres URLs; pass others unchanged.
+
+    Vercel/Neon hand out ``postgres://`` or ``postgresql://`` URLs, which
+    SQLAlchemy would otherwise route to psycopg2. We ship psycopg v3, so we
+    rewrite the scheme to ``postgresql+psycopg://``. SSL params already present
+    in the query string (e.g. ``sslmode=require``) are preserved.
+    """
+    if url.startswith("postgresql+"):
+        return url  # already driver-qualified
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
+def _select_url() -> str:
+    """Resolve the effective DB URL, preferring a configured Postgres URL.
+
+    ``settings.database_url`` already reflects ``DATABASE_URL`` (pydantic). If it
+    is still the built-in SQLite default, look for any Vercel/Neon Postgres env
+    var so a connected database is used even if only ``POSTGRES_URL`` is set.
+    """
+    url = settings.database_url
+    if _sqlite_path(url) is not None and url == _DEFAULT_SQLITE_URL:
+        for env_name in _POSTGRES_ENV_FALLBACKS:
+            candidate = os.getenv(env_name)
+            if candidate:
+                logger.info("Using Postgres URL from %s.", env_name)
+                return candidate
+    return url
 
 
 def _resolve_database_url(url: str) -> str:
@@ -66,21 +114,35 @@ def _resolve_database_url(url: str) -> str:
     return _TMP_SQLITE_URL
 
 
-DATABASE_URL = _resolve_database_url(settings.database_url)
+# Resolve (prefer Postgres) -> redirect unwritable SQLite -> force psycopg driver.
+DATABASE_URL = _normalize_db_url(_resolve_database_url(_select_url()))
+
+_is_sqlite = DATABASE_URL.startswith("sqlite")
 
 # check_same_thread is only needed for SQLite + FastAPI's threaded workers.
-_connect_args = (
-    {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-)
+_engine_kwargs: dict = {
+    "connect_args": {"check_same_thread": False} if _is_sqlite else {},
+    "pool_pre_ping": True,  # validate connections (Neon closes idle ones)
+    "future": True,
+}
+if not _is_sqlite:
+    # Serverless cold starts + Neon's idle-connection reaping: recycle often.
+    _engine_kwargs["pool_recycle"] = 300
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=_connect_args,
-    pool_pre_ping=True,
-    future=True,
-)
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+def database_kind() -> str:
+    """Coarse database type for diagnostics/dashboard: ``postgres`` or ``sqlite``."""
+    name = engine.dialect.name  # e.g. 'postgresql', 'sqlite'
+    return "postgres" if name.startswith("postgre") else name
+
+
+def database_is_persistent() -> bool:
+    """True when storage survives redeploys/cold starts (i.e. Postgres)."""
+    return database_kind() == "postgres"
 
 
 class Base(DeclarativeBase):

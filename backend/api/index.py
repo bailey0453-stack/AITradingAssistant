@@ -5,8 +5,9 @@ project's Root Directory must be set to ``backend`` so that ``app`` is importabl
 as a top-level package (see backend/README.md → "Deploy to Vercel").
 
 The serverless runtime may not execute ASGI lifespan startup, so we create the
-database tables explicitly here (idempotent). On Vercel the DB lives under
-``/tmp`` (see app/database.py).
+database tables explicitly here (idempotent). In production this targets the
+persistent Postgres database (``DATABASE_URL``); without one it falls back to
+ephemeral SQLite under ``/tmp`` (see app/database.py).
 """
 
 import logging

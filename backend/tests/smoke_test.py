@@ -2724,6 +2724,59 @@ def test_scheduled_jobs():
     check("cron secret is never logged", cron_secret_never_logged)
 
 
+def test_persistent_storage():
+    from app.database import _normalize_db_url, database_is_persistent, database_kind
+
+    def postgres_scheme_forces_psycopg():
+        url = "postgres://u:p@ep-x-pooler.neon.tech/db?sslmode=require"
+        out = _normalize_db_url(url)
+        assert out == (
+            "postgresql+psycopg://u:p@ep-x-pooler.neon.tech/db?sslmode=require"
+        ), out
+
+    def postgresql_scheme_forces_psycopg():
+        url = "postgresql://u:p@host/db"
+        assert _normalize_db_url(url) == "postgresql+psycopg://u:p@host/db"
+
+    def already_qualified_unchanged():
+        url = "postgresql+psycopg://u:p@host/db"
+        assert _normalize_db_url(url) == url
+
+    def sqlite_unchanged():
+        url = "sqlite:///./aitrading.db"
+        assert _normalize_db_url(url) == url
+
+    def kind_is_sqlite_in_tests():
+        # Tests run without DATABASE_URL, so storage is SQLite (ephemeral).
+        assert database_kind() == "sqlite"
+        assert database_is_persistent() is False
+
+    def diagnostics_endpoint_reports_storage():
+        with TestClient(app) as c:
+            r = c.get("/diagnostics/db")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            for key in (
+                "database_type",
+                "persistent",
+                "total_recommendations",
+                "total_evaluated_recommendations",
+                "total_market_snapshots",
+                "total_job_runs",
+            ):
+                assert key in body, f"missing {key}"
+            assert body["database_type"] == "sqlite"
+            assert body["persistent"] is False
+            assert isinstance(body["total_recommendations"], int)
+
+    check("postgres:// scheme forces psycopg driver", postgres_scheme_forces_psycopg)
+    check("postgresql:// scheme forces psycopg driver", postgresql_scheme_forces_psycopg)
+    check("already driver-qualified URL unchanged", already_qualified_unchanged)
+    check("sqlite URL unchanged by normalizer", sqlite_unchanged)
+    check("database kind is sqlite under tests", kind_is_sqlite_in_tests)
+    check("/diagnostics/db reports storage + counts", diagnostics_endpoint_reports_storage)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -2762,6 +2815,7 @@ def main():
     test_stale_fallback()
     test_topline_forecast()
     test_scheduled_jobs()
+    test_persistent_storage()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
