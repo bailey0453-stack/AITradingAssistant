@@ -186,6 +186,37 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
 
         if confidence_breakdown.get("value") is not None:
             result["confidence"] = confidence_breakdown["value"]
+            # Phase A: recompute opportunity grade using final blended confidence
+            # so grade labels stay consistent with the headline confidence field.
+            try:
+                from app.services.ai_analysis import RuleBasedAnalyzer
+
+                grade = RuleBasedAnalyzer._opportunity_grade(
+                    {
+                        "direction": result.get("direction"),
+                        "trade_score": result.get("trade_score"),
+                        "confidence": confidence_breakdown["value"],
+                        "risk_level": result.get("risk_level"),
+                        "conflicting_signals": result.get("conflicting_signals"),
+                        "signal_breakdown": result.get("signal_breakdown"),
+                    },
+                    result.get("market_regime") or {},
+                    market,
+                    confidence_override=confidence_breakdown["value"],
+                )
+                result["opportunity_grade"] = grade["grade"]
+                result["opportunity_grade_detail"] = grade
+                expl = dict(result.get("explanations") or {})
+                expl["opportunity_grade"] = (
+                    f"Grade {grade.get('grade')} from composite "
+                    f"{grade.get('score')}/100 = 45% trade + 25% agreement + "
+                    f"30% blended confidence ({confidence_breakdown['value']}/100) + "
+                    f"10% regime confidence, minus penalties. "
+                    + " ".join(grade.get("reasons") or [])
+                )
+                result["explanations"] = expl
+            except Exception:  # noqa: BLE001
+                logger.exception("Post-blend grade refresh failed; keeping signal-only grade.")
             # Refresh the strategist brief so its confidence matches the blended
             # headline confidence (Phase 4.5 + Phase 4 consistency).
             try:

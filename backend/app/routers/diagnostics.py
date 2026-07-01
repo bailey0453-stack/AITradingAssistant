@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,8 @@ from app.models import (
     Recommendation,
     RecommendationOutcome,
 )
+
+from app.services.grade_diagnostics import grade_calibration_report
 
 logger = logging.getLogger(__name__)
 
@@ -61,3 +63,16 @@ def db_diagnostics(db: Session = Depends(get_db)) -> dict:
         "total_market_snapshots": _count(db, MarketSnapshot),
         "total_job_runs": _count(db, JobRun),
     }
+
+
+@router.get("/grade-calibration")
+def grade_calibration(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    """Before/after grade + confidence distributions (Phase A calibration).
+
+    Replays stored analysis snapshots through legacy (pre-Phase-A) and v2
+    grading without mutating any records.
+    """
+    return grade_calibration_report(db, limit=limit)

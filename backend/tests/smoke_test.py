@@ -2777,6 +2777,46 @@ def test_persistent_storage():
     check("/diagnostics/db reports storage + counts", diagnostics_endpoint_reports_storage)
 
 
+def test_grade_calibration():
+    from app.services.grade_engine import compute_opportunity_grade
+    from app.services.market_data import MarketData
+
+    def v2_allows_letter_grades():
+        g = compute_opportunity_grade(
+            {
+                "direction": "BUY_USD",
+                "trade_score": 40.0,
+                "confidence": 80.0,
+                "risk_level": "low",
+                "conflicting_signals": [],
+                "signal_breakdown": {
+                    "net_score": 10.0,
+                    "total_score": 10.0,
+                    "usd_score": 10.0,
+                    "mxn_score": 0.0,
+                },
+            },
+            {"primary": "Fed Driven", "confidence": 55},
+            MarketData(vix=15.0),
+            version="v2",
+        )
+        assert g["grade"] in {"A+", "A", "B", "C"}, g
+
+    def calibration_endpoint_shape():
+        with TestClient(app) as c:
+            r = c.get("/diagnostics/grade-calibration?limit=10")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert "grade_distribution" in body
+            assert "before_legacy_replay" in body["grade_distribution"]
+            assert "after_v2_replay" in body["grade_distribution"]
+            assert "confidence_distribution" in body
+
+    check("v2 grading reaches B/C/A band when quality supports it", v2_allows_letter_grades)
+    check("/diagnostics/grade-calibration returns before/after distributions",
+          calibration_endpoint_shape)
+
+
 def test_scrub():
     def scrubs():
         out = scrub("token=abc123 failed", "abc123")
@@ -2816,6 +2856,7 @@ def main():
     test_topline_forecast()
     test_scheduled_jobs()
     test_persistent_storage()
+    test_grade_calibration()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

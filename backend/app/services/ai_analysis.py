@@ -103,16 +103,10 @@ ANALYSIS_FIELDS = (
     "evidence_summary",
 )
 
-# Composite-score thresholds -> letter grade (highest first).
-_GRADE_BANDS = (
-    (85.0, "A+"),
-    (74.0, "A"),
-    (60.0, "B"),
-    (46.0, "C"),
-    (32.0, "D"),
-)
-# Regimes where conviction should be capped (uncertain / headline-driven tape).
-_UNCERTAIN_REGIMES = {"High Volatility", "Political Risk", "Trade War", "Risk Off"}
+# Grade bands + uncertain-regime cap: see grade_engine (single source of truth).
+from app.services.grade_engine import UNCERTAIN_REGIMES, compute_opportunity_grade
+
+_UNCERTAIN_REGIMES = UNCERTAIN_REGIMES
 
 _RISK_RANK = {"low": 0, "elevated": 1, "high": 2}
 
@@ -364,10 +358,11 @@ class RuleBasedAnalyzer(AIAnalyzer):
                 "data completeness (see confidence_breakdown for the exact terms)."
             ),
             "opportunity_grade": (
-                f"Grade {grade.get('grade')} from a composite "
-                f"{grade.get('score')}/100 = 40% trade score + 30% signal "
-                f"agreement + 30% confidence, minus risk / conflict / volatility "
-                f"penalties. " + " ".join(grade.get("reasons") or [])
+                f"Grade {grade.get('grade')} from composite "
+                f"{grade.get('score')}/100 = 45% trade score + 25% signal agreement "
+                f"+ 30% confidence + 10% regime confidence, minus risk / "
+                f"material-conflict / volatility penalties. "
+                + " ".join(grade.get("reasons") or [])
             ),
             "historical_similarity": (
                 "Similarity (0–100%) is a weighted blend of regime + event-type "
@@ -501,85 +496,25 @@ class RuleBasedAnalyzer(AIAnalyzer):
         return agree, disagree
 
     @staticmethod
-    def _opportunity_grade(signal: dict, regime: dict, market: MarketData) -> dict:
-        """Grade the setup A+..PASS from agreement, regime, risk, conf & volatility.
+    def _opportunity_grade(
+        signal: dict,
+        regime: dict,
+        market: MarketData,
+        *,
+        confidence_override: float | None = None,
+    ) -> dict:
+        """Grade the setup A+..PASS (delegates to ``grade_engine``).
 
-        Composite score (0..100) blends conviction and confidence, then deducts
-        penalties for risk, conflicting signals and high volatility. Uncertain
-        regimes cap the top grade. NO_TRADE always grades PASS.
+        Pass ``confidence_override`` when grading after Phase 4 blended
+        confidence so the letter grade matches the headline confidence field.
         """
-        sb = signal.get("signal_breakdown") or {}
-        total = float(sb.get("total_score") or 0.0)
-        net = abs(float(sb.get("net_score") or 0.0))
-        agreement = (net / total) if total else 0.0           # 0..1 conviction
-        confidence = float(signal.get("confidence") or 0.0) / 100.0
-        trade = float(signal.get("trade_score") or 0.0) / 100.0
-
-        risk_penalty = {"low": 0.0, "elevated": 8.0, "high": 18.0}.get(
-            signal.get("risk_level"), 8.0
+        return compute_opportunity_grade(
+            signal,
+            regime,
+            market,
+            confidence_override=confidence_override,
+            version="v2",
         )
-        n_conflicts = len(signal.get("conflicting_signals") or [])
-        conflict_penalty = min(20.0, n_conflicts * 5.0)
-        vix = market.vix if market.vix is not None else 15.0
-        vol_penalty = max(0.0, (vix - 18.0)) * 1.5            # historical-vol proxy
-
-        base = 100.0 * (0.4 * trade + 0.3 * agreement + 0.3 * confidence)
-        score = round(base - risk_penalty - conflict_penalty - vol_penalty, 1)
-
-        direction = signal.get("direction")
-        if direction == "NO_TRADE":
-            # PASS is reserved for "no trade" so the grade never conflicts with a
-            # BUY_USD / SELL_USD direction (see Phase 4.5 consistency rules).
-            grade = "PASS"
-        else:
-            # A directional read floors at "D" — a real bias is never graded PASS.
-            grade = "D"
-            for threshold, letter in _GRADE_BANDS:
-                if score >= threshold:
-                    grade = letter
-                    break
-            # Don't hand out an A+ when the regime itself is uncertain.
-            if grade == "A+" and regime.get("primary") in _UNCERTAIN_REGIMES:
-                grade = "A"
-
-        reasons: list[str] = []
-        reasons.append(
-            f"Signal agreement {round(agreement * 100)}% "
-            f"(net {sb.get('net_score')} of {sb.get('total_score')} total weight)."
-        )
-        reasons.append(
-            f"Confidence {signal.get('confidence')}/100, trade score "
-            f"{signal.get('trade_score')}/100."
-        )
-        reasons.append(
-            f"Regime: {regime.get('primary')} "
-            f"({regime.get('confidence')}% conf)."
-        )
-        if risk_penalty:
-            reasons.append(f"Risk {signal.get('risk_level')} (-{risk_penalty:g}).")
-        if conflict_penalty:
-            reasons.append(
-                f"{n_conflicts} conflicting signal(s) (-{conflict_penalty:g})."
-            )
-        if vol_penalty:
-            reasons.append(f"Elevated volatility VIX {vix} (-{round(vol_penalty, 1)}).")
-        if direction == "NO_TRADE":
-            reasons.append("No directional edge -> PASS.")
-
-        return {
-            "grade": grade,
-            "score": score,
-            "reasons": reasons,
-            "components": {
-                "agreement": round(agreement, 3),
-                "confidence": round(confidence, 3),
-                "trade_score": round(trade, 3),
-                "regime_confidence": regime.get("confidence"),
-                "risk_penalty": risk_penalty,
-                "conflict_penalty": conflict_penalty,
-                "volatility_penalty": round(vol_penalty, 2),
-            },
-        }
 
     # Action guidance per grade. PASS = no trade; D/C = bias-only, low quality;
     # B/A/A+ = increasingly actionable.
