@@ -179,7 +179,9 @@ def compute_opportunity_grade(
     if vol_penalty:
         reasons.append(f"Elevated volatility VIX {vix} (-{round(vol_penalty, 1)}).")
     if direction == "NO_TRADE":
-        reasons.append("No directional edge -> PASS.")
+        reasons.append("Stand-aside (NO_TRADE) -> PASS.")
+    elif direction == "HOLD":
+        reasons.append("Neutral HOLD bias — graded on setup quality, not stand-aside.")
 
     return {
         "grade": grade,

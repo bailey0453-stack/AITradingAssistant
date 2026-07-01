@@ -252,7 +252,16 @@ def _wait_block(*, should_trade: bool, actionable: bool, grade: Optional[str],
 
     reasons: list[str] = []
     if not actionable:
-        reasons.append("Signal is NO_TRADE / PASS — there is no directional edge to act on.")
+        direction_label = rec.get("direction") or "NO_TRADE"
+        if direction_label == "HOLD":
+            reasons.append(
+                "Signal is HOLD — directional bias is neutral; wait for conviction "
+                "or an operational need before acting."
+            )
+        else:
+            reasons.append(
+                "Signal is NO_TRADE / PASS — stand aside until data or event risk clears."
+            )
     else:
         if not grade_ok:
             reasons.append(

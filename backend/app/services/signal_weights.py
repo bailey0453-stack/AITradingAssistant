@@ -75,7 +75,10 @@ SIGNAL_LABELS: dict[str, str] = {
 }
 
 # --- Scoring tunables (also adjustable without touching the analysis engine) ---
-TRADE_THRESHOLD = 4.0   # |net weighted score| needed to take a directional view
+# |net| below DIRECTION_EPSILON -> HOLD; at/above TRADE_THRESHOLD -> actionable edge.
+DIRECTION_EPSILON = 0.25
+TRADE_THRESHOLD = 4.0   # |net| needed for an actionable trade plan (is_actionable)
+ACTION_THRESHOLD = TRADE_THRESHOLD  # alias for clarity in API payloads
 SCORE_SCALE = 3.5       # net score -> 0..100 trade score multiplier
 MOMENTUM_NORM = 0.05    # USD/MXN move (abs) that counts as full-strength momentum
 _IMPORTANCE_STRENGTH = {"high": 1.0, "medium": 0.6, "low": 0.3}
@@ -281,17 +284,17 @@ def score_signals(
     net = round(usd_score - mxn_score, 2)
     total = round(usd_score + mxn_score, 2)
 
-    if net >= TRADE_THRESHOLD:
+    if net >= DIRECTION_EPSILON:
         direction, bias, momentum_status = "BUY_USD", "USD bullish", "Bullish USD"
-    elif net <= -TRADE_THRESHOLD:
+    elif net <= -DIRECTION_EPSILON:
         direction, bias, momentum_status = "SELL_USD", "USD bearish", "Bearish USD"
     else:
-        direction, bias, momentum_status = "NO_TRADE", "Neutral", "Neutral / range-bound"
+        direction, bias, momentum_status = "HOLD", "Neutral / range-bound", "Neutral"
+
+    is_actionable = abs(net) >= TRADE_THRESHOLD
 
     trade_score = round(min(100.0, abs(net) * SCORE_SCALE), 1)
     confidence = round(min(95.0, (abs(net) / total * 100.0) if total else 0.0), 1)
-    if direction == "NO_TRADE":
-        confidence = round(min(confidence, 35.0), 1)
 
     ranked = sorted(contributions, key=lambda c: abs(c["contribution"]), reverse=True)
     key_drivers = [_driver_text(c) for c in ranked[:5]] or [
@@ -305,7 +308,10 @@ def score_signals(
     elif direction == "SELL_USD":
         conflicts = [c for c in ranked if c["direction"] == "USD"]
     else:
-        conflicts = ranked[:4]
+        # HOLD: surface the strongest signals on each side.
+        usd_side = [c for c in ranked if c["direction"] == "USD"]
+        mxn_side = [c for c in ranked if c["direction"] == "MXN"]
+        conflicts = (usd_side[:2] + mxn_side[:2]) or ranked[:4]
     conflicting_signals = [
         {
             "key": c["key"],
@@ -324,6 +330,7 @@ def score_signals(
         "momentum_status": momentum_status,
         "trade_score": trade_score,
         "confidence": confidence,
+        "is_actionable": is_actionable,
         "usd_score": usd_score,
         "mxn_score": mxn_score,
         "net_score": net,
@@ -333,5 +340,7 @@ def score_signals(
         "conflicting_signals": conflicting_signals,
         "weights_version": WEIGHTS_VERSION,
         "trade_threshold": TRADE_THRESHOLD,
+        "action_threshold": ACTION_THRESHOLD,
+        "direction_epsilon": DIRECTION_EPSILON,
         "weights": dict(weights),
     }

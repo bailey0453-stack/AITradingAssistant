@@ -91,7 +91,7 @@ class AnalysisSnapshot(Base):
     pair: Mapped[str] = mapped_column(String(16), default="USDMXN", index=True)
 
     # Signal
-    direction: Mapped[str] = mapped_column(String(16))  # BUY_USD | SELL_USD | NO_TRADE
+    direction: Mapped[str] = mapped_column(String(16))  # BUY_USD | SELL_USD | HOLD | NO_TRADE
     trade_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0..100
     market_bias: Mapped[str] = mapped_column(String(32), default="")
     confidence: Mapped[float] = mapped_column(Float)  # 0..100

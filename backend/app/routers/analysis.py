@@ -265,6 +265,52 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
     return out
 
 
+def _direction_fields(row: AnalysisSnapshot) -> dict:
+    """Recompute direction / conviction fields for API payloads."""
+    from app.services.direction_policy import build_direction_reasoning
+
+    sb = row.signal_breakdown or {}
+    threshold = float(sb.get("action_threshold") or sb.get("trade_threshold") or 4.0)
+    net = float(sb.get("net_score") or 0.0)
+    direction = row.direction
+    is_actionable = direction in ("BUY_USD", "SELL_USD") and abs(net) >= threshold
+    signal_like = {
+        "direction": direction,
+        "confidence": row.confidence,
+        "net_score": net,
+        "is_actionable": is_actionable,
+        "signal_breakdown": sb,
+        "weighted_contributions": row.weighted_contributions or [],
+        "conflicting_signals": row.conflicting_signals or [],
+    }
+    stand_aside_reason = None
+    if direction == "NO_TRADE":
+        dr_stored = (row.explanations or {}).get("direction_reasoning")
+        if isinstance(dr_stored, dict) and dr_stored.get("directional_bias") == "NO_TRADE":
+            return {
+                "is_actionable": False,
+                "direction_reasoning": dr_stored,
+            }
+        if isinstance(dr_stored, dict):
+            stand_aside_reason = dr_stored.get("stand_aside_reason")
+        if not stand_aside_reason:
+            stand_aside_reason = (
+                "Market data unavailable."
+                if not row.entry
+                else "Stand aside — compelling risk or insufficient conviction."
+            )
+    direction_reasoning = build_direction_reasoning(
+        signal_like,
+        bullish_factors=row.bullish_factors,
+        bearish_factors=row.bearish_factors,
+        stand_aside_reason=stand_aside_reason,
+    )
+    return {
+        "is_actionable": is_actionable,
+        "direction_reasoning": direction_reasoning,
+    }
+
+
 _STRATEGIST_FIELDS = (
     "executive_summary",
     "why_this_grade",
@@ -332,6 +378,7 @@ def serialize_analysis(row: AnalysisSnapshot, market: dict | None = None) -> dic
     # Spread the strategist narrative to top-level fields for easy consumption.
     for key in _STRATEGIST_FIELDS:
         payload[key] = strat.get(key)
+    payload.update(_direction_fields(row))
     return payload
 
 
@@ -348,6 +395,19 @@ def _unavailable_analysis_payload(market, market_meta: dict, news_source: str) -
         "pair": "USDMXN",
         "market_data_unavailable": True,
         "direction": "NO_TRADE",
+        "is_actionable": False,
+        "direction_reasoning": {
+            "directional_bias": "NO_TRADE",
+            "bias_label": "NO TRADE (stand aside)",
+            "confidence": None,
+            "conviction_tier": "none",
+            "is_actionable": False,
+            "supporting_signals": [],
+            "opposing_signals": [],
+            "stand_aside": True,
+            "stand_aside_reason": warning,
+            "summary": f"Stand aside — {warning}",
+        },
         "trade_score": None,
         "market_bias": "NEUTRAL",
         "confidence": None,
@@ -465,7 +525,10 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         probabilities=history.get("probabilities"),
         confidence_breakdown=history.get("confidence_breakdown"),
         strategist=result.get("strategist"),
-        explanations=result.get("explanations"),
+        explanations={
+            **(result.get("explanations") or {}),
+            "direction_reasoning": result.get("direction_reasoning"),
+        },
         evidence_summary=result.get("evidence_summary"),
         entry=result["entry"],
         target=result["target"],

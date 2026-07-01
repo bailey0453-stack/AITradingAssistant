@@ -6,7 +6,7 @@ mode is off, an LLM-backed analyzer can be returned instead. The output schema
 is identical regardless of engine so routers/storage never change.
 
 Analysis result schema:
-    direction: "BUY_USD" | "SELL_USD" | "NO_TRADE"
+    direction: "BUY_USD" | "SELL_USD" | "HOLD" | "NO_TRADE"
     trade_score: float (0..100)
     market_bias: str
     confidence: float (0..100)
@@ -22,7 +22,7 @@ Analysis result schema:
     upcoming_risks: list[dict]      # high/medium events ahead that could move it
     what_would_change_my_mind: list[str]  # concrete conditions that flip the view
     market_regime: dict             # primary/secondary regime + confidence
-    opportunity_grade: str          # A+ | A | B | C | D | PASS (PASS == NO_TRADE)
+    opportunity_grade: str          # A+ | A | B | C | D | PASS (PASS == NO_TRADE only)
     opportunity_grade_detail: dict  # grade score + reasons + components
     # Phase 4.5 strategist narrative (confidence = how sure; grade = how attractive)
     executive_summary: str
@@ -57,6 +57,7 @@ from app.services.market_data import MarketData
 from app.services.market_regime import detect_regime
 from app.services.signals import compute_signal
 from app.services.signal_weights import SCORE_SCALE
+from app.services.direction_policy import apply_stand_aside, build_direction_reasoning
 
 ANALYSIS_FIELDS = (
     "direction",
@@ -88,6 +89,8 @@ ANALYSIS_FIELDS = (
     "weighted_contributions",
     "conflicting_signals",
     "signal_breakdown",
+    "direction_reasoning",
+    "is_actionable",
     # Phase 4.5 strategist narrative
     "executive_summary",
     "why_this_grade",
@@ -248,6 +251,10 @@ class RuleBasedAnalyzer(AIAnalyzer):
             released_events=released_24h,
             momentum=context.get("momentum"),
         )
+        upcoming_risks = self._upcoming_risks(upcoming)
+        signal, stand_aside_reason = apply_stand_aside(
+            signal, upcoming_events=upcoming_risks
+        )
         direction = signal["direction"]
 
         risk_level, event_note = self._risk_with_events(signal["risk_level"], calendar)
@@ -256,8 +263,7 @@ class RuleBasedAnalyzer(AIAnalyzer):
         bullish, bearish = self._directional_factors(
             market_drivers, news, released_24h
         )
-        agree, disagree = self._indicator_agreement(market_drivers, direction)
-        upcoming_risks = self._upcoming_risks(upcoming)
+        agree, disagree = self._indicator_agreement(market_drivers, direction, signal)
 
         # Phase 3.5 reasoning layer: regime, grade, and what would flip the view.
         regime = detect_regime(
@@ -285,9 +291,18 @@ class RuleBasedAnalyzer(AIAnalyzer):
         # Phase 5: how each major score was computed (history-dependent entries
         # are refined by the router once the evidence base is available).
         explanations = self._explanations(signal, grade)
+        direction_reasoning = build_direction_reasoning(
+            signal,
+            bullish_factors=bullish,
+            bearish_factors=bearish,
+            agree=agree,
+            disagree=disagree,
+            stand_aside_reason=stand_aside_reason,
+        )
 
         return {
             "direction": direction,
+            "is_actionable": signal.get("is_actionable", False),
             "trade_score": signal["trade_score"],
             "market_bias": signal["market_bias"],
             "confidence": signal["confidence"],
@@ -316,6 +331,7 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "weighted_contributions": signal["weighted_contributions"],
             "conflicting_signals": signal["conflicting_signals"],
             "signal_breakdown": signal["signal_breakdown"],
+            "direction_reasoning": direction_reasoning,
             # Phase 4.5 strategist narrative (also spread to top level by router).
             "executive_summary": strategist["executive_summary"],
             "why_this_grade": strategist["why_this_grade"],
@@ -484,11 +500,16 @@ class RuleBasedAnalyzer(AIAnalyzer):
 
     @staticmethod
     def _indicator_agreement(
-        market_drivers: list[dict], direction: str
+        market_drivers: list[dict], direction: str, signal: dict | None = None
     ) -> tuple[list[str], list[str]]:
         """Which indicators agree vs disagree with the chosen direction."""
         if direction == "NO_TRADE":
             return [], []
+        if direction == "HOLD" and signal:
+            net = float((signal.get("signal_breakdown") or {}).get("net_score") or 0.0)
+            if abs(net) < 1e-9:
+                return [], []
+            direction = "BUY_USD" if net > 0 else "SELL_USD"
         favored = "USD+" if direction == "BUY_USD" else "MXN+"
         opposed = "MXN+" if direction == "BUY_USD" else "USD+"
         agree = [d["name"] for d in market_drivers if d["lean"] == favored]
@@ -567,16 +588,26 @@ class RuleBasedAnalyzer(AIAnalyzer):
         dir_label = {
             "BUY_USD": "long-USD (USD/MXN higher)",
             "SELL_USD": "short-USD / long-MXN (USD/MXN lower)",
-            "NO_TRADE": "neutral",
+            "HOLD": "neutral HOLD (range-bound)",
+            "NO_TRADE": "stand-aside (no trade)",
         }.get(direction, "neutral")
-        dir_word = {"BUY_USD": "long-USD", "SELL_USD": "short-USD"}.get(direction, "directional")
+        dir_word = {
+            "BUY_USD": "long-USD",
+            "SELL_USD": "short-USD",
+            "HOLD": "neutral",
+        }.get(direction, "directional")
 
         # --- Executive summary -------------------------------------------------
         if direction == "NO_TRADE":
             executive_summary = (
-                f"No actionable USD/MXN edge right now (grade PASS, confidence "
-                f"{conf}/100). Spot ~{_fmt(price)} in a {regime_name} regime with "
-                f"mixed drivers — stand aside until a catalyst confirms direction."
+                f"Stand aside on USD/MXN (grade PASS). Spot ~{_fmt(price)} in a "
+                f"{regime_name} regime — {signal.get('stand_aside_reason') or 'compelling risk or insufficient data'}."
+            )
+        elif direction == "HOLD":
+            executive_summary = (
+                f"Neutral HOLD bias on USD/MXN near {_fmt(price)} in a {regime_name} "
+                f"regime (grade {letter}, confidence {conf}/100). Drivers are mixed — "
+                f"express a lean but do not initiate without confirmation."
             )
         else:
             lead = agree[0] if agree else (
@@ -639,8 +670,13 @@ class RuleBasedAnalyzer(AIAnalyzer):
             supports.append(f"supportive drivers ({lead_factors[0]})")
         if direction == "NO_TRADE":
             why_not_lower = (
-                "There is a mild lean in places, but not enough agreement to justify "
-                "any active exposure."
+                "Stand-aside is appropriate — no committed directional edge or "
+                "compelling risk blocks a lean."
+            )
+        elif direction == "HOLD":
+            why_not_lower = (
+                "Mixed drivers keep conviction low, but the system still expresses "
+                "a best-estimate bias rather than defaulting to no view."
             )
         elif supports:
             why_not_lower = "Supported by " + "; ".join(supports) + "."
@@ -663,10 +699,15 @@ class RuleBasedAnalyzer(AIAnalyzer):
                 f"{_fmt(signal.get('target'))} (stretch {_fmt(signal.get('stretch_target'))}), "
                 f"stop {_fmt(signal.get('stop'))}."
             )
+        elif direction == "HOLD":
+            current_trade_view = (
+                f"Neutral HOLD. Spot ~{_fmt(price)}; bias is range-bound with mixed "
+                f"drivers — reference levels withheld until conviction rises."
+            )
         else:
             current_trade_view = (
-                f"Neutral / flat. Spot ~{_fmt(price)}; no directional conviction — "
-                f"drivers are mixed."
+                f"Stand aside. Spot ~{_fmt(price)}; do not initiate until data "
+                f"and event risk allow a committed bias."
             )
         trader_action = cls._ACTION_BY_GRADE.get(letter, "Monitor.").format(dir=dir_word)
 
@@ -715,7 +756,13 @@ class RuleBasedAnalyzer(AIAnalyzer):
             )
         if direction == "NO_TRADE":
             invalidation_triggers.append(
-                "A decisive, agreeing move in DXY/yields would create a directional edge."
+                "Sufficient weighted signal data and a post-event clearing window "
+                "would allow a committed directional bias."
+            )
+        elif direction == "HOLD":
+            invalidation_triggers.append(
+                "A decisive, agreeing move in DXY/yields would upgrade HOLD to a "
+                "directional trade plan."
             )
 
         return {
@@ -758,9 +805,13 @@ class RuleBasedAnalyzer(AIAnalyzer):
             "target": result.get("target"),
             "stretch_target": result.get("stretch_target"),
             "stop": result.get("stop"),
+            "signal_breakdown": result.get("signal_breakdown"),
+            "stand_aside_reason": (result.get("direction_reasoning") or {}).get(
+                "stand_aside_reason"
+            ),
         }
         agree, disagree = cls._indicator_agreement(
-            result.get("market_drivers") or [], direction
+            result.get("market_drivers") or [], direction, signal_like
         )
         return cls._strategist_narrative(
             market,
@@ -877,7 +928,12 @@ class RuleBasedAnalyzer(AIAnalyzer):
         if direction == "NO_TRADE":
             out.append(
                 "A decisive, agreeing move in DXY/yields or a high-impact data "
-                "surprise would create a directional edge."
+                "surprise would allow a committed directional bias."
+            )
+        elif direction == "HOLD":
+            out.append(
+                "A stronger, one-sided signal stack would upgrade HOLD to an "
+                "actionable BUY or SELL plan."
             )
 
         # A regime shift changes the whole playbook.
@@ -976,7 +1032,7 @@ class RuleBasedAnalyzer(AIAnalyzer):
 
     @staticmethod
     def _expected_duration(signal: dict) -> str:
-        if signal["direction"] == "NO_TRADE":
+        if signal["direction"] in ("NO_TRADE", "HOLD"):
             return "n/a"
         ts = signal.get("trade_score") or 0
         if ts >= 70:
@@ -1046,7 +1102,7 @@ class RuleBasedAnalyzer(AIAnalyzer):
             elif net <= -thr:
                 bias = "SELL_USD"
             else:
-                bias = "NO_TRADE"
+                bias = "HOLD"
 
             # Conviction from one-sidedness, shrunk per horizon and anchored
             # partly to the headline confidence so the horizons stay coherent.
@@ -1086,10 +1142,12 @@ class RuleBasedAnalyzer(AIAnalyzer):
                     conf = min(conf, 45.0)
 
             # An imminent catalyst raises two-way risk -> trim conviction.
-            if window_event is not None and bias != "NO_TRADE":
+            if window_event is not None and bias not in ("NO_TRADE", "HOLD"):
                 conf = min(conf, spec["conf_cap"] - 10.0)
 
-            if bias == "NO_TRADE":
+            if bias == "HOLD":
+                conf = min(conf, 50.0)
+            elif bias == "NO_TRADE":
                 conf = min(conf, 35.0)
             conf = round(max(0.0, conf), 1)
 
@@ -1169,7 +1227,8 @@ class RuleBasedAnalyzer(AIAnalyzer):
         lean = {
             "BUY_USD": "USD strength (USD/MXN higher)",
             "SELL_USD": "peso strength (USD/MXN lower)",
-            "NO_TRADE": "no clear lean",
+            "HOLD": "a neutral / range-bound lean",
+            "NO_TRADE": "no committed lean (stand aside)",
         }.get(bias, "no clear lean")
 
         kind = spec["kind"]
@@ -1251,15 +1310,20 @@ class RuleBasedAnalyzer(AIAnalyzer):
                 f"Look to fade USD toward {signal['target']}, "
                 f"stretch {signal['stretch_target']}."
             )
+        elif direction == "HOLD":
+            bias = (
+                f"Neutral HOLD bias. Spot ~{price}. Mixed drivers — best estimate "
+                f"is range-bound with low conviction."
+            )
         else:
             bias = (
-                f"No clear edge. Spot ~{price}. Drivers are mixed; "
-                f"stay flat until a catalyst confirms direction."
+                f"Stand aside (NO_TRADE). Spot ~{price}. "
+                f"Do not initiate until data or event risk clears."
             )
 
         # The "why": which indicators line up, and which push the other way.
         why = ""
-        if direction != "NO_TRADE":
+        if direction not in ("NO_TRADE",):
             if agree:
                 why += f" Confirming: {', '.join(agree)}."
             if disagree:

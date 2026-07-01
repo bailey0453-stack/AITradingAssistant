@@ -33,7 +33,7 @@ def _risk_level(market: MarketData) -> str:
 
 
 def _expected_move(price: float, target: float | None, direction: str) -> str:
-    if not price or target is None or direction == "NO_TRADE":
+    if not price or target is None or direction in ("NO_TRADE", "HOLD"):
         return "flat / range-bound"
     pct = (target / price - 1.0) * 100.0
     return f"{pct:+.2f}% (spot {price} -> {target})"
@@ -72,6 +72,7 @@ def compute_signal(
         "direction": direction,
         "confidence": scored["confidence"],
         "trade_score": scored["trade_score"],
+        "is_actionable": scored["is_actionable"],
         "market_bias": scored["market_bias"],
         "risk_level": _risk_level(market),
         "score": scored["net_score"],
@@ -92,6 +93,8 @@ def compute_signal(
             "net_score": scored["net_score"],
             "total_score": scored["total_score"],
             "trade_threshold": scored["trade_threshold"],
+            "action_threshold": scored.get("action_threshold"),
+            "direction_epsilon": scored.get("direction_epsilon"),
             "weights_version": scored["weights_version"],
             "weights": scored["weights"],
         },

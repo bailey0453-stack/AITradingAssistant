@@ -91,7 +91,7 @@ def test_endpoints():
             r = c.get("/analysis/usdmxn")
             assert r.status_code == 200, r.status_code
             body = r.json()
-            assert body["direction"] in {"BUY_USD", "SELL_USD", "NO_TRADE"}
+            assert body["direction"] in {"BUY_USD", "SELL_USD", "HOLD", "NO_TRADE"}
             for key in (
                 "trade_score",
                 "market_bias",
@@ -118,6 +118,8 @@ def test_endpoints():
                 "weighted_contributions",
                 "conflicting_signals",
                 "signal_breakdown",
+                "direction_reasoning",
+                "is_actionable",
                 "what_would_change_my_mind",
                 "market_regime",
                 "opportunity_grade",
@@ -151,9 +153,15 @@ def test_endpoints():
                 assert isinstance(body.get(k), str) and body[k], f"missing narrative {k}"
             for k in ("quote_guidance", "risk_watchlist", "invalidation_triggers"):
                 assert isinstance(body.get(k), list) and body[k], f"missing list {k}"
-            # PASS must mean NO_TRADE and never coexist with a direction.
+            # PASS must mean NO_TRADE only; HOLD is a graded neutral bias.
             grade, direction = body["opportunity_grade"], body["direction"]
             assert (grade == "PASS") == (direction == "NO_TRADE"), (grade, direction)
+            if direction == "HOLD":
+                assert grade in {"A+", "A", "B", "C", "D"}, grade
+            dr = body["direction_reasoning"]
+            assert dr["directional_bias"] == direction
+            assert isinstance(dr["supporting_signals"], list)
+            assert isinstance(dr["opposing_signals"], list)
             # Phase 4 historical layer
             for k in ("historical", "probabilities", "confidence_breakdown"):
                 assert k in body, f"analysis missing {k}"
@@ -204,7 +212,7 @@ def test_endpoints():
                 for k in ("bias", "confidence", "target", "stretch_target",
                           "stop", "expected_move", "rationale", "risk_level"):
                     assert k in h, f"horizon missing {k}"
-                assert h["bias"] in {"BUY_USD", "SELL_USD", "NO_TRADE"}, h["bias"]
+                assert h["bias"] in {"BUY_USD", "SELL_USD", "HOLD", "NO_TRADE"}, h["bias"]
                 assert 0 <= h["confidence"] <= 100, h["confidence"]
 
         def news_ok():
@@ -595,12 +603,14 @@ def test_reasoning_engine():
         reg = market_regime_svc.detect_regime(m)
         assert reg["primary"] in {"Range Bound", "Low Volatility"}, reg["primary"]
 
-    def grade_pass_on_no_trade():
+    def grade_hold_on_flat():
         analyzer = RuleBasedAnalyzer()
-        m = _market()  # flat -> NO_TRADE
+        m = _market()  # flat -> HOLD (not NO_TRADE)
         out = analyzer.analyze(m)
-        assert out["direction"] == "NO_TRADE"
-        assert out["opportunity_grade"] == "PASS", out["opportunity_grade"]
+        assert out["direction"] == "HOLD", out["direction"]
+        assert out["opportunity_grade"] != "PASS", out["opportunity_grade"]
+        assert out["direction_reasoning"]["directional_bias"] == "HOLD"
+        assert out["is_actionable"] is False
         assert out["what_would_change_my_mind"], "should suggest what creates an edge"
 
     def grade_letters_on_strong_signal():
@@ -618,7 +628,7 @@ def test_reasoning_engine():
     check("regime: high VIX + risk-off classified", regime_high_vol_risk_off)
     check("regime: Fed event drives Fed Driven", regime_fed_driven_from_calendar)
     check("regime: calm tape -> range bound", regime_defaults_range_bound)
-    check("grade: NO_TRADE -> PASS + WWCM populated", grade_pass_on_no_trade)
+    check("grade: flat market -> HOLD with letter grade", grade_hold_on_flat)
     check("grade: strong signal earns a letter grade", grade_letters_on_strong_signal)
 
 
@@ -688,7 +698,7 @@ def test_strategist_narrative():
             elif grade in {"B", "A", "A+"}:
                 assert direction in {"BUY_USD", "SELL_USD"}, (grade, direction)
             elif grade == "D":
-                assert direction in {"BUY_USD", "SELL_USD"}, (grade, direction)
+                assert direction in {"BUY_USD", "SELL_USD", "HOLD"}, (grade, direction)
 
     def action_wording_is_correct():
         # Deterministic regardless of mock randomness.
@@ -719,10 +729,10 @@ def test_multi_horizon():
             th = r["time_horizons"]
             assert [h["horizon"] for h in th] == ORDER, th
             for h in th:
-                assert h["bias"] in {"BUY_USD", "SELL_USD", "NO_TRADE"}
+                assert h["bias"] in {"BUY_USD", "SELL_USD", "HOLD", "NO_TRADE"}
                 assert 0 <= h["confidence"] <= 100
-                # Directional horizons carry levels; flat horizons do not.
-                if h["bias"] == "NO_TRADE":
+                # Directional horizons carry levels; flat/neutral horizons do not.
+                if h["bias"] in {"NO_TRADE", "HOLD"}:
                     assert h["target"] is None and h["stop"] is None, h
                 else:
                     assert h["target"] is not None and h["stop"] is not None, h
@@ -735,13 +745,11 @@ def test_multi_horizon():
             swing = r["time_horizons"][3]
             assert swing["confidence"] <= 55.0, swing
 
-    def pass_primary_allows_horizon_lean():
-        # PASS keeps the *primary* recommendation NO_TRADE, but horizons MAY lean.
-        # Construct contributions that net flat overall yet lean short-term USD:
-        # strong short-term USD drivers offset by an opposing event signal.
+    def hold_primary_allows_horizon_lean():
+        # HOLD primary can coexist with directional horizon leans.
         market = _market(dxy_delta=0.6, yield_delta=0.08, us2y_delta=0.08)
         signal = {
-            "direction": "NO_TRADE",
+            "direction": "HOLD",
             "confidence": 20.0,
             "trade_score": 5.0,
             "weighted_contributions": [
@@ -755,14 +763,12 @@ def test_multi_horizon():
         }
         horizons = analyzer._time_horizons(market, signal, {"primary": "Fed Driven", "confidence": 50}, [])
         intraday = horizons[0]
-        # Short horizon de-emphasizes the event -> USD lean emerges.
         assert intraday["bias"] == "BUY_USD", intraday
-        # Primary recommendation (overall direction) is unchanged / NO_TRADE.
-        assert signal["direction"] == "NO_TRADE"
+        assert signal["direction"] == "HOLD"
 
     check("multi-horizon: four horizons fully shaped", four_horizons_shaped)
     check("multi-horizon: swing confidence capped low", swing_not_more_confident_than_intraday_baseline)
-    check("multi-horizon: PASS primary still allows horizon lean", pass_primary_allows_horizon_lean)
+    check("multi-horizon: HOLD primary still allows horizon lean", hold_primary_allows_horizon_lean)
 
 
 def test_history_engine():
@@ -1555,6 +1561,19 @@ def test_decision_quality():
 
     init_db()
 
+    def hold_is_wait():
+        db = SessionLocal()
+        try:
+            rec = {"direction": "HOLD", "grade": "D", "trade_score": 15.0,
+                   "confidence": 25.0, "entry": None, "target": None, "stop": None,
+                   "vix": 15.0, "high_impact_event_count": 0}
+            out = dq.assess_recommendation(db, rec)
+            assert out["should_trade_now"] is False
+            assert out["trade_quality_label"] == "Wait", out["trade_quality_label"]
+            assert "HOLD" in (out["reason_to_wait"] or "")
+        finally:
+            db.close()
+
     def pass_no_trade_is_wait():
         db = SessionLocal()
         try:
@@ -1723,6 +1742,7 @@ def test_decision_quality():
             sp = c.get("/decision/selective-performance").json()
             assert "filters" in sp and "all_trades" in sp, sp
 
+    check("HOLD -> should_trade_now=false, label Wait", hold_is_wait)
     check("PASS / NO_TRADE -> should_trade_now=false, label Wait", pass_no_trade_is_wait)
     check("weak C grade explains why to wait", weak_grade_explains_wait)
     check("B/A/A+ with supporting R/R -> should_trade_now=true", strong_grade_with_good_rr_can_trade)

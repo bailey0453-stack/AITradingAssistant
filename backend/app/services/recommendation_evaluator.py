@@ -167,7 +167,7 @@ def _score(reco: Recommendation, spot_eval: float,
         mae = (spot0 - hi) / spot0 * 100 if spot0 else None
         ttt = _first_crossing_hours(series, created, reco.target, above=False)
         tts = _first_crossing_hours(series, created, reco.stop, above=True)
-    else:  # NO_TRADE / PASS: "correct" when price stayed essentially flat.
+    else:  # NO_TRADE / HOLD / PASS: "correct" when price stayed essentially flat.
         correct = (abs(ret) <= 0.10) if ret is not None else None
         target_hit = stretch_hit = stop_hit = False
         mfe = (hi - spot0) / spot0 * 100 if spot0 else None

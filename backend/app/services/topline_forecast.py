@@ -37,7 +37,7 @@ def _entry(label: str, rate: Optional[float], bias: Optional[str],
     return {
         "horizon": label,
         "expected_rate": round(rate, 4) if rate is not None else None,
-        "bias": bias or "NO_TRADE",
+        "bias": bias or "HOLD",
         "confidence": round(float(confidence), 1) if confidence is not None else 0.0,
         "expected_move_pct": _move_pct(rate, spot),
     }
@@ -88,8 +88,19 @@ def _explanation(
             f"the reverse long-thesis level is {long_bailout:g}. "
             "Estimates — decision support only, not execution."
         )
+    if direction == "HOLD":
+        return (
+            f"Neutral HOLD bias around spot {spot:g}: expected rates are "
+            "range-bound and bailout levels are N/A until conviction rises. "
+            "Decision support only."
+        )
+    if direction == "NO_TRADE":
+        return (
+            f"Stand aside (NO_TRADE) around spot {spot:g}: no committed bias; "
+            "bailout levels are N/A. Decision support only."
+        )
     return (
-        f"No directional edge (NO_TRADE) around spot {spot:g}: expected rates are "
+        f"No directional edge around spot {spot:g}: expected rates are "
         "range-bound and bailout levels are N/A. Decision support only."
     )
 
@@ -107,7 +118,7 @@ def build(payload: dict) -> dict:
     multiday = by_name.get(_MULTIDAY, {})
 
     intraday_target = intraday.get("target")
-    intraday_bias = intraday.get("bias", "NO_TRADE")
+    intraday_bias = intraday.get("bias", "HOLD")
     intraday_conf = intraday.get("confidence", 0.0)
 
     def interp(frac: float) -> Optional[float]:
@@ -120,9 +131,9 @@ def build(payload: dict) -> dict:
         _entry("1 hour", interp(0.25), intraday_bias, intraday_conf, spot),
         _entry("2 hours", interp(0.5), intraday_bias, intraday_conf, spot),
         _entry("4 hours", interp(1.0), intraday_bias, intraday_conf, spot),
-        _entry(_EOD, eod.get("target"), eod.get("bias", "NO_TRADE"),
+        _entry(_EOD, eod.get("target"), eod.get("bias", "HOLD"),
                eod.get("confidence", 0.0), spot),
-        _entry("24 hours", multiday.get("target"), multiday.get("bias", "NO_TRADE"),
+        _entry("24 hours", multiday.get("target"), multiday.get("bias", "HOLD"),
                multiday.get("confidence", 0.0), spot),
     ]
 
