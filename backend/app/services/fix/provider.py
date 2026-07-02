@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from app.config import Settings, get_settings
@@ -13,6 +14,32 @@ from app.services.fix.centroid_md_session import (
 from app.services.fix.quote_store import FixQuoteStore
 from app.services.fix.simulation import SimulatedOrder
 from app.services.secrets import scrub
+
+_HEARTBEAT_STALE_SECONDS = 90
+
+
+def _scrub_text(text: str | None, settings: Settings) -> str | None:
+    if not text:
+        return text
+    return scrub(text, settings.centroid_md_password, settings.centroid_md_username)
+
+
+def _format_reject_display(
+    last_inbound: dict[str, Any],
+    requested_symbol: str | None,
+) -> str | None:
+    """Human-readable reject line for dashboard/API."""
+    text = last_inbound.get("text") or last_inbound.get("raw_reject_text")
+    if not text:
+        return None
+    sym = requested_symbol or "?"
+    if "invalid symbol" in text.lower():
+        return f"Market data request rejected: Invalid Symbol ({sym})"
+    msg_type = last_inbound.get("msg_type")
+    label = last_inbound.get("msg_type_label") or msg_type
+    if msg_type in {"Y", "j", "3"}:
+        return f"Market data request rejected ({label}): {text}"
+    return text
 
 
 def get_fix_quote(symbol: str | None = None, settings: Settings | None = None) -> dict | None:
@@ -28,20 +55,67 @@ def get_fix_diagnostics(settings: Settings | None = None) -> dict[str, Any]:
     store = FixQuoteStore.get()
     sym = settings.centroid_md_symbol_usdmxn or "USD/MXN"
     payload = store.diagnostics(primary_symbol=sym)
+
+    session = dict(payload.get("session") or {})
+    last_md = dict(payload.get("last_md_request") or {})
+    last_inbound = dict(payload.get("last_inbound") or {})
+
+    if session.get("last_error"):
+        session["last_error"] = _scrub_text(session["last_error"], settings)
+    session["warnings"] = [
+        _scrub_text(w, settings) or w for w in (session.get("warnings") or [])
+    ]
+
+    for key in ("text", "raw_reject_text", "md_req_reject_reason"):
+        if last_inbound.get(key):
+            last_inbound[key] = _scrub_text(last_inbound[key], settings)
+
+    now = datetime.now(timezone.utc)
+    hb_at = session.get("last_heartbeat_at")
+    heartbeat_ok = False
+    if hb_at:
+        try:
+            hb_dt = datetime.fromisoformat(hb_at.replace("Z", "+00:00"))
+            heartbeat_ok = (now - hb_dt).total_seconds() <= _HEARTBEAT_STALE_SECONDS
+        except ValueError:
+            heartbeat_ok = False
+
+    md_status = session.get("md_subscription_status") or "none"
+    requested_symbol = last_md.get("symbol") or sym
+
+    payload["connection"] = {
+        "status": session.get("status"),
+        "tcp_connected": bool(session.get("tcp_connected")),
+        "fix_logged_on": bool(session.get("fix_logged_on")),
+        "logon_accepted_at": session.get("last_logon_at"),
+        "sender_comp_id": session.get("sender_comp_id"),
+        "target_comp_id": session.get("target_comp_id"),
+        "host": session.get("host"),
+        "port": session.get("port"),
+        "ssl_enabled": bool(session.get("ssl_enabled")),
+        "outbound_seq": session.get("outbound_seq"),
+        "inbound_seq": session.get("inbound_seq"),
+        "heartbeat_ok": heartbeat_ok,
+        "last_heartbeat_at": session.get("last_heartbeat_at"),
+    }
+    payload["market_data_subscription"] = {
+        "status": md_status,
+        "requested_symbol": requested_symbol,
+        "active": md_status == "accepted",
+        "reject_display": _format_reject_display(last_inbound, requested_symbol)
+        if md_status == "rejected"
+        else None,
+    }
+    payload["last_md_request"] = last_md
+    payload["last_inbound"] = last_inbound
+    payload["session"] = session
+
     payload["configured"] = settings.centroid_md_enabled
+    payload["config_complete"] = settings.centroid_md_configured
+    payload["configured_symbol_env"] = sym
     payload["phase"] = "1_read_only_market_data"
     payload["trading_enabled"] = False
     payload["simulation_only"] = True
-    if payload.get("session", {}).get("last_error"):
-        payload["session"]["last_error"] = scrub(
-            payload["session"]["last_error"],
-            settings.centroid_md_password,
-            settings.centroid_md_username,
-        )
-    for i, w in enumerate(payload.get("session", {}).get("warnings") or []):
-        payload["session"]["warnings"][i] = scrub(
-            w, settings.centroid_md_password, settings.centroid_md_username
-        )
     payload["credentials"] = {
         "md_host_set": bool(settings.centroid_md_host),
         "md_username_set": bool(settings.centroid_md_username),

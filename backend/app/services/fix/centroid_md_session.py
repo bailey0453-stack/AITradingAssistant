@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from app.services.fix.codec import SOH, field_map, split_messages
+from app.services.fix.codec import field_map, split_messages
 from app.services.fix.messages import (
     build_heartbeat,
     build_logon,
@@ -21,7 +21,7 @@ from app.services.fix.parser import (
     parse_market_data_incremental,
     parse_market_data_snapshot,
 )
-from app.services.fix.quote_store import FixQuoteStore
+from app.services.fix.quote_store import FIX_MSG_TYPE_LABELS, FixQuoteStore
 from app.services.secrets import scrub
 
 if TYPE_CHECKING:
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _HEARTBEAT_INTERVAL = 30
 _RECV_BUFFER = 65536
+_REJECT_MSG_TYPES = frozenset({"3", "Y", "j"})
 
 
 class CentroidMarketDataSession:
@@ -64,6 +65,14 @@ class CentroidMarketDataSession:
             getattr(self.settings, "centroid_md_username", None),
         )
 
+    def _safe_raw_summary(self, fmap: dict[str, str], msg_type: str) -> str:
+        """Compact, redacted FIX summary for diagnostics (no passwords)."""
+        parts = [f"35={msg_type}"]
+        for tag in ("34", "49", "56", "262", "55", "58", "372", "373", "380", "381"):
+            if tag in fmap:
+                parts.append(f"{tag}={self._scrub(fmap[tag])}")
+        return " ".join(parts)
+
     def start_background(self) -> None:
         if not self.configured:
             logger.info("Centroid FIX MD not configured — skipping session start.")
@@ -89,7 +98,12 @@ class CentroidMarketDataSession:
                 self._sock.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.store.set_health(status="disconnected")
+        self.store.set_health(
+            status="disconnected",
+            tcp_connected=False,
+            fix_logged_on=False,
+            md_subscription_status="none",
+        )
 
     def _run_loop(self) -> None:
         while not self._stop.is_set():
@@ -98,7 +112,7 @@ class CentroidMarketDataSession:
             except Exception as exc:  # noqa: BLE001
                 msg = self._scrub(str(exc))
                 logger.warning("Centroid FIX MD session error: %s", msg)
-                self.store.set_health(status="error", last_error=msg)
+                self.store.set_health(status="error", last_error=msg, tcp_connected=False)
             self._close_socket()
             if not self._stop.is_set():
                 time.sleep(5)
@@ -113,6 +127,9 @@ class CentroidMarketDataSession:
             sender_comp_id=self.settings.centroid_md_sender_comp_id,
             target_comp_id=self.settings.centroid_md_target_comp_id,
             ssl_enabled=bool(self.settings.centroid_md_ssl),
+            tcp_connected=False,
+            fix_logged_on=False,
+            md_subscription_status="none",
         )
         raw_sock = socket.create_connection((host, port), timeout=15)
         raw_sock.settimeout(1.0)
@@ -122,26 +139,33 @@ class CentroidMarketDataSession:
         else:
             self._sock = raw_sock
 
+        self.store.set_health(tcp_connected=True)
+
         if self.settings.centroid_md_reset_on_logon:
             self._out_seq = 1
             self._in_seq = 1
 
         self._send_logon()
         symbol = self.settings.centroid_md_symbol_usdmxn or "USD/MXN"
-        self._md_req_id = f"MD-USDMXN-{int(time.time())}"
-        self._send(
-            build_market_data_request(
-                seq_num=self._next_out_seq(),
-                sender_comp_id=self.settings.centroid_md_sender_comp_id or "",
-                target_comp_id=self.settings.centroid_md_target_comp_id or "",
-                symbol=symbol,
-                md_req_id=self._md_req_id,
-            )
+        self._md_req_id = f"MD-{int(time.time())}"
+        md_msg = build_market_data_request(
+            seq_num=self._next_out_seq(),
+            sender_comp_id=self.settings.centroid_md_sender_comp_id or "",
+            target_comp_id=self.settings.centroid_md_target_comp_id or "",
+            symbol=symbol,
+            md_req_id=self._md_req_id,
         )
+        self.store.record_md_request(
+            md_req_id=self._md_req_id,
+            symbol=symbol,
+            subscription_request_type="1",
+            market_depth="1",
+            md_update_type="1",
+            entry_types=["0", "1"],
+        )
+        self._send(md_msg)
         self.store.set_health(
             status="connected",
-            subscribed_symbol=symbol,
-            md_req_id=self._md_req_id,
             outbound_seq=self._out_seq,
             inbound_seq=self._in_seq,
         )
@@ -175,6 +199,13 @@ class CentroidMarketDataSession:
         except ValueError:
             pass
 
+        if msg_type in _REJECT_MSG_TYPES or msg_type in FIX_MSG_TYPE_LABELS:
+            self.store.record_inbound(
+                msg_type=msg_type,
+                fmap=fmap,
+                raw_summary=self._safe_raw_summary(fmap, msg_type),
+            )
+
         if msg_type == "0":
             self.store.set_health(
                 last_heartbeat_at=datetime.now(timezone.utc),
@@ -186,6 +217,7 @@ class CentroidMarketDataSession:
         elif msg_type == "A":
             self.store.set_health(
                 status="connected",
+                fix_logged_on=True,
                 last_logon_at=datetime.now(timezone.utc),
             )
         elif msg_type == "W":
@@ -198,9 +230,26 @@ class CentroidMarketDataSession:
             sym = parsed.get("symbol") or self.settings.centroid_md_symbol_usdmxn
             if sym:
                 self.store.update_quote(sym, bid=parsed.get("bid"), ask=parsed.get("ask"))
-        elif msg_type in {"Y", "3", "j"}:
-            text = fmap.get("58") or fmap.get("372") or "market data rejected"
-            self.store.set_health(last_error=self._scrub(text), warnings=[self._scrub(text)])
+        elif msg_type == "Y":
+            text = fmap.get("58") or fmap.get("372") or "market data request rejected"
+            cleaned = self._scrub(text)
+            self.store.set_health(
+                md_subscription_status="rejected",
+                last_error=cleaned,
+                warnings=[cleaned],
+            )
+        elif msg_type == "j":
+            text = fmap.get("58") or "business message reject"
+            cleaned = self._scrub(text)
+            self.store.set_health(
+                md_subscription_status="rejected",
+                last_error=cleaned,
+                warnings=[cleaned],
+            )
+        elif msg_type == "3":
+            text = fmap.get("58") or fmap.get("373") or "session reject"
+            cleaned = self._scrub(text)
+            self.store.set_health(last_error=cleaned, warnings=[cleaned])
         elif msg_type == "5":
             text = fmap.get("58", "logout")
             raise ConnectionError(self._scrub(text))
@@ -261,6 +310,7 @@ class CentroidMarketDataSession:
             except Exception:  # noqa: BLE001
                 pass
         self._sock = None
+        self.store.set_health(tcp_connected=False)
 
 
 # Module-level session manager

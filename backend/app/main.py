@@ -269,12 +269,18 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Centroid FIX Market Data <span id="fix_md_badge" class="src">—</span></h2>
       <p class="muted" style="margin:4px 0 10px">Phase 1 — executable bid/ask from GFC/Centroid FIX (read-only; no orders sent).</p>
       <div class="row">
-        <div class="stat"><div class="k">Status</div><div class="v" id="fix_status">—</div></div>
-        <div class="stat"><div class="k">Symbol</div><div class="v" id="fix_symbol">—</div></div>
+        <div class="stat"><div class="k">Connection</div><div class="v" id="fix_status">—</div></div>
+        <div class="stat"><div class="k">MD subscription</div><div class="v" id="fix_md_sub">—</div></div>
+        <div class="stat"><div class="k">Requested symbol</div><div class="v" id="fix_requested_symbol">—</div></div>
         <div class="stat"><div class="k">Bid</div><div class="v" id="fix_bid">—</div></div>
         <div class="stat"><div class="k">Ask</div><div class="v" id="fix_ask">—</div></div>
         <div class="stat"><div class="k">Spread</div><div class="v" id="fix_spread">—</div></div>
-        <div class="stat"><div class="k">Last update</div><div class="v" id="fix_updated">—</div></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div class="stat"><div class="k">Last quote</div><div class="v" id="fix_updated">—</div></div>
+        <div class="stat"><div class="k">Quote count</div><div class="v" id="fix_quote_count">—</div></div>
+        <div class="stat"><div class="k">Last FIX msg in</div><div class="v" id="fix_last_msg_type" style="font-size:14px">—</div></div>
+        <div class="stat"><div class="k">Last reject</div><div class="v" id="fix_reject" style="font-size:13px">—</div></div>
       </div>
       <p class="muted" id="fix_health" style="margin-top:10px;font-size:12px"></p>
     </div>
@@ -1455,24 +1461,43 @@ DASHBOARD_HTML = """<!doctype html>
         badge.textContent = 'offline'; badge.className = 'src error';
         return;
       }
-      const sess = fx.session || {};
+      const conn = fx.connection || {};
+      const mdSub = fx.market_data_subscription || {};
+      const inbound = fx.last_inbound || {};
       const quote = fx.quote || {};
-      const st = sess.status || (fx.configured ? 'disconnected' : 'not_configured');
-      badge.textContent = st;
-      badge.className = 'src ' + (st === 'connected' ? 'live' : (st === 'not_configured' ? 'fallback' : 'error'));
+      const sess = fx.session || {};
+
+      const st = conn.status || sess.status || (fx.configured ? 'disconnected' : 'not_configured');
+      const mdStatus = (mdSub.status || 'none').toUpperCase();
+      badge.textContent = mdStatus === 'ACCEPTED' ? 'live' : (mdStatus === 'REJECTED' ? 'rejected' : st);
+      badge.className = 'src ' + (
+        mdStatus === 'ACCEPTED' ? 'live' :
+        mdStatus === 'REJECTED' ? 'error' :
+        (st === 'connected' ? 'live' : (st === 'not_configured' ? 'fallback' : 'error'))
+      );
+
       fill('fix_status', st);
-      fill('fix_symbol', quote.symbol || sess.subscribed_symbol || '—');
+      fill('fix_md_sub', mdStatus);
+      fill('fix_requested_symbol', mdSub.requested_symbol || fx.configured_symbol_env || '—');
       fill('fix_bid', quote.bid != null ? Number(quote.bid).toFixed(5) : '—');
       fill('fix_ask', quote.ask != null ? Number(quote.ask).toFixed(5) : '—');
       fill('fix_spread', quote.spread != null ? Number(quote.spread).toFixed(5) : '—');
       $('fix_updated').textContent = fmtTime(quote.updated_at || sess.last_quote_at);
-      const hb = fmtTime(sess.last_heartbeat_at);
-      const err = sess.last_error ? (' · ' + sess.last_error) : '';
+      fill('fix_quote_count', fx.quote_count != null ? fx.quote_count : (sess.quotes_received_count ?? '—'));
+      $('fix_last_msg_type').textContent = inbound.msg_type_label || inbound.msg_type || '—';
+
+      const rejectLine = mdSub.reject_display || inbound.text || sess.last_error || '—';
+      $('fix_reject').textContent = rejectLine;
+
+      const hb = fmtTime(conn.last_heartbeat_at || sess.last_heartbeat_at);
+      const tcp = conn.tcp_connected ? 'TCP ok' : 'TCP —';
+      const logon = conn.fix_logged_on ? 'logon ok' : 'logon —';
+      const hbOk = conn.heartbeat_ok ? 'heartbeat ok' : 'heartbeat —';
       $('fix_health').textContent =
-        'Session health: heartbeat '+hb+
-        (fx.trading_enabled ? '' : ' · read-only (no orders)')+
-        (fx.configured ? '' : ' · set CENTROID_MD_* env vars + CENTROID_MD_ENABLED=true')+
-        err;
+        tcp + ' · ' + logon + ' · ' + hbOk + ' · last hb ' + hb +
+        (fx.trading_enabled ? '' : ' · read-only (no orders)') +
+        (fx.configured ? '' : ' · set CENTROID_MD_* + CENTROID_MD_ENABLED=true') +
+        (mdSub.status === 'pending' ? ' · awaiting MD snapshot (35=W) or incremental (35=X)' : '');
     }
 
     // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).

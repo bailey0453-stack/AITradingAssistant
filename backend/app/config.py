@@ -8,6 +8,7 @@ secret by default; real API keys are supplied via environment variables.
 from functools import lru_cache
 from typing import Dict, List, Optional
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -121,7 +122,13 @@ class Settings(BaseSettings):
     centroid_md_target_comp_id: Optional[str] = None
     centroid_md_ssl: bool = False
     centroid_md_reset_on_logon: bool = True
-    centroid_md_symbol_usdmxn: str = "USD/MXN"
+    centroid_md_symbol_usdmxn: str = Field(
+        default="USD/MXN",
+        validation_alias=AliasChoices(
+            "centroid_symbol_usdmxn",
+            "centroid_md_symbol_usdmxn",
+        ),
+    )
     # Explicit enable gate (set true in production when MD session should run).
     centroid_md_enabled: bool = False
 

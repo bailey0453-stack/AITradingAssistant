@@ -3316,7 +3316,41 @@ def test_centroid_fix_phase1():
             body = r.json()
             assert body.get("phase") == "1_read_only_market_data", body
             assert "session" in body and "credentials" in body, body
+            assert "connection" in body and "last_md_request" in body, body
+            assert "last_inbound" in body and "market_data_subscription" in body, body
             assert "password" not in str(body).lower() or "md_password_set" in str(body), body
+
+    def expanded_md_diagnostics():
+        FixQuoteStore.reset()
+        store = FixQuoteStore.get()
+        store.record_md_request(
+            md_req_id="MD-TEST",
+            symbol="USD/MXN",
+            subscription_request_type="1",
+            market_depth="1",
+            md_update_type="1",
+            entry_types=["0", "1"],
+        )
+        store.record_inbound(
+            msg_type="Y",
+            fmap={"58": "Invalid Symbol: USD/MXN", "262": "MD-TEST"},
+            raw_summary="35=Y 58=Invalid Symbol: USD/MXN",
+        )
+        store.set_health(md_subscription_status="rejected")
+        from app.config import Settings
+
+        diag = get_fix_diagnostics(Settings(centroid_symbol_usdmxn="USD/MXN"))
+        assert diag["last_md_request"]["symbol"] == "USD/MXN", diag
+        assert diag["last_md_request"]["md_req_id"] == "MD-TEST", diag
+        assert diag["last_inbound"]["msg_type"] == "Y", diag
+        assert diag["market_data_subscription"]["status"] == "rejected", diag
+        assert diag["market_data_subscription"]["active"] is False, diag
+        reject = diag["market_data_subscription"]["reject_display"]
+        assert reject == "Market data request rejected: Invalid Symbol (USD/MXN)", reject
+        store.update_quote("EUR/USD", bid=1.1, ask=1.2)
+        diag2 = get_fix_diagnostics(Settings(centroid_symbol_usdmxn="EUR/USD"))
+        assert diag2["market_data_subscription"]["status"] == "accepted", diag2
+        assert diag2["market_data_subscription"]["active"] is True, diag2
 
     check("FIX checksum + body length validation", checksum_and_body_length)
     check("FIX logon message", logon_message_shape)
@@ -3325,6 +3359,7 @@ def test_centroid_fix_phase1():
     check("FIX diagnostics redact secrets", diagnostics_redact_secrets)
     check("FIX simulation order is not live", simulation_order_not_live)
     check("GET /diagnostics/fix responds", fix_diagnostics_endpoint)
+    check("FIX expanded MD diagnostics", expanded_md_diagnostics)
 
 
 def test_grade_calibration():
