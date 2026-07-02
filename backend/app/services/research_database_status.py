@@ -37,18 +37,93 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_DATABASE_VERSION = "1.0"
 
-# Extensible coverage registry: key -> (research column, raw series names).
+# Per-field coverage registry with provider / FRED series metadata for diagnostics.
+SERIES_COVERAGE_META: dict[str, dict[str, Any]] = {
+    "usdmxn": {
+        "label": "USD/MXN",
+        "column": "usdmxn",
+        "raw_series": ["USDMXN", "USDMXN_1H"],
+        "provider": "yahoo",
+        "fred_series_id": None,
+    },
+    "dxy": {
+        "label": "DXY",
+        "column": "dxy",
+        "raw_series": ["DXY"],
+        "provider": "fred",
+        "fred_series_id": "DTWEXBGS",
+    },
+    "gold": {
+        "label": "Gold",
+        "column": "gold",
+        "raw_series": ["GOLD"],
+        "provider": "yahoo",
+        "fred_series_id": None,
+    },
+    "oil": {
+        "label": "Oil",
+        "column": "oil",
+        "raw_series": ["OIL"],
+        "provider": "fred",
+        "fred_series_id": "DCOILWTICO",
+    },
+    "sp500": {
+        "label": "S&P 500",
+        "column": "sp500",
+        "raw_series": ["SP500", "SP_FUTURES"],
+        "provider": "yahoo",
+        "fred_series_id": None,
+    },
+    "vix": {
+        "label": "VIX",
+        "column": "vix",
+        "raw_series": ["VIX"],
+        "provider": "fred",
+        "fred_series_id": "VIXCLS",
+    },
+    "us2y": {
+        "label": "US 2Y Treasury",
+        "column": "us2y",
+        "raw_series": ["US2Y"],
+        "provider": "fred",
+        "fred_series_id": "DGS2",
+    },
+    "us10y": {
+        "label": "US 10Y Treasury",
+        "column": "us10y",
+        "raw_series": ["US10Y"],
+        "provider": "fred",
+        "fred_series_id": "DGS10",
+    },
+    "fed_funds": {
+        "label": "Fed Funds Rate",
+        "column": "fed_funds",
+        "raw_series": ["FED_FUNDS"],
+        "provider": "fred",
+        "fred_series_id": "FEDFUNDS",
+    },
+    "banxico_rate": {
+        "label": "Banxico Rate",
+        "column": "banxico_rate",
+        "raw_series": [],
+        "provider": None,
+        "fred_series_id": None,
+        "availability": "not_configured",
+        "message": (
+            "Banxico policy rate source not configured — Banxico meeting events are "
+            "imported; daily policy-rate history requires a future provider."
+        ),
+    },
+}
+
+# Back-compat alias used by tests.
 COVERAGE_FIELDS: dict[str, dict[str, Any]] = {
-    "usdmxn": {"label": "USD/MXN", "column": "usdmxn", "series": ["USDMXN", "USDMXN_1H"]},
-    "dxy": {"label": "DXY", "column": "dxy", "series": ["DXY"]},
-    "gold": {"label": "Gold", "column": "gold", "series": ["GOLD"]},
-    "oil": {"label": "Oil", "column": "oil", "series": ["OIL"]},
-    "sp500": {"label": "S&P 500", "column": "sp500", "series": ["SP500", "SP_FUTURES"]},
-    "vix": {"label": "VIX", "column": "vix", "series": ["VIX"]},
-    "us2y": {"label": "US 2Y Treasury", "column": "us2y", "series": ["US2Y"]},
-    "us10y": {"label": "US 10Y Treasury", "column": "us10y", "series": ["US10Y"]},
-    "fed_funds": {"label": "Fed Funds Rate", "column": "fed_funds", "series": ["FED_FUNDS"]},
-    "banxico_rate": {"label": "Banxico Rate", "column": "banxico_rate", "series": ["BANXICO_RATE"]},
+    k: {
+        "label": v["label"],
+        "column": v["column"],
+        "series": v.get("raw_series") or [],
+    }
+    for k, v in SERIES_COVERAGE_META.items()
 }
 
 # Extensible economic event registry.
@@ -64,6 +139,7 @@ EVENT_TYPES: dict[str, dict[str, Any]] = {
 _STATUS_OK = "current"
 _STATUS_WARN = "missing"
 _STATUS_UPD = "updating"
+_STATUS_NA = "not_configured"
 
 
 def _safe(fn, default=None):
@@ -92,50 +168,170 @@ def _coverage_status(pct: float | None, rows: int) -> str:
     return _STATUS_WARN
 
 
-def _field_coverage(db: Session, column: str, series_names: list[str]) -> dict:
-    total_research = _safe(
-        lambda: db.execute(select(func.count(ResearchMarketSnapshot.id))).scalar() or 0,
-        0,
-    )
-    if total_research:
-        col = getattr(ResearchMarketSnapshot, column, None)
-        if col is not None:
-            filled = _safe(
-                lambda: db.execute(
-                    select(func.count(ResearchMarketSnapshot.id)).where(col.isnot(None))
-                ).scalar()
-                or 0,
-                0,
-            )
-            pct = filled / total_research if total_research else 0.0
-            return {
-                "status": _coverage_status(pct, total_research),
-                "coverage_pct": round(pct * 100, 1),
-                "filled_days": int(filled),
-                "source": "research_market_snapshots",
-            }
-
-    # Fallback: raw imported series bars exist?
-    raw = 0
+def _raw_series_count(db: Session, series_names: list[str]) -> int:
+    if not series_names:
+        return 0
+    total = 0
     for name in series_names:
-        raw += _safe(
-            lambda n=name: db.execute(
-                select(func.count(HistoricalMarketSnapshot.id)).where(
-                    HistoricalMarketSnapshot.series == n
-                )
-            ).scalar()
-            or 0,
+        total += _safe(
+            lambda n=name: int(
+                db.execute(
+                    select(func.count(HistoricalMarketSnapshot.id)).where(
+                        HistoricalMarketSnapshot.series == n
+                    )
+                ).scalar()
+                or 0
+            ),
             0,
         )
-    if raw > 0:
+    return total
+
+
+def _raw_series_with_value_count(db: Session, series_names: list[str]) -> int:
+    if not series_names:
+        return 0
+    total = 0
+    for name in series_names:
+        total += _safe(
+            lambda n=name: int(
+                db.execute(
+                    select(func.count(HistoricalMarketSnapshot.id)).where(
+                        HistoricalMarketSnapshot.series == n,
+                        HistoricalMarketSnapshot.value.isnot(None),
+                    )
+                ).scalar()
+                or 0
+            ),
+            0,
+        )
+    return total
+
+
+def _mapped_snapshot_count(db: Session, column: str) -> int:
+    col = getattr(ResearchMarketSnapshot, column, None)
+    if col is None:
+        return 0
+    return _safe(
+        lambda: int(
+            db.execute(
+                select(func.count(ResearchMarketSnapshot.id)).where(col.isnot(None))
+            ).scalar()
+            or 0
+        ),
+        0,
+    )
+
+
+def _field_coverage(db: Session, meta: dict[str, Any], *, settings) -> dict:
+    column = meta["column"]
+    raw_series = meta.get("raw_series") or meta.get("series") or []
+    total_research = _safe(
+        lambda: int(db.execute(select(func.count(ResearchMarketSnapshot.id))).scalar() or 0),
+        0,
+    )
+    raw_points = _raw_series_count(db, raw_series)
+    raw_with_value = _raw_series_with_value_count(db, raw_series)
+    mapped = _mapped_snapshot_count(db, column)
+
+    provider = meta.get("provider")
+    fred_id = meta.get("fred_series_id")
+    availability = meta.get("availability")
+
+    diag: dict[str, Any] = {
+        "provider": provider,
+        "fred_series_id": fred_id,
+        "raw_series": raw_series,
+        "raw_point_count": raw_points,
+        "raw_points_with_value": raw_with_value,
+        "mapped_snapshot_count": mapped,
+        "last_import_error": None,
+    }
+
+    if availability == "not_configured":
+        msg = meta.get("message") or "Source not configured."
+        return {
+            "status": _STATUS_NA,
+            "coverage_pct": None,
+            "filled_days": mapped,
+            "source": "none",
+            "detail": msg,
+            **diag,
+        }
+
+    if provider == "fred" and not getattr(settings, "fred_api_key", None):
+        err = "FRED_API_KEY not configured on server."
+        return {
+            "status": _STATUS_WARN,
+            "coverage_pct": 0.0,
+            "filled_days": mapped,
+            "source": "none",
+            "detail": err,
+            "last_import_error": err,
+            **diag,
+        }
+
+    if total_research:
+        pct = mapped / total_research if total_research else 0.0
+        detail_parts = [
+            f"Provider: {provider or '—'}",
+            f"FRED series: {fred_id or '—'}",
+            f"Raw points: {raw_points} ({raw_with_value} with value)",
+            f"Mapped snapshots: {mapped}/{total_research}",
+        ]
+        if raw_points > 0 and raw_with_value == 0:
+            detail_parts.append(
+                "Raw rows exist but scalar values missing — run Daily Incremental Update "
+                "to backfill FRED scalar values, then rebuild snapshots."
+            )
+        elif raw_with_value > 0 and mapped == 0:
+            detail_parts.append(
+                "Values imported but not merged — run Daily Incremental Update (snapshots stage)."
+            )
+        return {
+            "status": _coverage_status(pct, total_research),
+            "coverage_pct": round(pct * 100, 1),
+            "filled_days": mapped,
+            "source": "research_market_snapshots",
+            "detail": " · ".join(detail_parts),
+            **diag,
+        }
+
+    if raw_with_value > 0:
         return {
             "status": _STATUS_UPD,
             "coverage_pct": None,
-            "filled_days": raw,
+            "filled_days": raw_with_value,
             "source": "historical_market_snapshots",
-            "detail": "Raw series imported; not yet merged into daily snapshots.",
+            "detail": (
+                f"Provider: {provider or '—'} · FRED: {fred_id or '—'} · "
+                f"{raw_with_value} raw points with values — not yet merged into daily snapshots."
+            ),
+            **diag,
         }
-    return {"status": _STATUS_WARN, "coverage_pct": 0.0, "filled_days": 0, "source": "none"}
+    if raw_points > 0:
+        return {
+            "status": _STATUS_WARN,
+            "coverage_pct": 0.0,
+            "filled_days": 0,
+            "source": "historical_market_snapshots",
+            "detail": (
+                f"Provider: {provider or '—'} · FRED: {fred_id or '—'} · "
+                f"{raw_points} raw rows without scalar values — re-run FRED import stage."
+            ),
+            "last_import_error": "Raw series rows missing scalar value column.",
+            **diag,
+        }
+    return {
+        "status": _STATUS_WARN,
+        "coverage_pct": 0.0,
+        "filled_days": 0,
+        "source": "none",
+        "detail": (
+            f"Provider: {provider or '—'} · FRED: {fred_id or '—'} · "
+            "No raw or mapped data — run Import Historical Data."
+        ),
+        **diag,
+    }
 
 
 def _event_counts(db: Session) -> dict[str, dict]:
@@ -189,8 +385,8 @@ def research_database_status(db: Session) -> dict:
     )
 
     coverage = {}
-    for key, meta in COVERAGE_FIELDS.items():
-        cov = _field_coverage(db, meta["column"], meta["series"])
+    for key, meta in SERIES_COVERAGE_META.items():
+        cov = _field_coverage(db, meta, settings=settings)
         coverage[key] = {"label": meta["label"], **cov}
 
     events = _event_counts(db)
@@ -246,6 +442,18 @@ def research_database_status(db: Session) -> dict:
 
     warnings: list[str] = list(hist.get("warnings") or [])
     errors: list[str] = []
+    for key, cov in coverage.items():
+        if cov.get("status") == _STATUS_NA and cov.get("detail"):
+            warnings.append(f"{cov['label']}: {cov['detail']}")
+        elif cov.get("status") == _STATUS_WARN and cov.get("last_import_error"):
+            warnings.append(f"{cov['label']}: {cov['last_import_error']}")
+        elif (
+            cov.get("status") == _STATUS_WARN
+            and int(cov.get("raw_point_count") or 0) > 0
+            and int(cov.get("mapped_snapshot_count") or 0) == 0
+            and key != "banxico_rate"
+        ):
+            warnings.append(f"{cov['label']}: imported but not mapped into research snapshots.")
     if not database_is_persistent():
         warnings.append("Storage is ephemeral — research data may not survive redeploys.")
     if research_total == 0:

@@ -101,7 +101,9 @@ def _load_daily_panel(db: Session) -> dict[date, dict]:
         col = _SERIES_COLUMN.get(series_key)
         if col:
             attr = "sp_futures" if col == "sp500" else col
-            val = getattr(row, attr, None)
+            val = getattr(row, attr, None) if attr in _TYPED_COLUMNS else None
+            if val is None:
+                val = row.value
             if val is not None:
                 _merge(row.ts, col, val)
         for typed in _TYPED_COLUMNS:

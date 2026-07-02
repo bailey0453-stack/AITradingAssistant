@@ -56,6 +56,8 @@ class HistoricalMarketSnapshot(Base):
     gold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     vix: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     sp_futures: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Generic scalar for macro series without a dedicated column (FED_FUNDS, US_CPI, …).
+    value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     regime: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     # Provenance — never confuse a vendor tick with a reconstructed proxy.

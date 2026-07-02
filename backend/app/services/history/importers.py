@@ -161,6 +161,7 @@ class HistoricalImporter(ABC):
             value = bar.get("value")
             if column and value is not None and fields.get(column) is None:
                 fields[column] = value
+            scalar = value if value is not None else None
             db.add(
                 HistoricalMarketSnapshot(
                     series=series,
@@ -168,6 +169,7 @@ class HistoricalImporter(ABC):
                     regime=bar.get("regime"),
                     source=self.name,
                     source_quality=self.source_quality,
+                    value=scalar,
                     **fields,
                 )
             )
@@ -927,8 +929,8 @@ class FREDImporter(HistoricalImporter):
         "FED_FUNDS": "FEDFUNDS",
         "US_CPI": "CPIAUCSL",
         "US_PCE": "PCEPI",
-        "BANXICO_RATE": "INTDSRMXM193N",
         "MEXICO_CPI": "FPCPITOTLZGMEX",
+        # Banxico daily policy rate: no free authoritative series configured (see SERIES_COVERAGE_META).
     }
 
     def __init__(self, settings=None, lookback_days: int = 1825) -> None:

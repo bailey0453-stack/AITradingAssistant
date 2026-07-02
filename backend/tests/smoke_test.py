@@ -2266,6 +2266,64 @@ def test_historical_backfill():
     check("research snapshot builder merges imported series", research_snapshot_builder_merges_series)
 
 
+def test_fed_funds_and_banxico_coverage_diagnostics():
+    """FRED scalar series persist via value column; Banxico rate marked not configured."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.database import SessionLocal, init_db
+    from app.models import HistoricalMarketSnapshot, ResearchMarketSnapshot
+    from app.services.history.snapshot_builder import build_research_snapshots
+    from app.services.research_database_status import (
+        SERIES_COVERAGE_META,
+        research_database_status,
+    )
+
+    init_db()
+
+    def fed_funds_maps_into_snapshots():
+        db = SessionLocal()
+        try:
+            db.query(ResearchMarketSnapshot).delete()
+            db.query(HistoricalMarketSnapshot).delete()
+            db.commit()
+            ts = datetime(2024, 6, 3, tzinfo=timezone.utc)
+            db.add(HistoricalMarketSnapshot(
+                series="USDMXN", ts=ts, usdmxn=18.0, source="test", source_quality="imported",
+            ))
+            db.add(HistoricalMarketSnapshot(
+                series="FED_FUNDS", ts=ts, value=5.25, source="fred", source_quality="official",
+            ))
+            db.commit()
+            built = build_research_snapshots(db, source="test", source_quality="imported")
+            assert built["snapshots"] >= 1, built
+            snap = db.execute(
+                select(ResearchMarketSnapshot).where(
+                    ResearchMarketSnapshot.trade_date == ts.date()
+                )
+            ).scalars().first()
+            assert snap is not None and snap.fed_funds == 5.25
+        finally:
+            db.close()
+
+    def banxico_marked_not_configured():
+        db = SessionLocal()
+        try:
+            status = research_database_status(db)
+            ff = status["market_data_coverage"]["fed_funds"]
+            assert ff["fred_series_id"] == "FEDFUNDS"
+            bx = status["market_data_coverage"]["banxico_rate"]
+            assert bx["status"] == "not_configured", bx
+            assert "not configured" in (bx.get("detail") or "").lower()
+            assert SERIES_COVERAGE_META["banxico_rate"]["availability"] == "not_configured"
+        finally:
+            db.close()
+
+    check("FED_FUNDS scalar maps into research snapshots", fed_funds_maps_into_snapshots)
+    check("Banxico policy rate marked not configured in diagnostics", banxico_marked_not_configured)
+
+
 def test_research_database_status_panel():
     """Research Database Status endpoint (read-only dashboard panel)."""
     from app.database import SessionLocal, init_db
@@ -3052,6 +3110,7 @@ def main():
     test_provenance_engine()
     test_historical_backfill()
     test_research_database_status_panel()
+    test_fed_funds_and_banxico_coverage_diagnostics()
     test_research_import_admin()
     test_stale_fallback()
     test_topline_forecast()

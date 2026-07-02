@@ -250,14 +250,28 @@ def persist_series_bars(
     for series, ts in rows:
         existing.add((series, _as_date(ts)))
 
-    added = 0
+    added = updated = 0
     for bar in bars:
         series = bar.get("series", "USDMXN")
         ts = bar["ts"]
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         key = (series, _as_date(ts))
+        value = bar.get("value")
         if key in existing:
+            if value is not None:
+                day = _as_date(ts)
+                day_start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+                day_end = day_start + timedelta(days=1)
+                existing_row = db.execute(
+                    select(HistoricalMarketSnapshot)
+                    .where(HistoricalMarketSnapshot.series == series)
+                    .where(HistoricalMarketSnapshot.ts >= day_start)
+                    .where(HistoricalMarketSnapshot.ts < day_end)
+                ).scalars().first()
+                if existing_row is not None and existing_row.value is None:
+                    existing_row.value = value
+                    updated += 1
             continue
         column = SERIES_COLUMN.get(series)
         fields = {
@@ -270,7 +284,6 @@ def persist_series_bars(
             "vix": bar.get("vix"),
             "sp_futures": bar.get("sp_futures"),
         }
-        value = bar.get("value")
         if column and value is not None and fields.get(column) is None:
             fields[column] = value
         db.add(
@@ -280,14 +293,15 @@ def persist_series_bars(
                 regime=bar.get("regime"),
                 source=source,
                 source_quality=source_quality,
+                value=value,
                 **fields,
             )
         )
         existing.add(key)
         added += 1
-    if added:
+    if added or updated:
         db.commit()
-    return added
+    return added + updated
 
 
 def _create_job(

@@ -170,6 +170,12 @@ def _apply_additive_migrations() -> None:
         stmts.append(
             "ALTER TABLE similarity_matches ADD COLUMN research_snapshot_id INTEGER"
         )
+    if insp.has_table("historical_market_snapshots"):
+        hcols = {c["name"] for c in insp.get_columns("historical_market_snapshots")}
+        if "value" not in hcols:
+            stmts.append(
+                "ALTER TABLE historical_market_snapshots ADD COLUMN value FLOAT"
+            )
     # matched_event_id may have been NOT NULL on older deployments.
     if engine.dialect.name == "postgresql":
         stmts.append(

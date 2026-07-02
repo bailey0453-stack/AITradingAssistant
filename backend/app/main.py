@@ -154,6 +154,7 @@ DASHBOARD_HTML = """<!doctype html>
     .rds-icon.current { color:#5be3a0; }
     .rds-icon.missing { color:#ffd98a; }
     .rds-icon.updating { color:#7fd0ff; }
+    .rds-icon.na { color:#a0aec0; }
     .rds-detail { display:none; margin-top:10px; padding-top:10px; border-top:1px dashed #1d2740; font-size:12px; color:#8aa0c6; line-height:1.5; }
     .rds-section.open .rds-detail { display:block; }
     .rds-warn { color:#ffd98a; font-size:12px; margin-top:10px; }
@@ -781,7 +782,14 @@ DASHBOARD_HTML = """<!doctype html>
     function rdsIcon(st){
       if(st==='current') return '<span class="rds-icon current" title="Current">✓</span>';
       if(st==='updating') return '<span class="rds-icon updating" title="Updating">⟳</span>';
+      if(st==='not_configured') return '<span class="rds-icon na" title="Not configured">—</span>';
       return '<span class="rds-icon missing" title="Missing">⚠</span>';
+    }
+    function rdsCovPct(c){
+      if(c.status==='not_configured') return 'N/A';
+      if(c.coverage_pct!=null) return c.coverage_pct+'%';
+      if(c.filled_days) return c.filled_days+' pts';
+      return '—';
     }
     function rdsRow(k,v,icon){
       return '<div class="rds-row"><span class="rds-k">'+(icon||'')+k+'</span><span class="rds-v">'+v+'</span></div>';
@@ -974,12 +982,17 @@ DASHBOARD_HTML = """<!doctype html>
       let covHtml = '', covDetail = [];
       Object.keys(cov).forEach(function(k){
         const c = cov[k]||{};
-        const pct = c.coverage_pct!=null ? c.coverage_pct+'%' : (c.filled_days? c.filled_days+' pts':'—');
+        const pct = rdsCovPct(c);
         covHtml += rdsRow(c.label||k, pct, rdsIcon(c.status));
-        if(c.detail) covDetail.push((c.label||k)+': '+c.detail);
+        if(c.detail) covDetail.push('<b>'+(c.label||k)+'</b>: '+c.detail);
+        else if(c.provider || c.fred_series_id){
+          covDetail.push((c.label||k)+': provider='+(c.provider||'—')+
+            ', FRED='+(c.fred_series_id||'—')+
+            ', raw='+(c.raw_point_count??0)+', mapped='+(c.mapped_snapshot_count??0));
+        }
       });
       $('rds_cov_rows').innerHTML = covHtml || '<div class="muted">No coverage data.</div>';
-      $('rds_cov_detail').innerHTML = covDetail.join('<br>') || 'Click a series to see import source. Coverage % = share of research snapshot days with a non-null value.';
+      $('rds_cov_detail').innerHTML = covDetail.join('<br>') || 'Click Market Data Coverage to see provider, FRED series ID, raw/mapped counts, and import errors.';
 
       const ev = s.economic_events || {};
       let evHtml = '';
