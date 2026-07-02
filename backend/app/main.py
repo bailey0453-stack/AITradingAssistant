@@ -23,6 +23,7 @@ from app.routers import (
     calendar,
     decision,
     diagnostics,
+    fix_admin,
     health,
     history,
     jobs,
@@ -48,7 +49,24 @@ async def lifespan(app: FastAPI):
             "Database initialization failed at startup; continuing so /health "
             "remains available."
         )
+    fix_session = None
+    try:
+        from app.services.fix.provider import ensure_fix_session_started, stop_fix_session
+
+        settings = get_settings()
+        if settings.centroid_md_enabled and settings.centroid_md_configured:
+            ensure_fix_session_started(settings)
+            fix_session = True
+    except Exception:  # noqa: BLE001
+        logger.exception("Centroid FIX MD startup failed; continuing without FIX feed.")
     yield
+    if fix_session:
+        try:
+            from app.services.fix.provider import stop_fix_session
+
+            stop_fix_session(get_settings())
+        except Exception:  # noqa: BLE001
+            logger.exception("Centroid FIX MD shutdown error.")
 
 
 settings = get_settings()
@@ -77,6 +95,7 @@ app.include_router(decision.router)
 app.include_router(jobs.router)
 app.include_router(admin_research.router)
 app.include_router(diagnostics.router)
+app.include_router(fix_admin.router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -244,6 +263,20 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Gold <span class="src" id="fs_gold">—</span></div><div class="v" id="gold">—</div></div>
         <div class="stat"><div class="k">VIX <span class="src" id="fs_vix">—</span></div><div class="v" id="vix">—</div></div>
       </div>
+    </div>
+
+    <div class="card" id="fix_md_card" style="border-left:4px solid #6b46c1">
+      <h2>Centroid FIX Market Data <span id="fix_md_badge" class="src">—</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Phase 1 — executable bid/ask from GFC/Centroid FIX (read-only; no orders sent).</p>
+      <div class="row">
+        <div class="stat"><div class="k">Status</div><div class="v" id="fix_status">—</div></div>
+        <div class="stat"><div class="k">Symbol</div><div class="v" id="fix_symbol">—</div></div>
+        <div class="stat"><div class="k">Bid</div><div class="v" id="fix_bid">—</div></div>
+        <div class="stat"><div class="k">Ask</div><div class="v" id="fix_ask">—</div></div>
+        <div class="stat"><div class="k">Spread</div><div class="v" id="fix_spread">—</div></div>
+        <div class="stat"><div class="k">Last update</div><div class="v" id="fix_updated">—</div></div>
+      </div>
+      <p class="muted" id="fix_health" style="margin-top:10px;font-size:12px"></p>
     </div>
 
     <div class="grid2">
@@ -1409,8 +1442,37 @@ DASHBOARD_HTML = """<!doctype html>
       loadPerformance();
       loadScheduler();
       loadDiagnostics();
+      loadFixMarketData();
       loadResearchDatabase();
       loadResearchImportAdmin();
+    }
+
+    async function loadFixMarketData(){
+      const badge = $('fix_md_badge'); if(!badge) return;
+      let fx;
+      try { fx = await (await fetch('/diagnostics/fix')).json(); }
+      catch(e){
+        badge.textContent = 'offline'; badge.className = 'src error';
+        return;
+      }
+      const sess = fx.session || {};
+      const quote = fx.quote || {};
+      const st = sess.status || (fx.configured ? 'disconnected' : 'not_configured');
+      badge.textContent = st;
+      badge.className = 'src ' + (st === 'connected' ? 'live' : (st === 'not_configured' ? 'fallback' : 'error'));
+      fill('fix_status', st);
+      fill('fix_symbol', quote.symbol || sess.subscribed_symbol || '—');
+      fill('fix_bid', quote.bid != null ? Number(quote.bid).toFixed(5) : '—');
+      fill('fix_ask', quote.ask != null ? Number(quote.ask).toFixed(5) : '—');
+      fill('fix_spread', quote.spread != null ? Number(quote.spread).toFixed(5) : '—');
+      $('fix_updated').textContent = fmtTime(quote.updated_at || sess.last_quote_at);
+      const hb = fmtTime(sess.last_heartbeat_at);
+      const err = sess.last_error ? (' · ' + sess.last_error) : '';
+      $('fix_health').textContent =
+        'Session health: heartbeat '+hb+
+        (fx.trading_enabled ? '' : ' · read-only (no orders)')+
+        (fx.configured ? '' : ' · set CENTROID_MD_* env vars + CENTROID_MD_ENABLED=true')+
+        err;
     }
 
     // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).

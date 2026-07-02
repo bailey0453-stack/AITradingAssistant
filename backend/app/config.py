@@ -112,6 +112,40 @@ class Settings(BaseSettings):
     # weekend schedule always applies regardless.
     market_holidays: Optional[List[str]] = None
 
+    # --- Centroid/GFC FIX 4.4 (Phase 1 — market data read-only) ---
+    centroid_md_host: Optional[str] = None
+    centroid_md_port: Optional[int] = None
+    centroid_md_username: Optional[str] = None
+    centroid_md_password: Optional[str] = None
+    centroid_md_sender_comp_id: Optional[str] = None
+    centroid_md_target_comp_id: Optional[str] = None
+    centroid_md_ssl: bool = False
+    centroid_md_reset_on_logon: bool = True
+    centroid_md_symbol_usdmxn: str = "USD/MXN"
+    # Explicit enable gate (set true in production when MD session should run).
+    centroid_md_enabled: bool = False
+
+    # Trading session (Phase 2+) — documented only; unused in Phase 1.
+    centroid_td_host: Optional[str] = None
+    centroid_td_port: Optional[int] = None
+    centroid_td_username: Optional[str] = None
+    centroid_td_password: Optional[str] = None
+    centroid_td_sender_comp_id: Optional[str] = None
+    centroid_td_target_comp_id: Optional[str] = None
+    centroid_td_account: Optional[str] = None
+    centroid_td_ssl: bool = False
+    centroid_td_reset_on_logon: bool = True
+
+    @property
+    def centroid_md_configured(self) -> bool:
+        """True when minimum FIX MD connection settings are present."""
+        return bool(
+            self.centroid_md_host
+            and self.centroid_md_port
+            and self.centroid_md_sender_comp_id
+            and self.centroid_md_target_comp_id
+        )
+
     @property
     def is_mock(self) -> bool:
         """Global mock toggle. Mock mode is on whenever USE_MOCK_DATA is true."""

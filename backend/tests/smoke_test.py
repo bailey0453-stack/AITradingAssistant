@@ -3199,6 +3199,134 @@ def test_persistent_storage():
     check("/diagnostics/db reports storage + counts", diagnostics_endpoint_reports_storage)
 
 
+def test_centroid_fix_phase1():
+    """Centroid/GFC FIX 4.4 codec, messages, and snapshot parsing (no live socket)."""
+    from datetime import datetime, timezone
+
+    from app.services.fix import codec, messages, parser
+    from app.services.fix.provider import get_fix_diagnostics
+    from app.services.fix.quote_store import FixQuoteStore
+    from app.services.fix.simulation import build_simulated_order
+    from app.services.secrets import scrub
+
+    ts = "20260101-12:00:00.000"
+
+    def checksum_and_body_length():
+        msg = messages.build_heartbeat(
+            seq_num=2,
+            sender_comp_id="CLIENT",
+            target_comp_id="GFC",
+            sending_time=ts,
+        )
+        v = codec.validate_message(msg)
+        assert v["valid"], v
+        assert v["declared_body_length"] == v["actual_body_length"], v
+        assert v["declared_checksum"] == v["actual_checksum"], v
+
+    def logon_message_shape():
+        msg = messages.build_logon(
+            seq_num=1,
+            sender_comp_id="CLIENT",
+            target_comp_id="GFC",
+            username="user",
+            password="secret",
+            reset_seq_num=True,
+            sending_time=ts,
+        )
+        assert "35=A" in msg and "553=user" in msg and "554=secret" in msg, msg
+        assert "141=Y" in msg, msg
+        v = codec.validate_message(msg)
+        assert v["valid"], v
+
+    def market_data_request_shape():
+        msg = messages.build_market_data_request(
+            seq_num=3,
+            sender_comp_id="CLIENT",
+            target_comp_id="GFC",
+            symbol="USD/MXN",
+            md_req_id="MD-TEST",
+            sending_time=ts,
+        )
+        assert "35=V" in msg and "55=USD/MXN" in msg and "262=MD-TEST" in msg, msg
+        assert "263=1" in msg and "269=0" in msg and "269=1" in msg, msg
+        v = codec.validate_message(msg)
+        assert v["valid"], v
+
+    def snapshot_parsing():
+        snap = (
+            "8=FIX.4.4\x019=999\x0135=W\x0149=GFC\x0156=CLIENT\x0134=5\x0152="
+            + ts
+            + "\x0155=USD/MXN\x01268=2\x01269=0\x01270=18.1234\x01271=1000000"
+            "\x01269=1\x01270=18.1250\x012711000000\x0110=000\x01"
+        )
+        # Fix checksum by rebuilding a valid minimal snapshot
+        body_fields = [
+            ("35", "W"),
+            ("49", "GFC"),
+            ("56", "CLIENT"),
+            ("34", "5"),
+            ("52", ts),
+            ("55", "USD/MXN"),
+            ("268", "2"),
+            ("269", "0"),
+            ("270", "18.1234"),
+            ("271", "1000000"),
+            ("269", "1"),
+            ("270", "18.1250"),
+            ("271", "1000000"),
+        ]
+        snap = codec.encode_message(
+            "W",
+            body_fields[5:],
+            seq_num=5,
+            sender_comp_id="GFC",
+            target_comp_id="CLIENT",
+            sending_time=ts,
+        )
+        parsed = parser.parse_market_data_snapshot(snap)
+        assert parsed["symbol"] == "USD/MXN", parsed
+        assert parsed["bid"] == 18.1234, parsed
+        assert parsed["ask"] == 18.1250, parsed
+
+    def diagnostics_redact_secrets():
+        FixQuoteStore.reset()
+        store = FixQuoteStore.get()
+        store.set_health(status="error", last_error="bad password secret123")
+        from app.config import Settings
+
+        diag = get_fix_diagnostics(
+            Settings(
+                centroid_md_password="secret123",
+                centroid_md_username="user",
+            )
+        )
+        assert "secret123" not in str(diag), diag
+        assert diag["trading_enabled"] is False, diag
+
+    def simulation_order_not_live():
+        order = build_simulated_order("USD/MXN", "BUY", 100000)
+        assert order.status == "simulation_only", order
+        assert "simulation only" in order.note.lower(), order.note
+        assert order.order_id.startswith("SIM-"), order.order_id
+
+    def fix_diagnostics_endpoint():
+        with TestClient(app) as c:
+            r = c.get("/diagnostics/fix")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            assert body.get("phase") == "1_read_only_market_data", body
+            assert "session" in body and "credentials" in body, body
+            assert "password" not in str(body).lower() or "md_password_set" in str(body), body
+
+    check("FIX checksum + body length validation", checksum_and_body_length)
+    check("FIX logon message", logon_message_shape)
+    check("FIX market data request message", market_data_request_shape)
+    check("FIX market data snapshot parsing", snapshot_parsing)
+    check("FIX diagnostics redact secrets", diagnostics_redact_secrets)
+    check("FIX simulation order is not live", simulation_order_not_live)
+    check("GET /diagnostics/fix responds", fix_diagnostics_endpoint)
+
+
 def test_grade_calibration():
     from app.services.grade_engine import compute_opportunity_grade
     from app.services.market_data import MarketData
@@ -3283,6 +3411,7 @@ def main():
     test_topline_forecast()
     test_scheduled_jobs()
     test_persistent_storage()
+    test_centroid_fix_phase1()
     test_grade_calibration()
     test_scrub()
     print(f"\n{_passed} passed, {_failed} failed")

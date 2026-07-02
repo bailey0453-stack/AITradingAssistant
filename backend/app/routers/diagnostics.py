@@ -83,3 +83,11 @@ def grade_calibration(
 def research_database_panel(db: Session = Depends(get_db)) -> dict:
     """Read-only Research Database Status for the dashboard health panel."""
     return research_database_status(db)
+
+
+@router.get("/fix")
+def fix_market_data_diagnostics() -> dict:
+    """Read-only Centroid/GFC FIX market-data session status (no secrets)."""
+    from app.services.fix.provider import get_fix_diagnostics
+
+    return get_fix_diagnostics()

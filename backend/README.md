@@ -948,6 +948,25 @@ Optional live providers (omit to keep mock news/calendar):
 | `CALENDAR_API_KEY` | `<Trading Economics key>` | **Secret** — enables live calendar |
 | `CRON_SECRET` | `<random string>` | **Secret** — protects `/jobs/*`; Vercel Cron sends it as `Authorization: Bearer`. Required for the hourly job in production. |
 
+Optional Centroid/GFC FIX market data (Phase 1 — read-only; requires always-on host for persistent TCP):
+
+| Variable | Value | Notes |
+| --- | --- | --- |
+| `CENTROID_MD_ENABLED` | `true` | Start FIX MD session at startup |
+| `CENTROID_MD_HOST` | `<demo MD host>` | FIX market-data host |
+| `CENTROID_MD_PORT` | `<port>` | FIX MD port |
+| `CENTROID_MD_USERNAME` | `<username>` | **Secret** — Tag 553 |
+| `CENTROID_MD_PASSWORD` | `<password>` | **Secret** — Tag 554; never logged |
+| `CENTROID_MD_SENDER_COMP_ID` | `<sender>` | Tag 49 |
+| `CENTROID_MD_TARGET_COMP_ID` | `<target>` | Tag 56 |
+| `CENTROID_MD_SSL` | `true` / `false` | TLS wrapper |
+| `CENTROID_MD_RESET_ON_LOGON` | `true` | Reset seq on logon |
+| `CENTROID_MD_SYMBOL_USDMXN` | `USD/MXN` | MD subscribe symbol |
+
+**Live FIX quotes require a persistent worker** — they do not work from Vercel serverless alone.
+See [`docs/CENTROID_FIX.md`](docs/CENTROID_FIX.md) for architecture and hosting options.
+Future trading session vars (`CENTROID_TD_*`) are documented in `.env.example` but unused in Phase 1.
+
 Optional: set `DATABASE_URL` to a Postgres URL for durable storage. By default
 the app uses SQLite; on Vercel it writes to `/tmp/aitrading.db`, which is
 **ephemeral per instance** (fine for Phase 1, snapshots are not shared across
