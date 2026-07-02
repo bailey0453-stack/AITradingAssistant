@@ -25,8 +25,9 @@ from __future__ import annotations
 import logging
 import random
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import HistoricalEvent, HistoricalEventReaction, HistoricalMarketSnapshot
@@ -208,12 +209,32 @@ class HistoricalImporter(ABC):
                 out["errors"].append(f"series: {exc}")
         return out
 
-    def run(self, db: Session) -> dict:
+    def run(
+        self,
+        db: Session,
+        *,
+        since_date: date | None = None,
+        skip_duplicates: bool = False,
+    ) -> dict:
         """Import events + reaction paths into the historical tables."""
         events = self.fetch_events()
         n_events = n_reactions = n_points = 0
+        n_skipped = 0
+
+        existing_keys: set[tuple[str, datetime]] = set()
+        if skip_duplicates:
+            rows = db.execute(
+                select(HistoricalEvent.event_type, HistoricalEvent.release_time)
+            ).all()
+            existing_keys = {(t, r) for t, r in rows}
 
         for ev in events:
+            release = ev["release_time"]
+            if since_date is not None and release.date() < since_date:
+                continue
+            if skip_duplicates and (ev["event_type"], release) in existing_keys:
+                n_skipped += 1
+                continue
             sigma = _SURPRISE_SIGMA.get(ev["event_type"], 1.0) or 1.0
             actual, forecast = ev.get("actual"), ev.get("forecast")
             surprise = (
@@ -302,6 +323,8 @@ class HistoricalImporter(ABC):
             )
             n_reactions += 1
             n_events += 1
+            if skip_duplicates:
+                existing_keys.add((ev["event_type"], release))
 
         db.commit()
         return {
@@ -309,6 +332,7 @@ class HistoricalImporter(ABC):
             "events": n_events,
             "reactions": n_reactions,
             "price_points": n_points,
+            "skipped_duplicates": n_skipped,
         }
 
 

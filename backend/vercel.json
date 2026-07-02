@@ -18,6 +18,14 @@
     {
       "path": "/jobs/hourly-usdmxn-analysis",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/jobs/research-import-continue",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/jobs/daily-research-update",
+      "schedule": "0 23 * * 1-5"
     }
   ]
 }

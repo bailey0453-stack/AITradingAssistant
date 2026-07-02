@@ -29,6 +29,7 @@ from app.services import cache_manager, research_lab
 from app.services.history.historical_events import history_diagnostics
 from app.services.history.historical_snapshots import COMPARABLE_MIN_SIMILARITY
 from app.services.history.importers import get_importer
+from app.services.research_import_service import get_import_overview
 from app.services.scheduled_jobs import job_status
 from app.versions import HISTORICAL_ENGINE_VERSION, version_tags
 
@@ -248,9 +249,20 @@ def research_database_status(db: Session) -> dict:
     if not database_is_persistent():
         warnings.append("Storage is ephemeral — research data may not survive redeploys.")
     if research_total == 0:
-        warnings.append("Research database empty — run: python -m app.scripts.backfill_history --importer research")
+        warnings.append(
+            "Research database empty — use Import Historical Data on the dashboard, "
+            "or wait for the automatic bootstrap cron."
+        )
     for err in hist.get("errors") or []:
         errors.append(str(err))
+
+    import_overview = get_import_overview(db)
+    active_import = import_overview.get("active_job")
+    if active_import and active_import.get("status") == "running":
+        warnings.append(
+            f"Historical import in progress ({active_import.get('current_importer', '…')}) — "
+            f"{active_import.get('progress_pct', 0)}% complete."
+        )
 
     comparable_pool = research_total if is_research else int(counts.get("historical_event_reactions") or 0)
     avg_sample = min(25, comparable_pool) if comparable_pool else 0
@@ -337,5 +349,6 @@ def research_database_status(db: Session) -> dict:
             "source_quality": get_importer(settings.history_importer).source_quality,
             "lookback_days": settings.history_lookback_days,
         },
+        "historical_import": import_overview,
     }
     return payload

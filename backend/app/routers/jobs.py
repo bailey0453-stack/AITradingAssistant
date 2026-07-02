@@ -21,6 +21,10 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.services.scheduled_jobs import job_status, run_hourly_usdmxn_job
+from app.services.research_import_service import (
+    cron_daily_research_update,
+    cron_research_import_continue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,3 +75,23 @@ def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
 def jobs_status(db: Session = Depends(get_db)) -> dict:
     """Scheduler status for the dashboard (no auth; read-only, no secrets)."""
     return job_status(db)
+
+
+@router.api_route(
+    "/research-import-continue",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_cron_auth)],
+)
+def research_import_continue(db: Session = Depends(get_db)) -> dict:
+    """Advance a running research import or bootstrap if the DB is empty."""
+    return cron_research_import_continue(db)
+
+
+@router.api_route(
+    "/daily-research-update",
+    methods=["POST", "GET"],
+    dependencies=[Depends(require_cron_auth)],
+)
+def daily_research_update(db: Session = Depends(get_db)) -> dict:
+    """Daily incremental research database update (cron-triggered)."""
+    return cron_daily_research_update(db)

@@ -249,8 +249,8 @@ def history_diagnostics(db: Session) -> dict:
         warnings.append("No historical reactions or research snapshots — history will be seeded on first use.")
     elif reaction_class == "sample" and counts["research_market_snapshots"] == 0:
         warnings.append(
-            "Similarity is using SAMPLE data only. Run a real backfill "
-            "(python -m app.scripts.backfill_history --importer research) to upgrade."
+            "Similarity is using SAMPLE data only. Use Import Historical Data on the "
+            "dashboard (Research Database panel) to load real history."
         )
     elif counts["research_market_snapshots"] > 0:
         bounds = research_snapshot_bounds(db)

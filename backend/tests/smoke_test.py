@@ -2286,6 +2286,7 @@ def test_research_database_status_panel():
                 "historical_research_database", "market_data_coverage",
                 "economic_events", "research_statistics", "ai_learning",
                 "data_freshness", "system_health", "database_version",
+                "historical_import",
             ):
                 assert key in body, (key, list(body.keys()))
             assert len(body["market_data_coverage"]) == len(COVERAGE_FIELDS)
@@ -2302,6 +2303,95 @@ def test_research_database_status_panel():
 
     check("GET /diagnostics/research-database responds", endpoint_responds)
     check("research_database_status aggregates without error", service_is_read_only_fast)
+
+
+def test_research_import_admin():
+    """Admin research import endpoints (staged, resumable, no CLI)."""
+    from datetime import date, timedelta
+    from unittest.mock import patch
+
+    from app.database import SessionLocal, init_db
+    from app.services.research_import_service import (
+        FULL_STAGES,
+        get_import_overview,
+        run_import_step,
+        start_full_import,
+    )
+
+    init_db()
+
+    def overview_endpoint():
+        with TestClient(app) as c:
+            r = c.get("/admin/research/import")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            assert "can_start_full" in body
+            assert "can_start_incremental" in body
+
+    def staged_import_completes_with_mocks():
+        db = SessionLocal()
+        try:
+            with patch(
+                "app.services.research_import_service.YahooFinanceImporter.fetch_series",
+                return_value=[],
+            ), patch(
+                "app.services.research_import_service.FREDImporter.fetch_series",
+                return_value=[],
+            ), patch(
+                "app.services.research_import_service.FREDEconomicEventsImporter.run",
+                return_value={"events": 0, "reactions": 0, "price_points": 0},
+            ), patch(
+                "app.services.research_import_service.build_research_snapshots",
+                return_value={"snapshots": 3, "start_date": "2020-01-01", "end_date": "2020-01-03"},
+            ):
+                started = start_full_import(db, force=True)
+                assert started.get("ok"), started
+                job_uuid = started["job"]["job_uuid"]
+                for _ in range(len(FULL_STAGES) + 2):
+                    step = run_import_step(db, job_uuid)
+                    if step.get("completed"):
+                        break
+                overview = get_import_overview(db)
+                assert overview["last_completed_job"] is not None
+                assert overview["last_completed_job"]["status"] == "completed"
+        finally:
+            db.close()
+
+    def duplicate_full_import_blocked():
+        db = SessionLocal()
+        try:
+            with patch(
+                "app.services.research_import_service._research_imported_count",
+                return_value=150,
+            ):
+                gate = get_import_overview(db)["can_start_full"]
+            assert gate["allowed"] is False, gate
+            assert gate["reason"] == "already_imported"
+        finally:
+            db.close()
+
+    def post_full_in_mock_mode():
+        with TestClient(app) as c:
+            with patch(
+                "app.services.research_import_service.YahooFinanceImporter.fetch_series",
+                return_value=[],
+            ), patch(
+                "app.services.research_import_service.FREDImporter.fetch_series",
+                return_value=[],
+            ), patch(
+                "app.services.research_import_service.FREDEconomicEventsImporter.run",
+                return_value={"events": 0, "reactions": 0, "price_points": 0},
+            ), patch(
+                "app.services.research_import_service.build_research_snapshots",
+                return_value={"snapshots": 1},
+            ):
+                r = c.post("/admin/research/import/full?force=true")
+                assert r.status_code == 200, (r.status_code, r.text)
+
+    check("GET /admin/research/import overview", overview_endpoint)
+    check("staged import completes with mocked providers", staged_import_completes_with_mocks)
+    check("duplicate full import blocked when snapshots exist", duplicate_full_import_blocked)
+    check("POST /admin/research/import/full works in mock mode", post_full_in_mock_mode)
 
 
 def test_stale_fallback():
@@ -2962,6 +3052,7 @@ def main():
     test_provenance_engine()
     test_historical_backfill()
     test_research_database_status_panel()
+    test_research_import_admin()
     test_stale_fallback()
     test_topline_forecast()
     test_scheduled_jobs()

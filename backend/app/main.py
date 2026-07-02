@@ -26,6 +26,7 @@ from app.routers import (
     health,
     history,
     jobs,
+    admin_research,
     market,
     news,
     performance,
@@ -74,6 +75,7 @@ app.include_router(research.router)
 app.include_router(performance.router)
 app.include_router(decision.router)
 app.include_router(jobs.router)
+app.include_router(admin_research.router)
 app.include_router(diagnostics.router)
 
 
@@ -156,6 +158,20 @@ DASHBOARD_HTML = """<!doctype html>
     .rds-section.open .rds-detail { display:block; }
     .rds-warn { color:#ffd98a; font-size:12px; margin-top:10px; }
     .rds-warn.err { color:#ff9bb5; }
+    .rds-admin { margin-top:16px; padding-top:16px; border-top:1px solid #1d2740; }
+    .rds-admin h3 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:#8aa0c6; }
+    .rds-admin-actions { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+    .rds-btn { background:#1a365d; color:#e8eef8; border:1px solid #2a5a7a; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; }
+    .rds-btn:hover:not(:disabled) { background:#234e7a; }
+    .rds-btn:disabled { opacity:.45; cursor:not-allowed; }
+    .rds-btn.secondary { background:#0d1730; }
+    .rds-progress { background:#0d1730; border-radius:8px; height:10px; overflow:hidden; margin:10px 0; border:1px solid #1d2740; }
+    .rds-progress-bar { background:linear-gradient(90deg,#3182ce,#5be3a0); height:100%; width:0%; transition:width .3s; }
+    .rds-import-meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; font-size:12px; margin:10px 0; }
+    .rds-import-meta .stat { background:#0d1730; border:1px solid #1d2740; border-radius:8px; padding:8px 10px; }
+    .rds-import-log { max-height:140px; overflow:auto; font-size:11px; font-family:ui-monospace,monospace; background:#0a1224; border:1px solid #1d2740; border-radius:8px; padding:8px 10px; color:#8aa0c6; }
+    .rds-import-summary { margin-top:10px; padding:10px 12px; background:#0f3d2e; border:1px solid #1a5c40; border-radius:8px; font-size:13px; color:#5be3a0; display:none; }
+    .rds-import-err { color:#ff9bb5; font-size:12px; margin-top:6px; }
     .sources { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .sources .lbl { font-size:11px; color:#8aa0c6; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -302,6 +318,21 @@ DASHBOARD_HTML = """<!doctype html>
           <div id="rds_sys_rows"></div>
           <div class="rds-detail" id="rds_sys_detail"></div>
         </div>
+      </div>
+      <div class="rds-admin" id="rds_admin">
+        <h3>Historical Database</h3>
+        <p class="muted" style="margin:0 0 10px;font-size:12px">Populate and update the research database from this panel — no shell commands required. Daily incremental updates also run automatically via cron.</p>
+        <div class="rds-admin-actions">
+          <button type="button" class="rds-btn" id="rds_btn_full">Import Historical Data</button>
+          <button type="button" class="rds-btn secondary" id="rds_btn_incr">Daily Incremental Update</button>
+          <button type="button" class="rds-btn secondary" id="rds_btn_auth" title="Set admin secret (CRON_SECRET)">Set Admin Key</button>
+        </div>
+        <div id="rds_import_status" class="muted" style="font-size:12px;margin-bottom:6px">No import running.</div>
+        <div class="rds-progress" id="rds_progress_wrap" style="display:none"><div class="rds-progress-bar" id="rds_progress_bar"></div></div>
+        <div class="rds-import-meta" id="rds_import_meta"></div>
+        <div class="rds-import-log" id="rds_import_log" style="display:none"></div>
+        <div class="rds-import-summary" id="rds_import_summary"></div>
+        <div class="rds-import-err" id="rds_import_err"></div>
       </div>
       <div id="rds_warnings"></div>
     </div>
@@ -759,6 +790,159 @@ DASHBOARD_HTML = """<!doctype html>
       if(!el) return;
       el.classList.toggle('open');
     }
+    let _rdsImportPoll = null;
+    function rdsAdminSecret(){
+      try { return sessionStorage.getItem('aita_admin_secret') || ''; } catch(e){ return ''; }
+    }
+    function rdsAdminHeaders(){
+      const s = rdsAdminSecret();
+      return s ? {'Authorization':'Bearer '+s, 'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+    }
+    function rdsSetAuth(){
+      const cur = rdsAdminSecret();
+      const v = prompt('Admin secret (same as CRON_SECRET on Vercel):', cur ? '••••••••' : '');
+      if(v==null) return;
+      if(v && v !== '••••••••') sessionStorage.setItem('aita_admin_secret', v);
+      else if(!v) sessionStorage.removeItem('aita_admin_secret');
+      loadResearchImportAdmin();
+    }
+    function rdsStopImportPoll(){
+      if(_rdsImportPoll){ clearInterval(_rdsImportPoll); _rdsImportPoll = null; }
+    }
+    function rdsRenderImportJob(job, overview){
+      const wrap = $('rds_progress_wrap'); const bar = $('rds_progress_bar');
+      const statusEl = $('rds_import_status'); const meta = $('rds_import_meta');
+      const logEl = $('rds_import_log'); const sumEl = $('rds_import_summary');
+      const errEl = $('rds_import_err');
+      if(!job){
+        if(wrap) wrap.style.display = 'none';
+        if(statusEl) statusEl.textContent = overview && overview.research_snapshots
+          ? 'Research database loaded. Use Daily Incremental Update for new data.'
+          : 'No import running. Click Import Historical Data to populate the database.';
+        if(meta) meta.innerHTML = '';
+        if(logEl){ logEl.style.display='none'; logEl.textContent=''; }
+        if(sumEl){ sumEl.style.display='none'; sumEl.textContent=''; }
+        if(errEl) errEl.textContent = '';
+        return;
+      }
+      const running = job.status === 'running';
+      if(wrap) wrap.style.display = '';
+      if(bar) bar.style.width = (job.progress_pct||0)+'%';
+      if(statusEl){
+        const stage = job.current_importer || job.current_stage || '—';
+        statusEl.textContent = running
+          ? ('Import '+job.mode+' — '+stage+' ('+(job.progress_pct||0)+'%)')
+          : ('Import '+job.status+' — '+ (job.message||''));
+      }
+      if(meta){
+        meta.innerHTML =
+          '<div class="stat"><div class="k muted">Mode</div><div class="v">'+(job.mode||'—')+'</div></div>'+
+          '<div class="stat"><div class="k muted">Current stage</div><div class="v">'+(job.current_importer||job.current_stage||'—')+'</div></div>'+
+          '<div class="stat"><div class="k muted">Series points</div><div class="v">'+(job.series_points??0)+'</div></div>'+
+          '<div class="stat"><div class="k muted">Events</div><div class="v">'+(job.events_imported??0)+'</div></div>'+
+          '<div class="stat"><div class="k muted">Snapshots</div><div class="v">'+(job.snapshots_built??0)+'</div></div>';
+      }
+      if(logEl){
+        const lines = (job.stage_log||[]).map(function(e){
+          return (e.at||'')+' · '+(e.stage||'')+' · '+(e.status||'')+
+            (e.series_points!=null?(' · +'+e.series_points+' pts'):'')+
+            (e.snapshots!=null?(' · +'+e.snapshots+' snaps'):'')+
+            (e.error?(' · ERR '+e.error):'');
+        });
+        logEl.style.display = lines.length ? '' : 'none';
+        logEl.textContent = lines.join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      if(errEl){
+        errEl.textContent = (job.errors||[]).length ? ('Errors: '+(job.errors||[]).join(' · ')) : '';
+      }
+      if(sumEl && job.status === 'completed' && job.summary){
+        sumEl.style.display = '';
+        const s = job.summary;
+        sumEl.innerHTML = '<b>Import complete</b> — '+s.snapshots_built+' snapshots, '+
+          s.series_points+' series points, '+s.events_imported+' events. Stages: '+
+          (s.stages_completed||[]).join(', ')+
+          ((s.stages_skipped||[]).length ? (' (skipped: '+s.stages_skipped.join(', ')+')') : '');
+      } else if(sumEl){ sumEl.style.display='none'; }
+    }
+    async function rdsImportStep(jobUuid){
+      if(!jobUuid) return null;
+      try {
+        const r = await fetch('/admin/research/import/'+encodeURIComponent(jobUuid)+'/step', {
+          method:'POST', headers: rdsAdminHeaders()
+        });
+        if(r.status===401){ $('rds_import_err').textContent='Invalid admin key — click Set Admin Key.'; rdsStopImportPoll(); return null; }
+        return await r.json();
+      } catch(e){ return null; }
+    }
+    async function rdsPollImport(){
+      let ov;
+      try { ov = await (await fetch('/admin/research/import')).json(); } catch(e){ return; }
+      const job = ov.active_job || (ov.last_completed_job && ov.last_completed_job.status==='running' ? ov.last_completed_job : ov.active_job);
+      rdsRenderImportJob(ov.active_job || (ov.last_completed_job && ov.last_completed_job.status!=='completed' ? ov.last_completed_job : null), ov);
+      const active = ov.active_job;
+      if(active && active.status==='running'){
+        await rdsImportStep(active.job_uuid);
+        try { ov = await (await fetch('/admin/research/import')).json(); } catch(e){ return; }
+        rdsRenderImportJob(ov.active_job, ov);
+        if(ov.active_job && ov.active_job.status==='completed'){
+          rdsStopImportPoll();
+          loadResearchDatabase();
+        }
+      } else {
+        rdsStopImportPoll();
+        if(ov.last_completed_job && ov.last_completed_job.status==='completed'){
+          rdsRenderImportJob(null, ov);
+          $('rds_import_summary').style.display='';
+          rdsRenderImportJob(ov.last_completed_job, ov);
+          loadResearchDatabase();
+        }
+      }
+      const fullBtn = $('rds_btn_full'); const incrBtn = $('rds_btn_incr');
+      const running = !!(ov.active_job && ov.active_job.status==='running');
+      if(fullBtn) fullBtn.disabled = running;
+      if(incrBtn) incrBtn.disabled = running;
+    }
+    async function loadResearchImportAdmin(){
+      let ov;
+      try { ov = await (await fetch('/admin/research/import')).json(); } catch(e){ return; }
+      rdsRenderImportJob(ov.active_job, ov);
+      const fullBtn = $('rds_btn_full'); const incrBtn = $('rds_btn_incr');
+      const running = !!(ov.active_job && ov.active_job.status==='running');
+      if(fullBtn){
+        fullBtn.disabled = running;
+        fullBtn.title = (ov.can_start_full && !ov.can_start_full.allowed)
+          ? (ov.can_start_full.hint||'Full import already completed') : '';
+      }
+      if(incrBtn) incrBtn.disabled = running;
+      if(running && !_rdsImportPoll){
+        _rdsImportPoll = setInterval(rdsPollImport, 2500);
+      }
+    }
+    async function rdsStartImport(mode, force){
+      $('rds_import_err').textContent = '';
+      const path = mode==='full'
+        ? ('/admin/research/import/full'+(force?'?force=true':''))
+        : '/admin/research/import/incremental';
+      try {
+        const r = await fetch(path, { method:'POST', headers: rdsAdminHeaders(), body: mode==='full'? '{}': undefined });
+        const data = await r.json();
+        if(r.status===401){ $('rds_import_err').textContent='Invalid admin key — click Set Admin Key.'; return; }
+        if(r.status===409){
+          $('rds_import_err').textContent = (data.detail && data.detail.hint) || JSON.stringify(data.detail||data);
+          return;
+        }
+        if(!r.ok){ $('rds_import_err').textContent = data.detail || data.message || 'Import failed to start'; return; }
+        await loadResearchImportAdmin();
+        if(!_rdsImportPoll) _rdsImportPoll = setInterval(rdsPollImport, 2500);
+        rdsPollImport();
+      } catch(e){ $('rds_import_err').textContent = String(e); }
+    }
+    (function(){
+      const bf = $('rds_btn_full'); if(bf) bf.onclick = function(){ rdsStartImport('full', false); };
+      const bi = $('rds_btn_incr'); if(bi) bi.onclick = function(){ rdsStartImport('incremental', false); };
+      const ba = $('rds_btn_auth'); if(ba) ba.onclick = rdsSetAuth;
+    })();
     async function loadResearchDatabase(){
       let s;
       try { s = await (await fetch('/diagnostics/research-database')).json(); }
@@ -804,7 +988,7 @@ DASHBOARD_HTML = """<!doctype html>
         evHtml += rdsRow(e.label||k, e.count ?? 0, rdsIcon(e.status==='current'? 'current':'missing'));
       });
       $('rds_evt_rows').innerHTML = evHtml;
-      $('rds_evt_detail').textContent = 'Indexed from historical_events (FRED-derived + metadata). Run research backfill to populate.';
+      $('rds_evt_detail').textContent = 'Indexed from historical_events (FRED-derived + metadata). Use Import Historical Data above to populate.';
 
       const st = s.research_statistics || {};
       $('rds_stat_rows').innerHTML =
@@ -1170,6 +1354,7 @@ DASHBOARD_HTML = """<!doctype html>
       loadScheduler();
       loadDiagnostics();
       loadResearchDatabase();
+      loadResearchImportAdmin();
     }
 
     // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).
