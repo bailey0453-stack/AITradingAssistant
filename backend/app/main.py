@@ -850,7 +850,7 @@ DASHBOARD_HTML = """<!doctype html>
             (e.error?(' · ERR '+e.error):'');
         });
         logEl.style.display = lines.length ? '' : 'none';
-        logEl.textContent = lines.join('\n');
+        logEl.textContent = lines.join('\\n');
         logEl.scrollTop = logEl.scrollHeight;
       }
       if(errEl){
