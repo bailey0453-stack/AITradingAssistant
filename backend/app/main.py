@@ -121,10 +121,11 @@ DASHBOARD_HTML = """<!doctype html>
     .tl .item { margin-bottom:12px; }
     .tl .label { font-weight:600; }
     .src { font-size:11px; padding:2px 7px; border-radius:6px; background:#1b2542; color:#9fb3d9; }
-    .src.live { background:#0f3d2e; color:#5be3a0; }
+    .src.live, .src.LIVE { background:#0f3d2e; color:#5be3a0; }
     .src.imported, .src.backfilled, .src.cached { background:#15324a; color:#7fd0ff; }
-    .src.fallback { background:#3d3416; color:#ffd98a; }
-    .src.mock, .src.sample { background:#3a2236; color:#f0a6d6; }
+    .src.fallback, .src.PARTIAL { background:#3d3416; color:#ffd98a; }
+    .src.mock, .src.sample, .src.MOCK { background:#3a2236; color:#f0a6d6; }
+    .src.error, .src.ERROR { background:#3d1f1f; color:#ff9a9a; }
     .evb { display:inline-block; padding:0 6px; border-radius:8px; font-size:10px; font-weight:700; letter-spacing:.04em; vertical-align:middle; margin-left:6px; cursor:help; }
     .evb.measured { background:#0f3d2e; color:#5be3a0; border:1px solid #1d6b48; }
     .evb.historical { background:#15324a; color:#7fd0ff; border:1px solid #2a5a7a; }
@@ -326,6 +327,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="rds-admin-actions">
           <button type="button" class="rds-btn" id="rds_btn_full">Import Historical Data</button>
           <button type="button" class="rds-btn secondary" id="rds_btn_incr">Daily Incremental Update</button>
+          <button type="button" class="rds-btn secondary" id="rds_btn_rebuild" title="Regenerate daily snapshots from raw data (no market re-import)">Rebuild Research Snapshots</button>
           <button type="button" class="rds-btn secondary" id="rds_btn_auth" title="Set admin secret (CRON_SECRET)">Set Admin Key</button>
         </div>
         <div id="rds_import_status" class="muted" style="font-size:12px;margin-bottom:6px">No import running.</div>
@@ -729,6 +731,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="card">
         <h2>Upcoming events <span id="cal_src" class="src">—</span></h2>
         <ul id="events"></ul>
+        <div id="cal_gaps" class="muted" style="margin-top:10px"></div>
       </div>
       <div class="card">
         <h2>Recent releases (24h)</h2>
@@ -740,17 +743,19 @@ DASHBOARD_HTML = """<!doctype html>
   <script>
     const $ = id => document.getElementById(id);
     function fill(id, v, suffix){ $(id).textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—'; }
-    function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+v; }
+    function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+String(v).toLowerCase(); }
     function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(); }catch(e){ return iso; } }
     function tlRate4(v){ return (v==null)?'—':Number(v).toFixed(4); }
     function tlMovePct(v){ return (v==null)?'':((v>0?'+':'')+v+'%'); }
     function tlBiasPill(bias){ const b=bias||'NO_TRADE'; return '<span class="tag '+b+'" style="font-size:11px;padding:2px 8px">'+b+'</span>'; }
     // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
     // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
+    function tlGradeLabel(grade){ return (grade != null && grade !== '') ? grade : '—'; }
     function renderTopline(d){
       const row = $('tl_row'); if(!row) return;
       const tf = d.topline_forecast;
       if(!tf){ row.innerHTML = '<div class="muted">No forecast available.</div>'; return; }
+      const overallGrade = tf.opportunity_grade != null ? tf.opportunity_grade : d.opportunity_grade;
       let nowBadge = '';
       const sp = (d.provenance || {}).spot_rate;
       if (sp && typeof evBadge === 'function') { nowBadge = evBadge(sp); }
@@ -760,13 +765,17 @@ DASHBOARD_HTML = """<!doctype html>
         '<div class="tl-meta">current spot</div></div>';
       (tf.horizons || []).forEach(function(h){
         const mv = tlMovePct(h.expected_move_pct);
-        const conf = (h.confidence==null?'—':h.confidence);
+        const conf = (h.confidence==null ? '—' : Number(h.confidence).toFixed(1));
+        const bias = h.bias || 'HOLD';
+        const grade = tlGradeLabel(h.grade != null ? h.grade : overallGrade);
         const rate = (h.expected_rate==null)
           ? '<span class="muted" style="font-size:15px">range-bound</span>'
           : tlRate4(h.expected_rate);
         html += '<div class="tl-col"><div class="k">'+(h.horizon||'')+
           ' <span class="evb estimated" title="Projected rate — model estimate, not an executable quote.">EST</span></div>'+
-          '<div class="tl-rate">'+rate+'</div>'+ tlBiasPill(h.bias)+
+          '<div class="tl-rate">'+rate+'</div>'+
+          '<div style="margin-top:6px"><span class="tag '+bias+'" style="font-size:11px;padding:2px 8px">'+
+          bias+' · Grade '+grade+'</span></div>'+
           '<div class="tl-meta">conf '+conf+(mv?(' · '+mv):'')+'</div></div>';
       });
       row.innerHTML = html;
@@ -907,15 +916,18 @@ DASHBOARD_HTML = """<!doctype html>
         }
       }
       const fullBtn = $('rds_btn_full'); const incrBtn = $('rds_btn_incr');
+      const rebuildBtn = $('rds_btn_rebuild');
       const running = !!(ov.active_job && ov.active_job.status==='running');
       if(fullBtn) fullBtn.disabled = running;
       if(incrBtn) incrBtn.disabled = running;
+      if(rebuildBtn) rebuildBtn.disabled = running;
     }
     async function loadResearchImportAdmin(){
       let ov;
       try { ov = await (await fetch('/admin/research/import')).json(); } catch(e){ return; }
       rdsRenderImportJob(ov.active_job, ov);
       const fullBtn = $('rds_btn_full'); const incrBtn = $('rds_btn_incr');
+      const rebuildBtn = $('rds_btn_rebuild');
       const running = !!(ov.active_job && ov.active_job.status==='running');
       if(fullBtn){
         fullBtn.disabled = running;
@@ -923,6 +935,7 @@ DASHBOARD_HTML = """<!doctype html>
           ? (ov.can_start_full.hint||'Full import already completed') : '';
       }
       if(incrBtn) incrBtn.disabled = running;
+      if(rebuildBtn) rebuildBtn.disabled = running;
       if(running && !_rdsImportPoll){
         _rdsImportPoll = setInterval(rdsPollImport, 2500);
       }
@@ -946,9 +959,28 @@ DASHBOARD_HTML = """<!doctype html>
         rdsPollImport();
       } catch(e){ $('rds_import_err').textContent = String(e); }
     }
+    async function rdsRebuildSnapshots(){
+      $('rds_import_err').textContent = '';
+      try {
+        const r = await fetch('/admin/research/rebuild-snapshots', {
+          method:'POST', headers: rdsAdminHeaders(), body: JSON.stringify({ backfill_scalars: true })
+        });
+        const data = await r.json();
+        if(r.status===401){ $('rds_import_err').textContent='Invalid admin key — click Set Admin Key.'; return; }
+        if(r.status===409){
+          $('rds_import_err').textContent = (data.detail && data.detail.hint) || JSON.stringify(data.detail||data);
+          return;
+        }
+        if(!r.ok){ $('rds_import_err').textContent = data.detail || data.message || 'Rebuild failed'; return; }
+        $('rds_import_summary').style.display='';
+        $('rds_import_summary').textContent = data.message || 'Research snapshots rebuilt.';
+        loadResearchDatabase();
+      } catch(e){ $('rds_import_err').textContent = String(e); }
+    }
     (function(){
       const bf = $('rds_btn_full'); if(bf) bf.onclick = function(){ rdsStartImport('full', false); };
       const bi = $('rds_btn_incr'); if(bi) bi.onclick = function(){ rdsStartImport('incremental', false); };
+      const br = $('rds_btn_rebuild'); if(br) br.onclick = rdsRebuildSnapshots;
       const ba = $('rds_btn_auth'); if(ba) ba.onclick = rdsSetAuth;
     })();
     async function loadResearchDatabase(){
@@ -1116,10 +1148,10 @@ DASHBOARD_HTML = """<!doctype html>
       const ds = d.data_sources || {};
       setSrc('ds_market', ds.market || m.source);
       setSrc('ds_news', ds.news);
-      setSrc('ds_cal', ds.calendar);
+      setSrc('ds_cal', ds.calendar_status || ds.calendar);
       setSrc('ds_hist', ds.historical);
       setSrc('news_src', ds.news);
-      setSrc('cal_src', ds.calendar);
+      setSrc('cal_src', ds.calendar_status || ds.calendar);
 
       const dir = $('dir'); dir.textContent = d.direction; dir.className = 'tag ' + d.direction;
       $('bias').textContent = d.market_bias || '';
@@ -1346,11 +1378,22 @@ DASHBOARD_HTML = """<!doctype html>
       const ev = $('events'); ev.innerHTML='';
       (ctx.upcoming_events||[]).slice(0,8).forEach(e => {
         const li=document.createElement('li');
-        li.innerHTML = (e.event||'') + ' <span class="muted">('+(e.country||'')+', '+(e.importance||'')+
-          ', fc '+(e.forecast ?? 'n/a')+')</span>';
+        li.innerHTML = '<b>'+(e.event||'')+'</b> '+
+          '<span class="pill '+(e.importance||'')+'">'+(e.importance||'')+'</span><br>'+
+          '<span class="muted">'+(e.country||'')+' · '+fmtTime(e.release_time)+
+          ' · prev '+(e.previous ?? '—')+' · fc '+(e.forecast ?? '—')+
+          (e.actual!=null && e.actual!=='' ? (' · act '+e.actual) : '')+
+          ' · src '+(e.source||'—')+'</span>';
         ev.appendChild(li);
       });
       if (!(ctx.upcoming_events||[]).length) ev.innerHTML = '<li class="muted">No upcoming events.</li>';
+      const gaps = d.calendar_coverage_gaps || [];
+      const gapEl = $('cal_gaps');
+      if (gaps.length) {
+        gapEl.innerHTML = '<div class="k">Unavailable from free sources</div><ul>'+
+          gaps.map(g => '<li><b>'+(g.event||'')+'</b> ('+(g.country||'')+') — '+(g.note||'unavailable')+'</li>').join('')+
+          '</ul>';
+      } else if (gapEl) { gapEl.innerHTML = ''; }
 
       const rel = $('releases'); rel.innerHTML='';
       (ctx.released_last_24h||[]).forEach(e => {

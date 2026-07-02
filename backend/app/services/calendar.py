@@ -5,20 +5,25 @@ Tracks the macro events that move USD/MXN. Output schema per event:
     event (name), country, release_time (ISO), forecast, previous, actual,
     importance ("high" | "medium" | "low"),
     currency_impact (e.g. "USD" | "MXN"),
-    status ("upcoming" | "released")
+    status ("upcoming" | "released"),
+    source (provider label, e.g. "FRED", "U.S. Treasury", "mock")
 
 Tracked events: US CPI, US PPI, NFP / jobs, GDP, Retail Sales, FOMC, Fed
 speeches, Treasury auctions, Banxico, Mexico CPI, Mexico GDP, Mexico employment.
 
 Providers
 ---------
-- ``MockCalendarProvider``           — realistic offline data; default + fallback.
-- ``TradingEconomicsCalendarProvider`` — live (initial implementation).
-- ``ResilientCalendarProvider``      — tries live, falls back to mock.
+- ``MockCalendarProvider``              — realistic offline data; explicit mock mode.
+- ``CompositeOfficialCalendarProvider`` — free official feeds (FRED + Treasury).
+- ``TradingEconomicsCalendarProvider``  — paid live feed (Trading Economics).
+- ``ResilientCalendarProvider``         — wraps a live provider; no mock fallback.
 
 Selection (``get_calendar_provider``):
-- ``USE_MOCK_DATA=true`` or no ``CALENDAR_API_KEY`` -> mock (source "mock").
-- otherwise resilient live (source "live" on success, "fallback" on error).
+- CSV import when ``CALENDAR_CSV_PATH`` is set.
+- Paid API when ``CALENDAR_API_KEY`` is set and provider is tradingeconomics/finnhub.
+- Official free calendars when ``FRED_API_KEY`` is set and mock mode is off.
+- Mock only when ``USE_MOCK_DATA=true`` (or explicit mock provider).
+- Empty/error provider when live is wanted but nothing is configured.
 """
 
 from __future__ import annotations
@@ -42,18 +47,42 @@ def _iso(dt: datetime) -> str:
 class CalendarProvider(ABC):
     source = "base"
 
+    @property
+    def status(self) -> str:
+        """Provider health: LIVE | PARTIAL | MOCK | ERROR."""
+        if self.source == "mock":
+            return "MOCK"
+        if self.source in {"live", "imported", "official"}:
+            return "LIVE"
+        if self.source == "fallback":
+            return "MOCK"
+        if self.source == "error":
+            return "ERROR"
+        return "ERROR"
+
+    @property
+    def coverage_gaps(self) -> list[dict]:
+        """Event types not available from configured free sources."""
+        return []
+
     @abstractmethod
     def get_events(self) -> list[dict]:
         """Return all known events (mix of upcoming + recently released)."""
         raise NotImplementedError
 
     def get_upcoming(self, limit: int | None = None) -> list[dict]:
-        events = [e for e in self.get_events() if e.get("status") == "upcoming"]
+        events = [
+            e for e in self.get_events()
+            if e.get("status") == "upcoming"
+        ]
         events.sort(key=lambda e: e.get("release_time") or "")
         return events[:limit] if limit else events
 
     def get_recent_released(self, limit: int | None = None) -> list[dict]:
-        events = [e for e in self.get_events() if e.get("status") == "released"]
+        events = [
+            e for e in self.get_events()
+            if e.get("status") == "released"
+        ]
         events.sort(key=lambda e: e.get("release_time") or "", reverse=True)
         return events[:limit] if limit else events
 
@@ -61,17 +90,23 @@ class CalendarProvider(ABC):
 class MockCalendarProvider(CalendarProvider):
     source = "mock"
 
+    @property
+    def status(self) -> str:
+        return "MOCK"
+
     def get_events(self) -> list[dict]:
         now = datetime.now(timezone.utc)
 
         def released(hours_ago, **kw):
             kw.setdefault("status", "released")
+            kw.setdefault("source", "mock")
             kw["release_time"] = _iso(now - timedelta(hours=hours_ago))
             return kw
 
         def upcoming(days_ahead, **kw):
             kw.setdefault("status", "upcoming")
             kw.setdefault("actual", None)
+            kw.setdefault("source", "mock")
             kw["release_time"] = _iso(now + timedelta(days=days_ahead))
             return kw
 
@@ -265,6 +300,7 @@ class TradingEconomicsCalendarProvider(CalendarProvider):
             "importance": self._IMPORTANCE.get(_as_int(row.get("Importance")), "low"),
             "currency_impact": currency_impact,
             "status": status,
+            "source": "Trading Economics",
         }
 
     @staticmethod
@@ -335,6 +371,7 @@ class CSVCalendarProvider(CalendarProvider):
                     "importance": importance,
                     "currency_impact": currency_impact,
                     "status": "released" if actual not in (None, "") else "upcoming",
+                    "source": _clean(row.get("source") or row.get("Source")) or "imported CSV",
                 })
         if not events:
             raise RuntimeError("Calendar CSV contained no usable events.")
@@ -373,28 +410,45 @@ _LIVE_CALENDAR_PROVIDERS = {
 }
 
 
-class ResilientCalendarProvider(CalendarProvider):
-    """Wraps a live provider with mock fallback and dynamic source tagging.
+class EmptyCalendarProvider(CalendarProvider):
+    """No calendar configured — returns empty events with ERROR status."""
 
-    ``.source`` is ``"live"`` after a successful fetch, otherwise ``"fallback"``.
-    Results are cached for the life of the instance so repeated
-    ``get_upcoming`` / ``get_recent_released`` calls only fetch once.
+    source = "error"
+
+    @property
+    def status(self) -> str:
+        return "ERROR"
+
+    def get_events(self) -> list[dict]:
+        return []
+
+
+class ResilientCalendarProvider(CalendarProvider):
+    """Wraps a live provider; does not fabricate mock events on failure.
+
+    ``.source`` is ``"live"`` / ``"imported"`` after a successful fetch,
+    otherwise ``"error"``. Results are cached for the life of the instance.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, fallback_to_mock: bool = False) -> None:
         self.settings = settings
-        self.source = "fallback"
+        self.source = "error"
+        self._status = "ERROR"
+        self._fallback_to_mock = fallback_to_mock
         live_cls = _LIVE_CALENDAR_PROVIDERS.get(
             (settings.calendar_provider or "tradingeconomics").lower(),
             TradingEconomicsCalendarProvider,
         )
         self._live = live_cls(settings)
-        # A successful CSV import is labeled "imported"; an API feed is "live".
         self._success_source = getattr(self._live, "source", "live")
         if self._success_source not in {"imported"}:
             self._success_source = "live"
         self._mock = MockCalendarProvider()
         self._cache: list[dict] | None = None
+
+    @property
+    def status(self) -> str:
+        return self._status
 
     def get_events(self) -> list[dict]:
         if self._cache is not None:
@@ -402,22 +456,46 @@ class ResilientCalendarProvider(CalendarProvider):
         try:
             events = self._live.get_events()
             self.source = self._success_source
+            self._status = "LIVE"
         except Exception as exc:  # noqa: BLE001 - degrade gracefully
             logger.warning(
-                "Live calendar fetch failed (%s); using mock fallback.",
+                "Live calendar fetch failed (%s).",
                 scrub(str(exc), self.settings.calendar_api_key),
             )
-            self.source = "fallback"
-            events = self._mock.get_events()
+            if self._fallback_to_mock:
+                self.source = "fallback"
+                self._status = "MOCK"
+                events = self._mock.get_events()
+            else:
+                self.source = "error"
+                self._status = "ERROR"
+                events = []
         self._cache = events
         return events
 
 
 def get_calendar_provider(settings: Settings | None = None) -> CalendarProvider:
     settings = settings or get_settings()
-    # Importable CSV calendar needs no API key and works even in mock mode.
+    provider_name = (settings.calendar_provider or "auto").lower()
+
     if settings.calendar_csv_enabled:
-        return ResilientCalendarProvider(settings)
-    if settings.is_mock or not settings.calendar_api_key:
+        return ResilientCalendarProvider(settings, fallback_to_mock=False)
+
+    if provider_name == "mock":
         return MockCalendarProvider()
-    return ResilientCalendarProvider(settings)
+
+    if settings.is_mock:
+        return MockCalendarProvider()
+
+    if provider_name in ("tradingeconomics", "finnhub") and settings.calendar_api_key:
+        return ResilientCalendarProvider(settings, fallback_to_mock=False)
+
+    if settings.fred_api_key and provider_name not in ("mock", "csv"):
+        from app.services.official_calendar import CompositeOfficialCalendarProvider
+
+        return CompositeOfficialCalendarProvider(settings)
+
+    if settings.calendar_api_key:
+        return ResilientCalendarProvider(settings, fallback_to_mock=False)
+
+    return EmptyCalendarProvider()

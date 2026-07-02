@@ -280,12 +280,13 @@ def _field_coverage(db: Session, meta: dict[str, Any], *, settings) -> dict:
         ]
         if raw_points > 0 and raw_with_value == 0:
             detail_parts.append(
-                "Raw rows exist but scalar values missing — run Daily Incremental Update "
-                "to backfill FRED scalar values, then rebuild snapshots."
+                "Raw rows exist but scalar values missing — use Rebuild Research Snapshots "
+                "(backfills FRED scalars) or re-run the FRED import stage."
             )
         elif raw_with_value > 0 and mapped == 0:
             detail_parts.append(
-                "Values imported but not merged — run Daily Incremental Update (snapshots stage)."
+                "Values imported but not merged — use Rebuild Research Snapshots "
+                "(admin panel) to regenerate daily snapshots from raw data."
             )
         return {
             "status": _coverage_status(pct, total_research),
@@ -454,6 +455,12 @@ def research_database_status(db: Session) -> dict:
             and key != "banxico_rate"
         ):
             warnings.append(f"{cov['label']}: imported but not mapped into research snapshots.")
+            if int(cov.get("raw_points_with_value") or 0) > 0:
+                warnings[-1] += " Use Rebuild Research Snapshots on the admin panel."
+            elif int(cov.get("raw_point_count") or 0) > 0:
+                warnings[-1] += (
+                    " Raw rows lack scalar values — Rebuild will backfill from FRED first."
+                )
     if not database_is_persistent():
         warnings.append("Storage is ephemeral — research data may not survive redeploys.")
     if research_total == 0:

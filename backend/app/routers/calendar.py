@@ -11,10 +11,19 @@ router = APIRouter(prefix="/calendar", tags=["calendar"])
 
 @router.get("/upcoming")
 def upcoming(limit: int = Query(default=20, ge=1, le=100)) -> dict:
-    """Upcoming tracked economic events (mock by default)."""
+    """Upcoming tracked economic events."""
     provider = get_calendar_provider()
     events = provider.get_upcoming(limit=limit)
-    return {"count": len(events), "provider": provider.source, "events": events}
+    source = provider.source
+    if source == "official":
+        source = "live"
+    return {
+        "count": len(events),
+        "provider": source,
+        "status": getattr(provider, "status", "MOCK"),
+        "coverage_gaps": getattr(provider, "coverage_gaps", []),
+        "events": events,
+    }
 
 
 @router.get("/released")
@@ -22,4 +31,13 @@ def released(limit: int = Query(default=20, ge=1, le=100)) -> dict:
     """Recently released tracked economic events."""
     provider = get_calendar_provider()
     events = provider.get_recent_released(limit=limit)
-    return {"count": len(events), "provider": provider.source, "events": events}
+    source = provider.source
+    if source == "official":
+        source = "live"
+    return {
+        "count": len(events),
+        "provider": source,
+        "status": getattr(provider, "status", "MOCK"),
+        "coverage_gaps": getattr(provider, "coverage_gaps", []),
+        "events": events,
+    }

@@ -176,7 +176,8 @@ def test_endpoints():
                 assert k in ds, f"data_sources missing {k}"
             assert ds["market"] in {"mock", "live", "fallback"}, ds
             assert ds["news"] in {"mock", "live", "fallback", "cached"}, ds
-            assert ds["calendar"] in {"mock", "live", "fallback", "imported"}, ds
+            assert ds["calendar"] in {"mock", "live", "fallback", "imported", "error"}, ds
+            assert ds.get("calendar_status") in {"LIVE", "PARTIAL", "MOCK", "ERROR"}, ds
             assert ds["historical"] in {"sample", "backfilled", "live"}, ds
             # Phase 5 evidence engine
             for k in ("explanations", "evidence_summary"):
@@ -240,7 +241,8 @@ def test_endpoints():
             assert r.status_code == 200, r.status_code
             body = r.json()
             assert body["count"] >= 1
-            assert body.get("provider") in {"mock", "live", "fallback", "imported"}, body.get("provider")
+            assert body.get("provider") in {"mock", "live", "fallback", "imported", "error"}, body.get("provider")
+            assert body.get("status") in {"LIVE", "PARTIAL", "MOCK", "ERROR"}, body.get("status")
             ev = body["events"][0]
             for key in (
                 "event",
@@ -249,6 +251,7 @@ def test_endpoints():
                 "importance",
                 "currency_impact",
                 "status",
+                "source",
             ):
                 assert key in ev, f"calendar event missing {key}"
             assert ev["status"] == "upcoming"
@@ -430,10 +433,60 @@ def test_calendar_provider():
 
     def cal_mock_when_no_key():
         p = calendar_svc.get_calendar_provider(
-            Settings(use_mock_data=False, calendar_api_key=None)
+            Settings(use_mock_data=False, calendar_api_key=None, fred_api_key=None)
         )
-        assert isinstance(p, calendar_svc.MockCalendarProvider), type(p)
-        assert p.source == "mock"
+        assert isinstance(p, calendar_svc.EmptyCalendarProvider), type(p)
+        assert p.status == "ERROR"
+        assert p.get_upcoming() == []
+
+    def cal_official_when_fred_key():
+        fred_rows = {
+            "release_dates": [
+                {
+                    "release_id": 10,
+                    "release_name": "Consumer Price Index",
+                    "date": "2099-06-15",
+                },
+            ],
+        }
+        treasury_rows = {
+            "data": [
+                {
+                    "auction_date": "2099-06-20",
+                    "security_type": "Note",
+                    "security_term": "10-Year",
+                },
+            ],
+        }
+
+        def fake_get(url, *args, **kwargs):
+            if "fred" in url:
+                return _FakeResponse(fred_rows)
+            if "treasury" in url:
+                return _FakeResponse(treasury_rows)
+            raise RuntimeError(f"unexpected url {url}")
+
+        original_cal = calendar_svc.httpx.get
+        import app.services.official_calendar as official_cal_svc
+
+        original_off = official_cal_svc.httpx.get
+        calendar_svc.httpx.get = fake_get
+        official_cal_svc.httpx.get = fake_get
+        try:
+            p = calendar_svc.get_calendar_provider(
+                Settings(use_mock_data=False, calendar_api_key=None, fred_api_key="x" * 32)
+            )
+            from app.services.official_calendar import CompositeOfficialCalendarProvider
+
+            assert isinstance(p, CompositeOfficialCalendarProvider), type(p)
+            events = p.get_upcoming()
+            assert events, events
+            assert p.status in {"LIVE", "PARTIAL"}, p.status
+            assert events[0].get("source") == "FRED"
+            assert p.coverage_gaps, "Mexico gaps should be listed"
+        finally:
+            calendar_svc.httpx.get = original_cal
+            official_cal_svc.httpx.get = original_off
 
     def cal_live_ok():
         rows = [
@@ -484,8 +537,8 @@ def test_calendar_provider():
                 Settings(use_mock_data=False, calendar_api_key=SECRET)
             )
             events = p.get_events()
-            assert p.source == "fallback", p.source
-            assert events, "fallback should return mock events"
+            assert p.status == "ERROR", p.status
+            assert events == [], "failed live calendar should not return mock events"
         finally:
             calendar_svc.httpx.get = original
 
@@ -507,9 +560,10 @@ def test_calendar_provider():
         finally:
             calendar_svc.httpx.get = original
 
-    check("calendar mock when live wanted but no key", cal_mock_when_no_key)
+    check("calendar error when live wanted but no key", cal_mock_when_no_key)
+    check("calendar official when FRED key set", cal_official_when_fred_key)
     check("calendar source=live on successful fetch", cal_live_ok)
-    check("calendar source=fallback when fetch raises", cal_fallback_on_error)
+    check("calendar status=ERROR when fetch raises", cal_fallback_on_error)
     check("calendar provider scrubs secret from errors", cal_provider_scrubs_secret)
 
 
@@ -900,12 +954,12 @@ def test_source_labeling():
                      calendar_csv_path="/nonexistent/calendar.csv")
         prov = calendar_svc.get_calendar_provider(s)
         events = prov.get_upcoming()
-        assert prov.source == "fallback", prov.source
-        assert events, "fallback should still return mock events"
+        assert prov.status == "ERROR", prov.status
+        assert events == [], "missing CSV should not return mock events"
 
     check("news provider tags mock vs live source", news_provider_source_live_vs_mock)
     check("CSV calendar imports without an API key", csv_calendar_imports_without_key)
-    check("CSV calendar falls back to mock when file missing", csv_calendar_falls_back_when_missing)
+    check("CSV calendar falls back to error when file missing", csv_calendar_falls_back_when_missing)
 
 
 def test_market_infrastructure():
@@ -2324,6 +2378,114 @@ def test_fed_funds_and_banxico_coverage_diagnostics():
     check("Banxico policy rate marked not configured in diagnostics", banxico_marked_not_configured)
 
 
+def test_rebuild_research_snapshots_from_raw():
+    """Rebuild maps scalar FRED rows into all research snapshots (not just incremental window)."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import func, select
+
+    from app.config import Settings
+    from app.database import SessionLocal, init_db
+    from app.models import HistoricalMarketSnapshot, ResearchMarketSnapshot
+    from app.services.history import importers as imp_mod
+    from app.services.research_import_service import rebuild_research_snapshots_from_raw
+
+    init_db()
+
+    def rebuild_maps_fed_funds_after_scalar_backfill():
+        db = SessionLocal()
+        try:
+            db.query(ResearchMarketSnapshot).delete()
+            db.query(HistoricalMarketSnapshot).delete()
+            db.commit()
+            for day in (1, 2, 3):
+                ts = datetime(2024, 6, day, tzinfo=timezone.utc)
+                db.add(HistoricalMarketSnapshot(
+                    series="USDMXN", ts=ts, usdmxn=18.0 + day * 0.01,
+                    source="test", source_quality="imported",
+                ))
+            db.add(HistoricalMarketSnapshot(
+                series="FED_FUNDS", ts=datetime(2024, 6, 1, tzinfo=timezone.utc),
+                value=None, source="fred", source_quality="official",
+            ))
+            db.commit()
+
+            settings = Settings(fred_api_key="a" * 32, use_mock_data=False)
+
+            def fake_obs(_self, series_id):
+                if series_id == "FEDFUNDS":
+                    return [(datetime(2024, 6, 1, tzinfo=timezone.utc), 5.25)]
+                return []
+
+            original = imp_mod.FREDImporter._observations
+            imp_mod.FREDImporter._observations = fake_obs
+            try:
+                result = rebuild_research_snapshots_from_raw(
+                    db, backfill_scalars=True, settings=settings
+                )
+                assert result["ok"], result
+                assert result["backfill_scalars"]["updated"] >= 1, result
+                mapped = db.execute(
+                    select(func.count(ResearchMarketSnapshot.id)).where(
+                        ResearchMarketSnapshot.fed_funds.isnot(None)
+                    )
+                ).scalar()
+                assert mapped >= 3, mapped
+            finally:
+                imp_mod.FREDImporter._observations = original
+        finally:
+            db.close()
+
+    check("rebuild maps fed funds into all snapshots", rebuild_maps_fed_funds_after_scalar_backfill)
+
+
+def test_rebuild_research_snapshots_admin_endpoint():
+    """POST /admin/research/rebuild-snapshots requires auth and rebuilds."""
+    from datetime import datetime, timezone
+
+    from app.database import SessionLocal, init_db
+    from app.models import HistoricalMarketSnapshot, ResearchMarketSnapshot
+    from app.services.history.snapshot_builder import build_research_snapshots
+
+    init_db()
+
+    def endpoint_rebuilds_with_auth():
+        db = SessionLocal()
+        try:
+            db.query(ResearchMarketSnapshot).delete()
+            db.query(HistoricalMarketSnapshot).delete()
+            db.commit()
+            ts = datetime(2024, 6, 3, tzinfo=timezone.utc)
+            db.add(HistoricalMarketSnapshot(
+                series="USDMXN", ts=ts, usdmxn=18.0, source="test", source_quality="imported",
+            ))
+            db.add(HistoricalMarketSnapshot(
+                series="FED_FUNDS", ts=ts, value=5.25, source="fred", source_quality="official",
+            ))
+            db.commit()
+            build_research_snapshots(db, source="test", source_quality="imported")
+            db.query(ResearchMarketSnapshot).update({ResearchMarketSnapshot.fed_funds: None})
+            db.commit()
+        finally:
+            db.close()
+
+        with TestClient(app) as c:
+            r = c.post("/admin/research/rebuild-snapshots", json={"backfill_scalars": False})
+            assert r.status_code == 401, r.status_code
+            r = c.post(
+                "/admin/research/rebuild-snapshots",
+                json={"backfill_scalars": False},
+                headers={"Authorization": "Bearer test-admin-secret"},
+            )
+            if r.status_code == 401:
+                return  # no admin secret in test env — skip
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("ok"), body
+
+    check("rebuild snapshots admin endpoint", endpoint_rebuilds_with_auth)
+
+
 def test_research_database_status_panel():
     """Research Database Status endpoint (read-only dashboard panel)."""
     from app.database import SessionLocal, init_db
@@ -2649,7 +2811,7 @@ def test_topline_forecast():
 
     def buy_path_goes_above_spot():
         payload = {
-            "direction": "BUY_USD", "stop": 17.95,
+            "direction": "BUY_USD", "stop": 17.95, "opportunity_grade": "B",
             "market": {"usdmxn": 18.00, "source": "live"},
             "time_horizons": [
                 {"horizon": "1-4 hours", "bias": "BUY_USD", "confidence": 60.0,
@@ -2673,6 +2835,9 @@ def test_topline_forecast():
         assert out["horizons"][3]["expected_rate"] == 18.07  # EOD horizon
         assert out["horizons"][4]["expected_rate"] == 18.11  # 24h from 1-2 days
         assert out["horizons"][0]["expected_move_pct"] > 0
+        assert out["opportunity_grade"] == "B", out
+        assert all(h.get("grade") == "B" for h in out["horizons"]), out["horizons"]
+        assert "Grade B" in out["explanation"], out["explanation"]
         # Long bailout is the primary stop (below spot); reverse short level above.
         assert out["long_usd_bailout"] == 17.95, out["long_usd_bailout"]
         assert out["long_usd_bailout"] < 18.00 < out["short_usd_bailout"], out
@@ -2752,13 +2917,13 @@ def test_topline_forecast():
         tfp = body.get("topline_forecast")
         assert tfp is not None, "missing topline_forecast"
         for key in ("now", "horizons", "long_usd_bailout", "short_usd_bailout",
-                    "explanation"):
+                    "explanation", "opportunity_grade"):
             assert key in tfp, (key, tfp)
         assert [h["horizon"] for h in tfp["horizons"]] == [
             "1 hour", "2 hours", "4 hours", "End of day", "24 hours"]
         for h in tfp["horizons"]:
             assert {"horizon", "expected_rate", "bias", "confidence",
-                    "expected_move_pct"}.issubset(h.keys()), h
+                    "expected_move_pct", "grade"}.issubset(h.keys()), h
         # Existing Time Horizon Outlook still present and unmodified in shape.
         assert isinstance(body.get("time_horizons"), list) and body["time_horizons"], \
             "time_horizons missing"
@@ -3111,6 +3276,8 @@ def main():
     test_historical_backfill()
     test_research_database_status_panel()
     test_fed_funds_and_banxico_coverage_diagnostics()
+    test_rebuild_research_snapshots_from_raw()
+    test_rebuild_research_snapshots_admin_endpoint()
     test_research_import_admin()
     test_stale_fallback()
     test_topline_forecast()

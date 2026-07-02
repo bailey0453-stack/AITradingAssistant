@@ -12,9 +12,11 @@ from app.database import get_db
 from app.services.admin_auth import require_admin_auth
 from app.services.research_import_service import (
     continue_import_steps,
+    get_active_job,
     get_import_overview,
     get_job_by_uuid,
     job_to_dict,
+    rebuild_research_snapshots_from_raw,
     run_import_step,
     start_full_import,
     start_incremental_import,
@@ -25,6 +27,10 @@ router = APIRouter(prefix="/admin/research", tags=["admin-research"])
 
 class FullImportRequest(BaseModel):
     force: bool = False
+
+
+class RebuildSnapshotsRequest(BaseModel):
+    backfill_scalars: bool = True
 
 
 @router.get("/import")
@@ -59,6 +65,24 @@ def import_full(
 def import_incremental(db: Session = Depends(get_db)) -> dict:
     """Import new market data since the latest research snapshot."""
     return start_incremental_import(db)
+
+
+@router.post("/rebuild-snapshots", dependencies=[Depends(require_admin_auth)])
+def rebuild_snapshots(
+    body: Optional[RebuildSnapshotsRequest] = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Regenerate research snapshots from existing raw historical data (no full re-import)."""
+    if get_active_job(db):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "import_in_progress",
+                "hint": "Wait for the current import to finish before rebuilding snapshots.",
+            },
+        )
+    backfill = body.backfill_scalars if body is not None else True
+    return rebuild_research_snapshots_from_raw(db, backfill_scalars=backfill)
 
 
 @router.post("/import/{job_uuid}/step", dependencies=[Depends(require_admin_auth)])

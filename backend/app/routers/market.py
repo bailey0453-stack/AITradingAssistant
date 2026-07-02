@@ -506,19 +506,34 @@ def _safe_calendar(settings: Settings) -> list[dict]:
     try:
         provider = get_calendar_provider(settings)
         events = provider.get_upcoming(limit=6)
-        cache_manager.report_health("calendar", _cal_health(getattr(provider, "source", "mock")),
-                                    f"source={getattr(provider, 'source', 'mock')}")
+        cache_manager.report_health(
+            "calendar",
+            _cal_health(provider),
+            f"status={getattr(provider, 'status', 'MOCK')} source={getattr(provider, 'source', 'mock')}",
+        )
         return events
     except Exception:  # noqa: BLE001
         cache_manager.report_health("calendar", cache_manager.ProviderHealth.OFFLINE, "error")
         return []
 
 
-def _cal_health(source: str) -> str:
-    if source in ("live", "imported"):
+def _cal_health(provider) -> str:
+    status = getattr(provider, "status", None)
+    if status == "LIVE":
+        return cache_manager.ProviderHealth.HEALTHY
+    if status == "PARTIAL":
+        return cache_manager.ProviderHealth.USING_FALLBACK
+    if status == "MOCK":
+        return cache_manager.ProviderHealth.USING_FALLBACK
+    if status == "ERROR":
+        return cache_manager.ProviderHealth.OFFLINE
+    source = getattr(provider, "source", "mock")
+    if source in ("live", "imported", "official"):
         return cache_manager.ProviderHealth.HEALTHY
     if source == "fallback":
         return cache_manager.ProviderHealth.USING_FALLBACK
+    if source == "error":
+        return cache_manager.ProviderHealth.OFFLINE
     return cache_manager.ProviderHealth.HEALTHY
 
 

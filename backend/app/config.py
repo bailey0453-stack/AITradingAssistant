@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Calendar provider selection + endpoint. Default targets Trading Economics.
     # Set CALENDAR_PROVIDER=csv (with CALENDAR_CSV_PATH) to import a calendar from
     # a local CSV with no API key.
-    calendar_provider: str = "tradingeconomics"
+    calendar_provider: str = "auto"
     calendar_base_url: Optional[str] = None
     # Path to an importable calendar CSV (used when CALENDAR_PROVIDER=csv).
     calendar_csv_path: Optional[str] = None
@@ -136,8 +136,20 @@ class Settings(BaseSettings):
 
     @property
     def calendar_live_enabled(self) -> bool:
-        """Live calendar is attempted only when mock mode off AND a key is set."""
-        return (not self.use_mock_data) and bool(self.calendar_api_key)
+        """Live calendar when mock mode off and a paid or official provider is available."""
+        return (not self.use_mock_data) and bool(
+            self.calendar_api_key or self.fred_api_key
+        )
+
+    @property
+    def calendar_official_enabled(self) -> bool:
+        """Free official calendars (FRED + Treasury) when FRED key is set."""
+        if not self.fred_api_key or self.use_mock_data:
+            return False
+        name = (self.calendar_provider or "auto").lower()
+        if name in ("tradingeconomics", "finnhub", "csv", "mock"):
+            return False
+        return name in ("official", "fred", "composite", "auto", "")
 
     @property
     def calendar_csv_enabled(self) -> bool:

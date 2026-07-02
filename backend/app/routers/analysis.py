@@ -480,6 +480,7 @@ def _unavailable_analysis_payload(market, market_meta: dict, news_source: str) -
             "market": "unavailable",
             "news": news_source,
             "calendar": "unavailable",
+            "calendar_status": "ERROR",
             "historical": "unavailable",
         },
         # Explicit, conservative decision overlay: never tradeable.
@@ -637,8 +638,10 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         "market": market.source,
         "news": news_source,
         "calendar": context.get("calendar_source", "mock"),
+        "calendar_status": context.get("calendar_status", "MOCK"),
         "historical": history.get("historical_source", "sample"),
     }
+    payload["calendar_coverage_gaps"] = context.get("calendar_coverage_gaps") or []
 
     # Phase 5.3: decide whether this trade is worth taking now vs waiting.
     # Never fail the analysis over the decision-quality overlay.

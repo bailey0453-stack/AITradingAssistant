@@ -39,6 +39,9 @@ MIN_SNAPSHOTS_FOR_DUPLICATE_BLOCK = 100
 OVERLAP_DAYS = 14
 STALE_JOB_MINUTES = 45
 
+# FRED macro series stored only in ``historical_market_snapshots.value`` (no typed column).
+_SCALAR_FRED_SERIES: tuple[str, ...] = ("FED_FUNDS", "US_CPI", "US_PCE", "MEXICO_CPI")
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -302,6 +305,92 @@ def persist_series_bars(
     if added or updated:
         db.commit()
     return added + updated
+
+
+def backfill_fred_scalar_values(db: Session, *, settings=None) -> dict:
+    """Patch null ``value`` on existing scalar FRED rows (targeted FRED re-fetch only).
+
+    Does not re-import Yahoo/Alpha Vantage or events. Used when rows were imported
+    before the ``value`` column was populated, or when incremental import skipped
+    older dates.
+    """
+    settings = settings or get_settings()
+    if not getattr(settings, "fred_api_key", None):
+        return {"updated": 0, "skipped": True, "reason": "FRED_API_KEY not configured"}
+
+    imp = FREDImporter(settings, lookback_days=getattr(settings, "history_lookback_days", 3650))
+    updated = 0
+    series_report: dict[str, int] = {}
+
+    for series_name in _SCALAR_FRED_SERIES:
+        series_id = imp.SERIES.get(series_name)
+        if not series_id:
+            continue
+        null_rows = db.execute(
+            select(HistoricalMarketSnapshot).where(
+                HistoricalMarketSnapshot.series == series_name,
+                HistoricalMarketSnapshot.value.is_(None),
+            )
+        ).scalars().all()
+        if not null_rows:
+            continue
+        try:
+            observations = imp._observations(series_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("FRED scalar backfill failed for %s: %s", series_name, exc)
+            series_report[series_name] = 0
+            continue
+
+        by_day: dict[date, float] = {}
+        for ts, value in observations:
+            by_day[_as_date(ts)] = float(value)
+
+        patched = 0
+        for row in null_rows:
+            day = _as_date(row.ts)
+            val = by_day.get(day)
+            if val is not None:
+                row.value = val
+                patched += 1
+        if patched:
+            db.commit()
+        updated += patched
+        series_report[series_name] = patched
+
+    return {"updated": updated, "series": series_report}
+
+
+def rebuild_research_snapshots_from_raw(
+    db: Session,
+    *,
+    backfill_scalars: bool = True,
+    settings=None,
+) -> dict:
+    """Regenerate all ``research_market_snapshots`` rows from raw historical data.
+
+    Optionally backfills null FRED scalar ``value`` fields first (no full re-import).
+    """
+    settings = settings or get_settings()
+    scalar_result: dict[str, Any] = {"skipped": True}
+    if backfill_scalars:
+        scalar_result = backfill_fred_scalar_values(db, settings=settings)
+
+    built = build_research_snapshots(
+        db,
+        min_date=None,
+        replace=False,
+        source="research",
+        source_quality="imported",
+    )
+    return {
+        "ok": True,
+        "backfill_scalars": scalar_result,
+        "snapshots": built,
+        "message": (
+            f"Rebuilt research snapshots — {built.get('updated', 0)} updated, "
+            f"{built.get('created', 0)} created."
+        ),
+    }
 
 
 def _create_job(

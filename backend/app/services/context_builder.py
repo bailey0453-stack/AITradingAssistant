@@ -110,6 +110,10 @@ def build_context(
     recent_analyses = [_brief_analysis(r) for r in recent_analyses_rows(db, limit=5)]
     momentum = _compute_momentum(db)
 
+    cal_source = getattr(cal, "source", "mock")
+    if cal_source == "official":
+        cal_source = "live"
+
     return {
         "market": market.to_dict(),
         "recent_news": recent_news,
@@ -118,7 +122,9 @@ def build_context(
         "released_last_24h": released_24h,
         "recent_analyses": recent_analyses,
         "momentum": momentum,
-        "calendar_source": getattr(cal, "source", "mock"),
+        "calendar_source": cal_source,
+        "calendar_status": getattr(cal, "status", "MOCK"),
+        "calendar_coverage_gaps": getattr(cal, "coverage_gaps", []),
     }
 
 

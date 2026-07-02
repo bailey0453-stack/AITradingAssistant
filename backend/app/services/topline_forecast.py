@@ -32,14 +32,22 @@ def _move_pct(rate: Optional[float], spot: Optional[float]) -> Optional[float]:
     return round((rate / spot - 1) * 100, 3)
 
 
-def _entry(label: str, rate: Optional[float], bias: Optional[str],
-           confidence: Optional[float], spot: Optional[float]) -> dict:
+def _entry(
+    label: str,
+    rate: Optional[float],
+    bias: Optional[str],
+    confidence: Optional[float],
+    spot: Optional[float],
+    *,
+    grade: Optional[str] = None,
+) -> dict:
     return {
         "horizon": label,
         "expected_rate": round(rate, 4) if rate is not None else None,
         "bias": bias or "HOLD",
         "confidence": round(float(confidence), 1) if confidence is not None else 0.0,
         "expected_move_pct": _move_pct(rate, spot),
+        "grade": grade,
     }
 
 
@@ -66,9 +74,14 @@ def _bailouts(
 
 
 def _explanation(
-    direction: str, spot: Optional[float],
-    long_bailout: Optional[float], short_bailout: Optional[float],
+    direction: str,
+    spot: Optional[float],
+    long_bailout: Optional[float],
+    short_bailout: Optional[float],
+    *,
+    grade: Optional[str] = None,
 ) -> str:
+    grade_bit = f" (Grade {grade})" if grade else ""
     if not spot:
         return (
             "Market data unavailable — no expected rate path or bailout levels. "
@@ -76,27 +89,27 @@ def _explanation(
         )
     if direction == "BUY_USD":
         return (
-            f"Primary lean is BUY_USD: the expected path projects above spot {spot:g}. "
+            f"Primary lean is BUY_USD{grade_bit}: the expected path projects above spot {spot:g}. "
             f"The long thesis is invalidated below {long_bailout:g} (Long USD bailout); "
             f"the reverse short-thesis level is {short_bailout:g}. "
             "Estimates — decision support only, not execution."
         )
     if direction == "SELL_USD":
         return (
-            f"Primary lean is SELL_USD: the expected path projects below spot {spot:g}. "
+            f"Primary lean is SELL_USD{grade_bit}: the expected path projects below spot {spot:g}. "
             f"The short thesis is invalidated above {short_bailout:g} (Short USD bailout); "
             f"the reverse long-thesis level is {long_bailout:g}. "
             "Estimates — decision support only, not execution."
         )
     if direction == "HOLD":
         return (
-            f"Neutral HOLD bias around spot {spot:g}: expected rates are "
+            f"Neutral HOLD bias{grade_bit} around spot {spot:g}: expected rates are "
             "range-bound and bailout levels are N/A until conviction rises. "
             "Decision support only."
         )
     if direction == "NO_TRADE":
         return (
-            f"Stand aside (NO_TRADE) around spot {spot:g}: no committed bias; "
+            f"Stand aside (NO_TRADE){grade_bit} around spot {spot:g}: no committed bias; "
             "bailout levels are N/A. Decision support only."
         )
     return (
@@ -110,6 +123,7 @@ def build(payload: dict) -> dict:
     market = payload.get("market") or {}
     spot = market.get("usdmxn")
     direction = payload.get("direction") or "NO_TRADE"
+    overall_grade = payload.get("opportunity_grade")
     primary_stop = payload.get("stop")
     by_name = {h.get("horizon"): h for h in (payload.get("time_horizons") or [])}
 
@@ -128,20 +142,23 @@ def build(payload: dict) -> dict:
         return spot + frac * (intraday_target - spot)
 
     horizons = [
-        _entry("1 hour", interp(0.25), intraday_bias, intraday_conf, spot),
-        _entry("2 hours", interp(0.5), intraday_bias, intraday_conf, spot),
-        _entry("4 hours", interp(1.0), intraday_bias, intraday_conf, spot),
+        _entry("1 hour", interp(0.25), intraday_bias, intraday_conf, spot, grade=overall_grade),
+        _entry("2 hours", interp(0.5), intraday_bias, intraday_conf, spot, grade=overall_grade),
+        _entry("4 hours", interp(1.0), intraday_bias, intraday_conf, spot, grade=overall_grade),
         _entry(_EOD, eod.get("target"), eod.get("bias", "HOLD"),
-               eod.get("confidence", 0.0), spot),
+               eod.get("confidence", 0.0), spot, grade=overall_grade),
         _entry("24 hours", multiday.get("target"), multiday.get("bias", "HOLD"),
-               multiday.get("confidence", 0.0), spot),
+               multiday.get("confidence", 0.0), spot, grade=overall_grade),
     ]
 
     long_bailout, short_bailout = _bailouts(spot, direction, primary_stop)
     return {
         "now": round(spot, 4) if spot is not None else None,
+        "opportunity_grade": overall_grade,
         "horizons": horizons,
         "long_usd_bailout": long_bailout,
         "short_usd_bailout": short_bailout,
-        "explanation": _explanation(direction, spot, long_bailout, short_bailout),
+        "explanation": _explanation(
+            direction, spot, long_bailout, short_bailout, grade=overall_grade
+        ),
     }
