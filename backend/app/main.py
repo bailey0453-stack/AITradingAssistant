@@ -134,6 +134,28 @@ DASHBOARD_HTML = """<!doctype html>
     .dot { width:9px; height:9px; border-radius:50%; display:inline-block; background:#5b6b8c; }
     .dot.healthy { background:#5be3a0; } .dot.using_cache { background:#7fd0ff; }
     .dot.using_fallback, .dot.rate_limited { background:#ffd98a; } .dot.offline { background:#ff6b8b; }
+    .rds-panel { border-left:4px solid #4299e1; }
+    .rds-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+    .rds-health { font-size:12px; font-weight:700; padding:4px 10px; border-radius:999px; text-transform:uppercase; letter-spacing:.04em; }
+    .rds-health.healthy { background:#0f3d2e; color:#5be3a0; }
+    .rds-health.warning { background:#3d3416; color:#ffd98a; }
+    .rds-health.error { background:#3d1626; color:#ff9bb5; }
+    .rds-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-top:14px; }
+    .rds-section { background:#0d1730; border:1px solid #1d2740; border-radius:10px; padding:12px 14px; cursor:pointer; transition:border-color .15s; }
+    .rds-section:hover { border-color:#2a5a7a; }
+    .rds-section h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#8aa0c6; }
+    .rds-row { display:flex; justify-content:space-between; gap:8px; font-size:13px; padding:3px 0; border-bottom:1px solid #152038; }
+    .rds-row:last-child { border-bottom:none; }
+    .rds-k { color:#8aa0c6; }
+    .rds-v { font-weight:600; text-align:right; }
+    .rds-icon { display:inline-block; width:1.1em; text-align:center; margin-right:4px; }
+    .rds-icon.current { color:#5be3a0; }
+    .rds-icon.missing { color:#ffd98a; }
+    .rds-icon.updating { color:#7fd0ff; }
+    .rds-detail { display:none; margin-top:10px; padding-top:10px; border-top:1px dashed #1d2740; font-size:12px; color:#8aa0c6; line-height:1.5; }
+    .rds-section.open .rds-detail { display:block; }
+    .rds-warn { color:#ffd98a; font-size:12px; margin-top:10px; }
+    .rds-warn.err { color:#ff9bb5; }
     .sources { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .sources .lbl { font-size:11px; color:#8aa0c6; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -236,6 +258,52 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Next expected run</div><div class="v" id="sch_next_run">—</div></div>
       </div>
       <p id="sch_last_detail" class="muted" style="margin-top:10px"></p>
+    </div>
+
+    <div class="card rds-panel" id="rds_panel">
+      <div class="rds-head">
+        <h2 style="margin:0">Research Database Status</h2>
+        <span id="rds_health_badge" class="rds-health warning">—</span>
+      </div>
+      <p class="muted" id="rds_updated" style="margin:6px 0 0"></p>
+      <div class="rds-grid">
+        <div class="rds-section" data-rds="db" onclick="toggleRdsSection(this)">
+          <h3>Historical Research Database</h3>
+          <div id="rds_db_rows"></div>
+          <div class="rds-detail" id="rds_db_detail"></div>
+        </div>
+        <div class="rds-section" data-rds="coverage" onclick="toggleRdsSection(this)">
+          <h3>Market Data Coverage</h3>
+          <div id="rds_cov_rows"></div>
+          <div class="rds-detail" id="rds_cov_detail"></div>
+        </div>
+        <div class="rds-section" data-rds="events" onclick="toggleRdsSection(this)">
+          <h3>Economic Events</h3>
+          <div id="rds_evt_rows"></div>
+          <div class="rds-detail" id="rds_evt_detail"></div>
+        </div>
+        <div class="rds-section" data-rds="stats" onclick="toggleRdsSection(this)">
+          <h3>Research Statistics</h3>
+          <div id="rds_stat_rows"></div>
+          <div class="rds-detail" id="rds_stat_detail"></div>
+        </div>
+        <div class="rds-section" data-rds="learning" onclick="toggleRdsSection(this)">
+          <h3>AI Learning</h3>
+          <div id="rds_learn_rows"></div>
+          <div class="rds-detail" id="rds_learn_detail"></div>
+        </div>
+        <div class="rds-section" data-rds="freshness" onclick="toggleRdsSection(this)">
+          <h3>Data Freshness</h3>
+          <div id="rds_fresh_rows"></div>
+          <div class="rds-detail" id="rds_fresh_detail"></div>
+        </div>
+        <div class="rds-section" data-rds="system" onclick="toggleRdsSection(this)">
+          <h3>System Health</h3>
+          <div id="rds_sys_rows"></div>
+          <div class="rds-detail" id="rds_sys_detail"></div>
+        </div>
+      </div>
+      <div id="rds_warnings"></div>
     </div>
 
     <div class="card" style="border-left:4px solid #7fd0ff">
@@ -674,6 +742,117 @@ DASHBOARD_HTML = """<!doctype html>
       $('tl_short_bailout').textContent = (tf.short_usd_bailout==null)?'N/A':tlRate4(tf.short_usd_bailout);
       $('tl_explain').textContent = tf.explanation || '';
     }
+    function fmtDate(v){
+      if(!v) return '—';
+      try { return new Date(v.length===10? v+'T12:00:00Z' : v).toLocaleDateString(); }
+      catch(e){ return v; }
+    }
+    function rdsIcon(st){
+      if(st==='current') return '<span class="rds-icon current" title="Current">✓</span>';
+      if(st==='updating') return '<span class="rds-icon updating" title="Updating">⟳</span>';
+      return '<span class="rds-icon missing" title="Missing">⚠</span>';
+    }
+    function rdsRow(k,v,icon){
+      return '<div class="rds-row"><span class="rds-k">'+(icon||'')+k+'</span><span class="rds-v">'+v+'</span></div>';
+    }
+    function toggleRdsSection(el){
+      if(!el) return;
+      el.classList.toggle('open');
+    }
+    async function loadResearchDatabase(){
+      let s;
+      try { s = await (await fetch('/diagnostics/research-database')).json(); }
+      catch(e){ return; }
+      const health = (s.system_health||{}).historical_database || 'warning';
+      const badge = $('rds_health_badge');
+      if(badge){
+        badge.textContent = (s.system_health||{}).historical_database_label || health;
+        badge.className = 'rds-health ' + (health==='healthy'?'healthy':(health==='error'?'error':'warning'));
+      }
+      $('rds_updated').textContent = 'Status as of ' + fmtTime(s.generated_at) +
+        ' · DB v' + (s.database_version||'?') + ' · engine ' + (s.historical_engine_version||'?');
+
+      const db = s.historical_research_database || {};
+      $('rds_db_rows').innerHTML =
+        rdsRow('Market days stored', db.market_days_stored ?? '—') +
+        rdsRow('Earliest date', fmtDate(db.earliest_date)) +
+        rdsRow('Latest date', fmtDate(db.latest_date)) +
+        rdsRow('Research snapshots', db.total_research_snapshots ?? '—') +
+        rdsRow('Raw series points', db.total_historical_snapshots ?? '—') +
+        rdsRow('Last import', fmtTime(db.last_historical_import)) +
+        rdsRow('Last daily update', fmtDate(db.last_daily_update));
+      $('rds_db_detail').innerHTML = 'Importer: <b>'+(s.active_importer||'—')+'</b> · '+
+        'Data class: <b>'+(s.data_class||'—')+'</b> · '+
+        'Lookback: '+(s.importer||{}).lookback_days+' days · '+
+        'Storage: '+(s.storage||{}).database_type+(((s.storage||{}).persistent)?' (persistent)':' (ephemeral)');
+
+      const cov = s.market_data_coverage || {};
+      let covHtml = '', covDetail = [];
+      Object.keys(cov).forEach(function(k){
+        const c = cov[k]||{};
+        const pct = c.coverage_pct!=null ? c.coverage_pct+'%' : (c.filled_days? c.filled_days+' pts':'—');
+        covHtml += rdsRow(c.label||k, pct, rdsIcon(c.status));
+        if(c.detail) covDetail.push((c.label||k)+': '+c.detail);
+      });
+      $('rds_cov_rows').innerHTML = covHtml || '<div class="muted">No coverage data.</div>';
+      $('rds_cov_detail').innerHTML = covDetail.join('<br>') || 'Click a series to see import source. Coverage % = share of research snapshot days with a non-null value.';
+
+      const ev = s.economic_events || {};
+      let evHtml = '';
+      Object.keys(ev).forEach(function(k){
+        const e = ev[k]||{};
+        evHtml += rdsRow(e.label||k, e.count ?? 0, rdsIcon(e.status==='current'? 'current':'missing'));
+      });
+      $('rds_evt_rows').innerHTML = evHtml;
+      $('rds_evt_detail').textContent = 'Indexed from historical_events (FRED-derived + metadata). Run research backfill to populate.';
+
+      const st = s.research_statistics || {};
+      $('rds_stat_rows').innerHTML =
+        rdsRow('Events indexed', st.historical_events_indexed ?? '—') +
+        rdsRow('Comparable setups', st.comparable_setups_available ?? '—') +
+        rdsRow('Avg sample size', st.average_comparable_sample_size ?? '—') +
+        rdsRow('Similarity engine', st.similarity_engine_label || st.similarity_engine_status || '—');
+      $('rds_stat_detail').innerHTML = 'Mode: <b>'+(st.similarity_mode||'—')+'</b> · '+
+        'Threshold: '+(st.comparable_threshold||'—')+' · '+ (st.similarity_engine_status||'');
+
+      const al = s.ai_learning || {};
+      $('rds_learn_rows').innerHTML =
+        rdsRow('Recommendations', al.recommendations_stored ?? '—') +
+        rdsRow('Evaluations done', al.evaluations_completed ?? '—') +
+        rdsRow('Pending', al.pending_evaluations ?? '—') +
+        rdsRow('Self-learning', al.self_learning_label || '—') +
+        rdsRow('Calibration', al.calibration_label || al.calibration_status || '—') +
+        rdsRow('Last evaluation', fmtTime(al.last_model_evaluation));
+      $('rds_learn_detail').textContent = 'Self-learning rows in research_daily_learning: '+(al.self_learning_rows??0)+'. Schema is ready; automatic daily capture is a future pipeline step.';
+
+      const fr = s.data_freshness || {};
+      $('rds_fresh_rows').innerHTML =
+        rdsRow('Market data', fmtTime(fr.last_market_data_refresh)) +
+        rdsRow('Calendar', fmtTime(fr.last_calendar_refresh)) +
+        rdsRow('Last recommendation', fmtTime(fr.last_ai_recommendation)) +
+        rdsRow('Last background job', fmtTime(fr.last_background_update));
+      const cd = fr.cache_detail || {};
+      $('rds_fresh_detail').innerHTML = 'News: '+fmtTime((cd.news||{}).last_refresh)+
+        ' · Market cache age: '+((cd.market||{}).age_minutes!=null? cd.market.age_minutes+' min':'—');
+
+      const sy = s.system_health || {};
+      $('rds_sys_rows').innerHTML =
+        rdsRow('Historical DB', sy.historical_database_label || sy.historical_database || '—') +
+        rdsRow('API issues', (sy.api_errors||[]).length) +
+        rdsRow('Warnings', (sy.warnings||[]).length);
+      let sysDetail = '';
+      (sy.api_errors||[]).forEach(function(e){
+        sysDetail += '<div>'+e.provider+': '+e.status+(e.detail?(' — '+e.detail):'')+'</div>';
+      });
+      (sy.warnings||[]).forEach(function(w){ sysDetail += '<div class="rds-warn">'+w+'</div>'; });
+      $('rds_sys_detail').innerHTML = sysDetail || 'All providers healthy.';
+
+      const warnBox = $('rds_warnings'); warnBox.innerHTML = '';
+      (sy.missing_data_warnings||[]).concat(sy.warnings||[]).slice(0,5).forEach(function(w){
+        warnBox.innerHTML += '<div class="rds-warn">'+w+'</div>';
+      });
+    }
+
     async function refresh() {
       const d = await (await fetch('/analysis/usdmxn')).json();
       const m = d.market || {};
@@ -990,6 +1169,7 @@ DASHBOARD_HTML = """<!doctype html>
       loadPerformance();
       loadScheduler();
       loadDiagnostics();
+      loadResearchDatabase();
     }
 
     // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).

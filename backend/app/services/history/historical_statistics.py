@@ -37,9 +37,9 @@ def _present_windows(match: dict) -> list[float]:
 
 
 def _rep_move(match: dict) -> float | None:
-    """Representative USD/MXN move (1d, falling back to 4h/1h)."""
+    """Representative USD/MXN move (1d, falling back to 4h/1h/5d/30d)."""
     w = match.get("windows") or {}
-    for key in ("1d", "4h", "1h", "3d", "5d"):
+    for key in ("1d", "4h", "1h", "5d", "30d", "3d"):
         if w.get(key) is not None:
             return w[key]
     return None
@@ -410,6 +410,10 @@ def evidence_narrative(
     stats: dict,
     direction: str,
     percentile: float | None = None,
+    *,
+    database_size: int | None = None,
+    comparable_count: int | None = None,
+    since_year: int | None = None,
 ) -> str | None:
     """Render the headline evidence sentence(s) for the strategist brief."""
     n = stats.get("sample_size") or 0
@@ -432,9 +436,14 @@ def evidence_narrative(
         subject, moved = "the trade lean", "played out"
         lean_word = "comparable"
 
-    parts: list[str] = [
-        f"Historically, conditions similar to today occurred {n} times."
-    ]
+    parts: list[str] = []
+    if database_size and since_year:
+        parts.append(
+            f"Searched {database_size} daily market environments since {since_year}; "
+            f"{comparable_count or n} comparable analog(s) inform this read."
+        )
+    else:
+        parts.append(f"Historically, conditions similar to today occurred {n} times.")
     if wins is not None:
         parts.append(f"{subject.capitalize()} {moved} in {wins} of those cases"
                      + (f" ({win_rate}%)." if win_rate is not None else "."))

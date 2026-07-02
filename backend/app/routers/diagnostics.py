@@ -25,6 +25,7 @@ from app.models import (
 )
 
 from app.services.grade_diagnostics import grade_calibration_report
+from app.services.research_database_status import research_database_status
 
 logger = logging.getLogger(__name__)
 
@@ -76,3 +77,9 @@ def grade_calibration(
     grading without mutating any records.
     """
     return grade_calibration_report(db, limit=limit)
+
+
+@router.get("/research-database")
+def research_database_panel(db: Session = Depends(get_db)) -> dict:
+    """Read-only Research Database Status for the dashboard health panel."""
+    return research_database_status(db)

@@ -2062,6 +2062,8 @@ def test_historical_backfill():
         # Registry resolves real classes; unknown -> mock.
         assert get_importer("alphavantage").name == "alphavantage"
         assert get_importer("fred").name == "fred"
+        assert get_importer("yahoo").name == "yahoo"
+        assert get_importer("research").name == "research"
         assert get_importer("csv").name == "csv"
         assert get_importer("does-not-exist").name == "mock"
 
@@ -2092,7 +2094,8 @@ def test_historical_backfill():
                 assert key in body, (key, list(body))
             assert set(body["counts"]) == {
                 "historical_events", "historical_event_reactions",
-                "historical_market_snapshots", "similarity_matches",
+                "historical_market_snapshots", "research_market_snapshots",
+                "similarity_matches",
             }, body["counts"]
 
     def csv_importer_loads_fixtures_and_takes_priority():
@@ -2207,12 +2210,98 @@ def test_historical_backfill():
         except RuntimeError as exc:
             assert "not configured" in str(exc)
 
+    def research_snapshot_builder_merges_series():
+        from datetime import datetime, timezone
+
+        from app.models import ResearchMarketSnapshot
+        from app.services.history.historical_snapshots import has_research_snapshots, load_research_comparables
+        from app.services.history.similarity_engine import find_similar
+        from app.services.history.snapshot_builder import build_research_snapshots
+
+        db = SessionLocal()
+        try:
+            _wipe(db)
+            base = datetime(2024, 1, 2, tzinfo=timezone.utc)
+            prices = [18.0, 18.1, 18.3, 18.2, 18.5, 18.4]
+            for i, px in enumerate(prices):
+                ts = base.replace(day=2 + i)
+                db.add(HistoricalMarketSnapshot(series="USDMXN", ts=ts, usdmxn=px,
+                                                source="test", source_quality="imported"))
+                db.add(HistoricalMarketSnapshot(series="VIX", ts=ts, vix=14.0 + i * 0.2,
+                                                source="test", source_quality="imported"))
+            db.commit()
+            built = build_research_snapshots(db, source="test", source_quality="imported")
+            assert built["snapshots"] >= len(prices), built
+            assert has_research_snapshots(db)
+            comps = load_research_comparables(db)
+            assert len(comps) >= len(prices)
+            hist = find_similar(
+                db,
+                {
+                    "market": {
+                        "vix": 15.0, "dxy": 104.0, "us2y": 4.5, "us10y": 4.1,
+                        "oil": 80.0, "gold": 2000.0, "sp_futures": 5000.0,
+                    },
+                    "momentum": {"change": 0.01},
+                    "recent_news": [],
+                    "upcoming_events": [],
+                    "released_last_24h": [],
+                },
+                regime={"primary": "Trending"},
+                top_n=3,
+            )
+            assert hist["data_mode"] == "research_snapshots"
+            assert hist["considered"] >= len(prices)
+            db.query(ResearchMarketSnapshot).delete()
+            db.commit()
+        finally:
+            db.close()
+
     check("mock remains the default importer", mock_is_the_default)
     check("lazy seed uses mock; diagnostics report SAMPLE", lazy_seed_uses_mock_and_diagnostics_report_sample)
     check("GET /history/diagnostics works", diagnostics_endpoint_works)
     check("CSV importer loads fixtures; imported takes priority over mock", csv_importer_loads_fixtures_and_takes_priority)
     check("network importers never log/leak API keys", network_importers_never_leak_keys)
     check("network importers are series-only and not lazy", network_importers_are_series_only_and_not_lazy)
+    check("research snapshot builder merges imported series", research_snapshot_builder_merges_series)
+
+
+def test_research_database_status_panel():
+    """Research Database Status endpoint (read-only dashboard panel)."""
+    from app.database import SessionLocal, init_db
+    from app.services.research_database_status import (
+        COVERAGE_FIELDS,
+        EVENT_TYPES,
+        research_database_status,
+    )
+
+    init_db()
+
+    def endpoint_responds():
+        with TestClient(app) as c:
+            r = c.get("/diagnostics/research-database")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            for key in (
+                "historical_research_database", "market_data_coverage",
+                "economic_events", "research_statistics", "ai_learning",
+                "data_freshness", "system_health", "database_version",
+            ):
+                assert key in body, (key, list(body.keys()))
+            assert len(body["market_data_coverage"]) == len(COVERAGE_FIELDS)
+            assert len(body["economic_events"]) == len(EVENT_TYPES)
+
+    def service_is_read_only_fast():
+        db = SessionLocal()
+        try:
+            payload = research_database_status(db)
+            assert payload["system_health"]["historical_database"] in ("healthy", "warning", "error")
+            assert "generated_at" in payload
+        finally:
+            db.close()
+
+    check("GET /diagnostics/research-database responds", endpoint_responds)
+    check("research_database_status aggregates without error", service_is_read_only_fast)
 
 
 def test_stale_fallback():
@@ -2872,6 +2961,7 @@ def main():
     test_decision_quality()
     test_provenance_engine()
     test_historical_backfill()
+    test_research_database_status_panel()
     test_stale_fallback()
     test_topline_forecast()
     test_scheduled_jobs()

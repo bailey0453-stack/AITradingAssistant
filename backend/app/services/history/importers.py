@@ -785,10 +785,92 @@ class CSVImporter(HistoricalImporter):
         return bars
 
 
-class YahooFinanceImporter(_NotConfiguredImporter):
+# --------------------------------------------------------------------------- #
+# Yahoo Finance — free daily OHLC via the public chart API (no API key).
+# --------------------------------------------------------------------------- #
+class YahooFinanceImporter(HistoricalImporter):
+    """Backfill daily market history from Yahoo Finance chart API."""
+
     name = "yahoo"
     source_quality = "vendor_free"
-    docs = "Free daily bars via yfinance (no intraday; daily reaction windows only)."
+    provides_events = False
+    provides_series = True
+    lazy_safe = False
+    docs = "Free daily bars via Yahoo Finance chart API (no key)."
+
+    URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    # Yahoo symbol -> internal series name
+    SYMBOLS = {
+        "MXN=X": "USDMXN",
+        "DX-Y.NYB": "DXY",
+        "^GSPC": "SP500",
+        "^VIX": "VIX",
+        "GC=F": "GOLD",
+        "CL=F": "OIL",
+    }
+
+    def __init__(self, settings=None, lookback_days: int = 3650) -> None:
+        from app.config import get_settings
+
+        self.settings = settings or get_settings()
+        self.lookback_days = lookback_days
+
+    def fetch_events(self) -> list[dict]:
+        raise NotImplementedError(f"{self.name} importer is series-only.")
+
+    def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
+        raise NotImplementedError(f"{self.name} importer is series-only.")
+
+    def _chart(self, symbol: str) -> list[dict]:
+        import httpx
+
+        period1 = int(
+            (datetime.now(timezone.utc) - timedelta(days=self.lookback_days)).timestamp()
+        )
+        period2 = int(datetime.now(timezone.utc).timestamp())
+        url = self.URL.format(symbol=symbol)
+        params = {"interval": "1d", "period1": period1, "period2": period2}
+        try:
+            resp = httpx.get(
+                url,
+                params=params,
+                timeout=getattr(self.settings, "http_timeout_seconds", 12.0),
+                headers={"User-Agent": "AITradingAssistant/1.0"},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Yahoo chart request failed for {symbol}: {exc}") from None
+
+        result = (payload or {}).get("chart", {}).get("result") or []
+        if not result:
+            raise RuntimeError(f"Yahoo returned no chart data for {symbol}.")
+        block = result[0]
+        timestamps = block.get("timestamp") or []
+        closes = (
+            (block.get("indicators") or {}).get("quote") or [{}]
+        )[0].get("close") or []
+        series_name = self.SYMBOLS[symbol]
+        bars: list[dict] = []
+        for ts_raw, close in zip(timestamps, closes):
+            if close is None:
+                continue
+            ts = datetime.fromtimestamp(int(ts_raw), tz=timezone.utc)
+            bars.append({"series": series_name, "ts": ts, "value": float(close)})
+        return bars
+
+    def fetch_series(self) -> list[dict]:
+        bars: list[dict] = []
+        errors: list[str] = []
+        for symbol in self.SYMBOLS:
+            try:
+                bars.extend(self._chart(symbol))
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Yahoo %s unavailable: %s", symbol, exc)
+                errors.append(symbol)
+        if not bars and errors:
+            raise RuntimeError(f"Yahoo returned no data for: {', '.join(errors)}.")
+        return bars
 
 
 # --------------------------------------------------------------------------- #
@@ -815,9 +897,14 @@ class FREDImporter(HistoricalImporter):
     SERIES = {
         "US2Y": "DGS2",
         "US10Y": "DGS10",
-        "DXY": "DTWEXBGS",     # Nominal Broad U.S. Dollar Index (proxy)
+        "DXY": "DTWEXBGS",
         "VIX": "VIXCLS",
-        "OIL": "DCOILWTICO",   # WTI spot
+        "OIL": "DCOILWTICO",
+        "FED_FUNDS": "FEDFUNDS",
+        "US_CPI": "CPIAUCSL",
+        "US_PCE": "PCEPI",
+        "BANXICO_RATE": "INTDSRMXM193N",
+        "MEXICO_CPI": "FPCPITOTLZGMEX",
     }
 
     def __init__(self, settings=None, lookback_days: int = 1825) -> None:
@@ -1034,18 +1121,221 @@ class PolygonImporter(_NotConfiguredImporter):
     docs = "True intraday FX bars via Polygon.io (paid)."
 
 
+# --------------------------------------------------------------------------- #
+# FRED-derived economic events (release observations, rate changes).
+# --------------------------------------------------------------------------- #
+class FREDEconomicEventsImporter(HistoricalImporter):
+    """Build historical events from FRED macro series observation changes."""
+
+    name = "fred_events"
+    source_quality = "official"
+    provides_events = True
+    provides_series = False
+    lazy_safe = False
+
+    # series_id -> (event_type, event_name, country, currency_impact, importance)
+    EVENT_SERIES = {
+        "CPIAUCSL": ("us_cpi", "US CPI (Index)", "US", "USD", "high"),
+        "PCEPI": ("us_pce", "US PCE (Index)", "US", "USD", "high"),
+        "PAYEMS": ("us_nfp", "US Nonfarm Payrolls", "US", "USD", "high"),
+        "FEDFUNDS": ("fed_rate_decision", "Fed Funds Effective Rate", "US", "USD", "high"),
+        "INTDSRMXM193N": ("banxico_rate_decision", "Banxico Policy Rate (proxy)", "MX", "MXN", "high"),
+        "FPCPITOTLZGMEX": ("mexico_cpi", "Mexico CPI (Index)", "MX", "MXN", "medium"),
+    }
+
+    def __init__(self, settings=None, lookback_days: int = 3650) -> None:
+        from app.config import get_settings
+
+        self.settings = settings or get_settings()
+        self.lookback_days = lookback_days
+        self._fred = FREDImporter(settings, lookback_days=lookback_days)
+
+    def fetch_events(self) -> list[dict]:
+        events: list[dict] = []
+        for series_id, meta in self.EVENT_SERIES.items():
+            try:
+                obs = self._fred._observations(series_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("FRED events series %s skipped: %s", series_id, exc)
+                continue
+            etype, ename, country, impact, importance = meta
+            prev_val = None
+            for ts, value in obs:
+                if prev_val is None:
+                    prev_val = value
+                    continue
+                if value == prev_val:
+                    continue
+                forecast = prev_val
+                actual = value
+                events.append({
+                    "event_type": etype,
+                    "event_name": ename,
+                    "country": country,
+                    "release_time": ts.replace(hour=13, minute=30),
+                    "forecast": forecast,
+                    "actual": actual,
+                    "previous": prev_val,
+                    "importance": importance,
+                    "currency_impact": impact,
+                    "baseline": None,
+                    "context": {},
+                })
+                prev_val = value
+        events.extend(_POWELL_SPEECH_METADATA)
+        return events
+
+    def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
+        baseline = float(event.get("baseline") or 0.0)
+        return [(0.0, baseline)] if baseline else []
+
+
+_POWELL_SPEECH_METADATA: list[dict] = [
+    {
+        "event_type": "powell_speech",
+        "event_name": "Chair Powell — Jackson Hole Symposium",
+        "country": "US",
+        "release_time": _dt(2022, 8, 26, 14),
+        "forecast": None,
+        "actual": None,
+        "previous": None,
+        "importance": "high",
+        "currency_impact": "USD",
+        "baseline": None,
+        "context": {"news_tags": ["fed", "powell", "speech"]},
+    },
+    {
+        "event_type": "powell_speech",
+        "event_name": "Chair Powell — FOMC Press Conference",
+        "country": "US",
+        "release_time": _dt(2024, 9, 18, 19),
+        "forecast": None,
+        "actual": None,
+        "previous": None,
+        "importance": "high",
+        "currency_impact": "USD",
+        "baseline": None,
+        "context": {"news_tags": ["fed", "powell", "fomc", "speech"]},
+    },
+]
+
+
+# --------------------------------------------------------------------------- #
+# Composite research backfill — multi-provider daily research database.
+# --------------------------------------------------------------------------- #
+class CompositeResearchImporter(HistoricalImporter):
+    """Orchestrate Yahoo + FRED + optional Alpha Vantage into research snapshots."""
+
+    name = "research"
+    source_quality = "imported"
+    provides_events = True
+    provides_series = True
+    lazy_safe = False
+
+    def __init__(self, settings=None, lookback_days: int = 3650) -> None:
+        from app.config import get_settings
+
+        self.settings = settings or get_settings()
+        self.lookback_days = lookback_days
+
+    def fetch_events(self) -> list[dict]:
+        return FREDEconomicEventsImporter(self.settings, self.lookback_days).fetch_events()
+
+    def fetch_price_path(self, event: dict) -> list[tuple[float, float]]:
+        return []
+
+    def fetch_series(self) -> list[dict]:
+        bars: list[dict] = []
+        for importer in (
+            YahooFinanceImporter(self.settings, self.lookback_days),
+            FREDImporter(self.settings, self.lookback_days),
+        ):
+            try:
+                bars.extend(importer.fetch_series())
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Composite series stage %s skipped: %s", importer.name, exc)
+        if getattr(self.settings, "alpha_vantage_api_key", None):
+            try:
+                av = AlphaVantageImporter(self.settings, outputsize="full")
+                av.throttle = True
+                bars.extend(av.fetch_series())
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Composite Alpha Vantage supplement skipped: %s", exc)
+        return bars
+
+    def run_all(self, db: Session) -> dict:
+        out = {
+            "importer": self.name,
+            "source_quality": self.source_quality,
+            "events": 0,
+            "reactions": 0,
+            "price_points": 0,
+            "series_points": 0,
+            "research_snapshots": 0,
+            "errors": [],
+        }
+        if self.provides_series:
+            try:
+                r = self.run_series(db)
+                out["series_points"] = r.get("series_points", 0)
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                out["errors"].append(f"series: {exc}")
+        if self.provides_events:
+            try:
+                ev = FREDEconomicEventsImporter(self.settings, self.lookback_days)
+                r = ev.run(db)
+                out["events"] = r.get("events", 0)
+                out["reactions"] = r.get("reactions", 0)
+                out["price_points"] = r.get("price_points", 0)
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                out["errors"].append(f"events: {exc}")
+        try:
+            from app.services.history.snapshot_builder import build_research_snapshots
+            from datetime import date as _date
+
+            min_date = _date.today().replace(year=_date.today().year - 10)
+            built = build_research_snapshots(
+                db, min_date=min_date, replace=False, source=self.name, source_quality=self.source_quality,
+            )
+            out["research_snapshots"] = built.get("snapshots", 0)
+            out["research_range"] = {
+                "start": built.get("start_date"),
+                "end": built.get("end_date"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            out["errors"].append(f"snapshots: {exc}")
+        return out
+
+
 _IMPORTERS: dict[str, type[HistoricalImporter]] = {
     "mock": MockSampleImporter,
     "sample": MockSampleImporter,
     "csv": CSVImporter,
     "yahoo": YahooFinanceImporter,
     "fred": FREDImporter,
+    "fred_events": FREDEconomicEventsImporter,
     "alphavantage": AlphaVantageImporter,
+    "research": CompositeResearchImporter,
+    "composite": CompositeResearchImporter,
     "polygon": PolygonImporter,
 }
 
 
-def get_importer(name: str = "mock") -> HistoricalImporter:
+def get_importer(name: str = "mock", settings=None) -> HistoricalImporter:
     """Return an importer instance by name (defaults to the mock/sample one)."""
-    cls = _IMPORTERS.get((name or "mock").lower(), MockSampleImporter)
+    from app.config import get_settings
+
+    settings = settings or get_settings()
+    key = (name or "mock").lower()
+    cls = _IMPORTERS.get(key, MockSampleImporter)
+    lookback = getattr(settings, "history_lookback_days", 3650)
+    if key in ("fred", "yahoo", "fred_events", "research", "composite"):
+        return cls(settings, lookback_days=lookback)
+    if key == "alphavantage":
+        return AlphaVantageImporter(settings)
+    if key == "csv":
+        return CSVImporter()
     return cls()

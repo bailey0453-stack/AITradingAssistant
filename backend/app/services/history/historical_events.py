@@ -17,8 +17,10 @@ from app.models import (
     HistoricalEvent,
     HistoricalEventReaction,
     HistoricalMarketSnapshot,
+    ResearchMarketSnapshot,
     SimilarityMatch,
 )
+from app.services.history.historical_snapshots import research_snapshot_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -216,13 +218,15 @@ def history_diagnostics(db: Session) -> dict:
         "historical_events": _count(db, HistoricalEvent),
         "historical_event_reactions": _count(db, HistoricalEventReaction),
         "historical_market_snapshots": _count(db, HistoricalMarketSnapshot),
+        "research_market_snapshots": _count(db, ResearchMarketSnapshot),
         "similarity_matches": _count(db, SimilarityMatch),
     }
 
     reaction_qualities = _distinct_qualities(db, HistoricalEventReaction)
     snapshot_qualities = _distinct_qualities(db, HistoricalMarketSnapshot)
+    research_qualities = _distinct_qualities(db, ResearchMarketSnapshot)
     reaction_class = _classify(reaction_qualities)
-    snapshot_class = _classify(snapshot_qualities)
+    snapshot_class = _classify(snapshot_qualities | research_qualities)
 
     # Best provenance across both tables drives the headline class.
     rank = {"none": -1, "sample": 0, "imported": 1, "live": 2}
@@ -241,12 +245,18 @@ def history_diagnostics(db: Session) -> dict:
     importer = get_importer(configured)
 
     warnings: list[str] = []
-    if counts["historical_event_reactions"] == 0:
-        warnings.append("No historical reactions present — history will be seeded on first use.")
-    elif reaction_class == "sample":
+    if counts["historical_event_reactions"] == 0 and counts["research_market_snapshots"] == 0:
+        warnings.append("No historical reactions or research snapshots — history will be seeded on first use.")
+    elif reaction_class == "sample" and counts["research_market_snapshots"] == 0:
         warnings.append(
             "Similarity is using SAMPLE data only. Run a real backfill "
-            "(python -m app.scripts.backfill_history) to upgrade to imported/live."
+            "(python -m app.scripts.backfill_history --importer research) to upgrade."
+        )
+    elif counts["research_market_snapshots"] > 0:
+        bounds = research_snapshot_bounds(db)
+        warnings.append(
+            f"Research database active: {bounds.get('total_snapshots', 0)} daily snapshots "
+            f"({bounds.get('start_date')} → {bounds.get('end_date')})."
         )
     if snapshot_class == "imported" and reaction_class == "sample":
         warnings.append(
@@ -268,7 +278,16 @@ def history_diagnostics(db: Session) -> dict:
         "snapshots_data_class": snapshot_class,
         "reaction_source_qualities": sorted(q for q in reaction_qualities if q),
         "snapshot_source_qualities": sorted(q for q in snapshot_qualities if q),
-        "similarity_uses": "historical_event_reactions",
+        "similarity_uses": (
+            "research_market_snapshots"
+            if counts["research_market_snapshots"] > 0
+            else "historical_event_reactions"
+        ),
+        "research_bounds": (
+            research_snapshot_bounds(db)
+            if counts["research_market_snapshots"] > 0
+            else None
+        ),
         "last_imported": last_imported,
         "is_sample_only": data_class == "sample",
         "warnings": warnings,

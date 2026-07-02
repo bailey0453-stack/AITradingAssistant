@@ -25,6 +25,7 @@ from app.services.history import (
     setup_percentile,
 )
 from app.services.history.historical_events import load_reactions
+from app.services.history.historical_snapshots import has_research_snapshots, load_research_comparables
 from app.services import topline_forecast
 
 # Direction sign for "favorable" USD/MXN moves (BUY_USD wants up, SELL_USD down).
@@ -106,7 +107,11 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
                 sign = _DIR_SIGN.get(direction, 1.0)
                 reference = [
                     _rep_move(r) * sign
-                    for r in load_reactions(db)
+                    for r in (
+                        load_research_comparables(db)
+                        if has_research_snapshots(db)
+                        else load_reactions(db)
+                    )
                     if _rep_move(r) is not None
                 ]
                 percentile = setup_percentile(reference, stats["average_move"] * sign)
@@ -114,7 +119,14 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             logger.exception("Setup percentile failed; continuing.")
 
         # Evidence-based historical brief sentence(s).
-        evidence_summary = evidence_narrative(stats, direction, percentile)
+        evidence_summary = evidence_narrative(
+            stats,
+            direction,
+            percentile,
+            database_size=hist.get("database_size"),
+            comparable_count=hist.get("comparable_count"),
+            since_year=hist.get("since_year"),
+        )
 
         # Blended, configurable confidence. The six conceptual inputs (signals,
         # historical evidence, regime, volatility, news quality, calendar
@@ -156,6 +168,10 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             "best_similarity": hist["best_similarity"],
             "best_distance": hist.get("best_distance"),
             "considered": hist["considered"],
+            "comparable_count": hist.get("comparable_count"),
+            "database_size": hist.get("database_size"),
+            "since_year": hist.get("since_year"),
+            "data_mode": hist.get("data_mode"),
             "sample_size": stats.get("sample_size"),
             "setup_percentile": percentile,
             "evidence_summary": evidence_summary,
@@ -176,8 +192,11 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
         explanations["historical_similarity"] = (
             f"Best analog similarity {round(hist['best_similarity'] * 100, 1)}% "
             f"(distance {hist.get('best_distance')}) across {hist['considered']} "
-            f"historical events; weighted blend of regime, event type, DXY, yields, "
-            f"oil, VIX, momentum and news-tag overlap (SIMILARITY_WEIGHTS)."
+            f"daily environments"
+            + (f" since {hist['since_year']}" if hist.get("since_year") else "")
+            + f"; {hist.get('comparable_count', len(matches))} above similarity threshold. "
+            f"Weighted blend of regime, macro, volatility, momentum and news-tag overlap "
+            f"(SIMILARITY_WEIGHTS)."
         )
         if probabilities.get("method"):
             explanations["probability"] = probabilities["method"]
@@ -230,6 +249,13 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
                     result[k] = strat[k]
             except Exception:  # noqa: BLE001
                 logger.exception("Strategist refresh failed; keeping signal-confidence brief.")
+        hist_note = (
+            f"Ranked vs {hist.get('database_size', hist['considered'])} imported daily snapshots"
+            + (f" since {hist['since_year']}" if hist.get("since_year") else "")
+            + "; tune via SIMILARITY_WEIGHTS."
+            if hist.get("data_mode") == "research_snapshots"
+            else "Ranked vs backfilled sample history; tune via SIMILARITY_WEIGHTS."
+        )
         result["historical_similarity"] = {
             "status": "active",
             "best_similarity": hist["best_similarity"],
@@ -237,7 +263,7 @@ def _historical_intelligence(db: Session, market, context: dict, result: dict) -
             "win_rate": stats.get("win_rate"),
             "average_move": stats.get("average_move"),
             "median_move": stats.get("median_move"),
-            "note": "Ranked vs backfilled sample history; tune via SIMILARITY_WEIGHTS.",
+            "note": hist_note,
         }
         result["historical"] = historical_context
         result["probabilities"] = probabilities

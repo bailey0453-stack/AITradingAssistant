@@ -154,6 +154,33 @@ def init_db() -> None:
     from app import models  # noqa: F401  (ensures models are imported)
 
     Base.metadata.create_all(bind=engine)
+    _apply_additive_migrations()
+
+
+def _apply_additive_migrations() -> None:
+    """Best-effort additive schema updates (no Alembic). Idempotent."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if not insp.has_table("similarity_matches"):
+        return
+    cols = {c["name"] for c in insp.get_columns("similarity_matches")}
+    stmts: list[str] = []
+    if "research_snapshot_id" not in cols:
+        stmts.append(
+            "ALTER TABLE similarity_matches ADD COLUMN research_snapshot_id INTEGER"
+        )
+    # matched_event_id may have been NOT NULL on older deployments.
+    if engine.dialect.name == "postgresql":
+        stmts.append(
+            "ALTER TABLE similarity_matches ALTER COLUMN matched_event_id DROP NOT NULL"
+        )
+    for sql in stmts:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(sql))
+        except Exception:  # noqa: BLE001 - migration is best-effort
+            pass
 
 
 def get_db() -> Generator[Session, None, None]:

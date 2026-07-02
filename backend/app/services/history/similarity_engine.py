@@ -25,6 +25,12 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.models import SimilarityMatch
 from app.services.history.historical_events import ensure_history_seeded, load_reactions
+from app.services.history.historical_snapshots import (
+    COMPARABLE_MIN_SIMILARITY,
+    has_research_snapshots,
+    load_research_comparables,
+    research_snapshot_bounds,
+)
 from app.services.signal_weights import event_signal_key, news_category
 
 logger = logging.getLogger(__name__)
@@ -194,7 +200,22 @@ def find_similar(
     query = build_feature_vector(context, regime=regime)
 
     ensure_history_seeded(db)
-    reactions = load_reactions(db)
+    use_research = has_research_snapshots(db)
+    if use_research:
+        bounds = research_snapshot_bounds(db)
+        since_year = None
+        if bounds.get("start_date"):
+            try:
+                since_year = int(str(bounds["start_date"])[:4])
+            except ValueError:
+                since_year = None
+        reactions = load_research_comparables(db)
+        data_mode = "research_snapshots"
+    else:
+        bounds = {}
+        since_year = None
+        reactions = load_reactions(db)
+        data_mode = "event_reactions"
 
     scored = []
     for r in reactions:
@@ -203,8 +224,8 @@ def find_similar(
         item["similarity_score"] = s
         item["distance_score"] = round(1.0 - s, 4)
         scored.append(item)
-    # Nearest-neighbor order: highest similarity (lowest distance) first.
     scored.sort(key=lambda x: x["similarity_score"], reverse=True)
+    comparable = [x for x in scored if x["similarity_score"] >= COMPARABLE_MIN_SIMILARITY]
     top = scored[:top_n]
     for rank, item in enumerate(top, start=1):
         item["rank"] = rank
@@ -217,6 +238,10 @@ def find_similar(
         "query_vector": query,
         "weights": weights,
         "considered": len(reactions),
+        "comparable_count": len(comparable),
+        "database_size": bounds.get("total_snapshots") or len(reactions),
+        "since_year": since_year,
+        "data_mode": data_mode,
         "top_matches": top,
         "best_similarity": best,
         "best_distance": round(1.0 - best, 4) if top else None,
@@ -232,11 +257,14 @@ def persist_matches(
     """Persist ranked matches to ``similarity_matches`` (best-effort)."""
     try:
         for rank, m in enumerate(matches, start=1):
+            event_id = m.get("event_id")
+            snapshot_id = m.get("id") if m.get("trade_date") else None
             db.add(
                 SimilarityMatch(
                     query_context=query_vector,
-                    matched_event_id=m["event_id"],
-                    reaction_id=m["id"],
+                    matched_event_id=event_id if not snapshot_id else None,
+                    research_snapshot_id=snapshot_id,
+                    reaction_id=m.get("id") if not snapshot_id else None,
                     similarity_score=m["similarity_score"],
                     rank=rank,
                     analysis_snapshot_id=analysis_snapshot_id,

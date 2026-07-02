@@ -88,8 +88,10 @@ class Settings(BaseSettings):
     # data-quality combine into blended confidence.
     similarity_weights: Optional[Dict[str, float]] = None
     confidence_weights: Optional[Dict[str, float]] = None
-    # Which importer seeds historical backfill (mock | csv | yahoo | fred | ...).
+    # Which importer seeds historical backfill (mock | csv | yahoo | fred | research | ...).
     history_importer: str = "mock"
+    # Lookback window for research backfill (days). Default ≈10 years.
+    history_lookback_days: int = 3650
 
     # --- Market data freshness (stale-fallback safety) ---
     # Max age (MINUTES) a cached real FX quote may be while the market is OPEN

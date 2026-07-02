@@ -168,8 +168,11 @@ class SimilarityMatch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     query_context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    matched_event_id: Mapped[int] = mapped_column(
-        ForeignKey("historical_events.id"), index=True
+    matched_event_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("historical_events.id"), nullable=True, index=True
+    )
+    research_snapshot_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("research_market_snapshots.id"), nullable=True, index=True
     )
     reaction_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("historical_event_reactions.id"), nullable=True
