@@ -3248,9 +3248,48 @@ def test_centroid_fix_phase1():
             sending_time=ts,
         )
         assert "35=V" in msg and "55=USD/MXN" in msg and "262=MD-TEST" in msg, msg
-        assert "263=1" in msg and "269=0" in msg and "269=1" in msg, msg
+        assert "263=1" in msg and "264=1" in msg and "265=1" in msg, msg
+        assert "269=0" in msg and "269=1" in msg, msg
         v = codec.validate_message(msg)
         assert v["valid"], v
+
+    def market_data_request_vendor_doc_shape():
+        msg = messages.build_market_data_request(
+            seq_num=3,
+            sender_comp_id="CLIENT",
+            target_comp_id="GFC",
+            symbol="USDMXN",
+            md_req_id="MD-VENDOR",
+            subscription_type="2",
+            market_depth="0",
+            include_md_update_type=False,
+            sending_time=ts,
+        )
+        assert "263=2" in msg and "264=0" in msg, msg
+        assert "265=" not in msg, msg
+        v = codec.validate_message(msg)
+        assert v["valid"], v
+
+    def market_data_request_env_config():
+        from app.config import Settings
+
+        s = Settings(
+            centroid_md_subscription_request_type=2,
+            centroid_md_market_depth=0,
+            centroid_md_include_md_update_type=False,
+            centroid_symbol_usdmxn="USDMXN",
+        )
+        msg = messages.build_market_data_request(
+            seq_num=2,
+            sender_comp_id="MD_GFC_DEMO_FIX",
+            target_comp_id="CENTROID_SOL",
+            symbol=s.centroid_md_symbol_usdmxn,
+            subscription_type=str(s.centroid_md_subscription_request_type),
+            market_depth=str(s.centroid_md_market_depth),
+            include_md_update_type=s.centroid_md_include_md_update_type,
+        )
+        assert "55=USDMXN" in msg and "263=2" in msg and "264=0" in msg, msg
+        assert "265=" not in msg, msg
 
     def snapshot_parsing():
         snap = (
@@ -3355,6 +3394,8 @@ def test_centroid_fix_phase1():
     check("FIX checksum + body length validation", checksum_and_body_length)
     check("FIX logon message", logon_message_shape)
     check("FIX market data request message", market_data_request_shape)
+    check("FIX MD request vendor doc shape (263=2,264=0,no 265)", market_data_request_vendor_doc_shape)
+    check("FIX MD request env config", market_data_request_env_config)
     check("FIX market data snapshot parsing", snapshot_parsing)
     check("FIX diagnostics redact secrets", diagnostics_redact_secrets)
     check("FIX simulation order is not live", simulation_order_not_live)

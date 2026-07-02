@@ -148,19 +148,25 @@ class CentroidMarketDataSession:
         self._send_logon()
         symbol = self.settings.centroid_md_symbol_usdmxn or "USD/MXN"
         self._md_req_id = f"MD-{int(time.time())}"
+        sub_type = str(self.settings.centroid_md_subscription_request_type)
+        depth = str(self.settings.centroid_md_market_depth)
+        include_265 = bool(self.settings.centroid_md_include_md_update_type)
         md_msg = build_market_data_request(
             seq_num=self._next_out_seq(),
             sender_comp_id=self.settings.centroid_md_sender_comp_id or "",
             target_comp_id=self.settings.centroid_md_target_comp_id or "",
             symbol=symbol,
             md_req_id=self._md_req_id,
+            subscription_type=sub_type,
+            market_depth=depth,
+            include_md_update_type=include_265,
         )
         self.store.record_md_request(
             md_req_id=self._md_req_id,
             symbol=symbol,
-            subscription_request_type="1",
-            market_depth="1",
-            md_update_type="1",
+            subscription_request_type=sub_type,
+            market_depth=depth,
+            md_update_type="1" if include_265 else None,
             entry_types=["0", "1"],
         )
         self._send(md_msg)

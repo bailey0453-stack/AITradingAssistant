@@ -123,6 +123,11 @@ def get_fix_diagnostics(settings: Settings | None = None) -> dict[str, Any]:
         "md_sender_comp_id": settings.centroid_md_sender_comp_id,
         "md_target_comp_id": settings.centroid_md_target_comp_id,
     }
+    payload["md_request_config"] = {
+        "subscription_request_type": str(settings.centroid_md_subscription_request_type),
+        "market_depth": str(settings.centroid_md_market_depth),
+        "include_md_update_type": bool(settings.centroid_md_include_md_update_type),
+    }
     return payload
 
 

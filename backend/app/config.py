@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     )
     # Explicit enable gate (set true in production when MD session should run).
     centroid_md_enabled: bool = False
+    # MarketDataRequest (35=V) tuning — match Centroid/GFC documentation via env.
+    centroid_md_subscription_request_type: int = 1
+    centroid_md_market_depth: int = 1
+    centroid_md_include_md_update_type: bool = True
 
     # Trading session (Phase 2+) — documented only; unused in Phase 1.
     centroid_td_host: Optional[str] = None

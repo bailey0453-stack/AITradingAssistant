@@ -108,6 +108,7 @@ def build_market_data_request(
     subscription_type: str = "1",
     market_depth: str = "1",
     md_update_type: str = "1",
+    include_md_update_type: bool = True,
     sending_time: str | None = None,
 ) -> str:
     """MarketDataRequest (35=V) — subscribe to top-of-book bid/offer."""
@@ -116,13 +117,18 @@ def build_market_data_request(
         ("262", req_id),
         ("263", subscription_type),
         ("264", market_depth),
-        ("265", md_update_type),
-        ("267", "2"),
-        ("269", "0"),
-        ("269", "1"),
-        ("146", "1"),
-        ("55", symbol),
     ]
+    if include_md_update_type:
+        fields.append(("265", md_update_type))
+    fields.extend(
+        [
+            ("267", "2"),
+            ("269", "0"),
+            ("269", "1"),
+            ("146", "1"),
+            ("55", symbol),
+        ]
+    )
     return encode_message(
         "V",
         fields,
