@@ -96,7 +96,6 @@ app.include_router(jobs.router)
 app.include_router(admin_research.router)
 app.include_router(diagnostics.router)
 app.include_router(fix_admin.router)
-app.include_router(fix_admin.legacy_router)
 
 
 DASHBOARD_HTML = """<!doctype html>
