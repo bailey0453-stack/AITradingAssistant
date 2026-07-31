@@ -1,5 +1,6 @@
 """ORM models."""
 
+from app.models.exit_simulations import RecommendationExitSimulation
 from app.models.history import (
     HistoricalEvent,
     HistoricalEventReaction,
@@ -25,5 +26,6 @@ __all__ = [
     "HistoricalImportJob",
     "Recommendation",
     "RecommendationOutcome",
+    "RecommendationExitSimulation",
     "JobRun",
 ]

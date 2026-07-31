@@ -96,6 +96,7 @@ app.include_router(jobs.router)
 app.include_router(admin_research.router)
 app.include_router(diagnostics.router)
 app.include_router(fix_admin.router)
+app.include_router(fix_admin.legacy_router)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -136,6 +137,27 @@ DASHBOARD_HTML = """<!doctype html>
     .muted { color:#8aa0c6; font-size:13px; }
     .mkt-unavail { background:#3d1626; border:1px solid #7d2a44; color:#ffd0dc; padding:12px 16px; border-radius:10px; margin-bottom:16px; font-size:14px; }
     .mkt-unavail b { color:#ff9bb5; }
+    .tdc { border-left:6px solid #ffd98a; }
+    .tdc.green { border-left-color:#5be3a0; background:linear-gradient(180deg,#0f3d2e 0%,#111a2e 48%); }
+    .tdc.yellow { border-left-color:#ffd98a; background:linear-gradient(180deg,#3d3416 0%,#111a2e 48%); }
+    .tdc.red { border-left-color:#ff9bb5; background:linear-gradient(180deg,#3d1626 0%,#111a2e 48%); }
+    .tdc-action { font-size:42px; font-weight:800; letter-spacing:.04em; margin:4px 0 10px; line-height:1.1; }
+    .tdc.green .tdc-action { color:#5be3a0; }
+    .tdc.yellow .tdc-action { color:#ffd98a; }
+    .tdc.red .tdc-action { color:#ff9bb5; }
+    .tdc-bias { font-size:18px; font-weight:700; margin:2px 0; }
+    .tdc-pred { font-size:15px; color:#c5d4ef; margin:0 0 12px; }
+    .tdc-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:12px; }
+    @media (max-width:760px){ .tdc-grid { grid-template-columns:1fr 1fr; } }
+    .tdc-grid .k { font-size:11px; color:#8aa0c6; text-transform:uppercase; letter-spacing:.04em; }
+    .tdc-grid .v { font-size:22px; font-weight:700; margin-top:4px; }
+    .tdc-why { margin-top:14px; font-size:14px; color:#d7e2f5; }
+    .tdc-details { margin-top:10px; }
+    .tdc-details summary { cursor:pointer; color:#7fd0ff; font-size:13px; }
+    .esc-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .esc-table th, .esc-table td { text-align:left; padding:6px 8px; border-bottom:1px solid #1d2740; }
+    .esc-table th { color:#8aa0c6; font-weight:600; font-size:11px; text-transform:uppercase; }
+    .esc-badge { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; background:#3d3416; color:#ffd98a; }
     .tl { border-left:2px solid #1d2740; padding-left:14px; margin-left:4px; }
     .tl .item { margin-bottom:12px; }
     .tl .label { font-weight:600; }
@@ -233,6 +255,26 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
     </div>
+    <div class="card tdc yellow" id="tradeDecisionCard">
+      <h2>Trade Decision <span class="muted">(decision support only)</span></h2>
+      <div class="tdc-action" id="tdc_action">—</div>
+      <div class="tdc-bias" id="tdc_bias">BIAS: —</div>
+      <div class="tdc-pred" id="tdc_pred">PREDICTION: —</div>
+      <div class="tdc-grid">
+        <div><div class="k">Now</div><div class="v" id="tdc_now">—</div></div>
+        <div><div class="k">4 Hours</div><div class="v" id="tdc_4h">—</div></div>
+        <div><div class="k">End of Day</div><div class="v" id="tdc_eod">—</div></div>
+        <div><div class="k" id="tdc_inv_label">Invalidation</div><div class="v" id="tdc_inv">—</div></div>
+      </div>
+      <div class="tdc-why" id="tdc_why">WHY: —</div>
+      <details class="tdc-details">
+        <summary>View decision details</summary>
+        <p class="muted" style="margin:8px 0 0">Scrolls to the detailed analysis below (gates, expected value, historical support). Does not duplicate the full dashboard.</p>
+        <p class="muted" id="tdc_gates" style="margin:6px 0 0"></p>
+        <p style="margin:8px 0 0"><a href="#decisionDetailsAnchor" style="color:#7fd0ff">Jump to detailed analysis →</a></p>
+      </details>
+      <p class="muted" style="margin:10px 0 0">Decision support only — not an order. TRADE requires A/A+, confidence ≥70, positive EV, historical support, fresh data, forecast agreement, and no high-impact event risk.</p>
+    </div>
     <div class="card" id="toplineCard" style="border-left:4px solid #7fd0ff">
       <h2>Topline Rate Forecast <span class="evb estimated" title="Projected rates and bailout levels are model estimates — not executable quotes or trade instructions.">ESTIMATED</span></h2>
       <p class="muted" style="margin:4px 0 12px">Decision support only — expected USD/MXN path and thesis-invalidation (bailout) levels. Not a trade instruction or executable quote.</p>
@@ -283,6 +325,14 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Last reject</div><div class="v" id="fix_reject" style="font-size:13px">—</div></div>
       </div>
       <p class="muted" id="fix_health" style="margin-top:10px;font-size:12px"></p>
+      <div class="rds-admin" id="fix_admin_panel" style="margin-top:14px;padding-top:14px;border-top:1px solid #1d2740">
+        <h3 style="margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#8aa0c6">FIX Diagnostics (admin)</h3>
+        <p class="muted" style="margin:0 0 10px">Raw scrubbed FIX messages for MarketDataRequest (35=V) and inbound W/X/Y/3.</p>
+        <div class="rds-admin-actions">
+          <button type="button" class="rds-btn secondary" id="fix_btn_refresh_diag">Refresh FIX Log</button>
+        </div>
+        <pre id="fix_admin_log" class="muted" style="white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;background:#0f1729;padding:10px;border-radius:8px;border:1px solid #1d2740">Set Admin Key to view raw FIX diagnostics.</pre>
+      </div>
     </div>
 
     <div class="grid2">
@@ -398,7 +448,7 @@ DASHBOARD_HTML = """<!doctype html>
       <table style="margin-top:10px"><thead><tr><th>Source</th><th>Level</th><th>Metrics</th><th>Fields</th></tr></thead><tbody id="es_rows"></tbody></table>
     </div>
 
-    <div class="card" style="border-left:4px solid #d69e2e">
+    <div class="card" id="decisionDetailsAnchor" style="border-left:4px solid #d69e2e">
       <h2>Decision quality <span class="src sample">trade vs wait</span></h2>
       <p class="muted" style="margin:4px 0 10px">Decision support only — not trading execution. Helps judge whether a setup is worth taking now vs waiting; paper figures are simulated.</p>
       <div class="row">
@@ -520,9 +570,93 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="rl_providers" style="margin-top:6px"></div>
     </div>
 
+    <div class="card" style="border-left:4px solid #d69e2e">
+      <h2>Active paper position <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">LIFECYCLE SIMULATION</span></h2>
+      <p class="muted" style="margin:4px 0 10px">One trade per actionable signal · hourly-profit-v1 · target/stop first, then hourly net-profit exit, then max hold.</p>
+      <div id="pt_active_none" class="muted">No open paper position.</div>
+      <div id="pt_active_body" class="hidden">
+        <div class="row">
+          <div class="stat"><div class="k">Direction</div><div class="v" id="pt_dir">—</div></div>
+          <div class="stat"><div class="k">Entry</div><div class="v" id="pt_entry">—</div></div>
+          <div class="stat"><div class="k">Current rate</div><div class="v" id="pt_current">—</div></div>
+          <div class="stat"><div class="k">Target</div><div class="v" id="pt_target">—</div></div>
+          <div class="stat"><div class="k">Stop</div><div class="v" id="pt_stop">—</div></div>
+          <div class="stat"><div class="k">Net P/L</div><div class="v" id="pt_net">—</div></div>
+          <div class="stat"><div class="k">Next checkpoint</div><div class="v" id="pt_checkpoint">—</div></div>
+          <div class="stat"><div class="k">Max hold</div><div class="v" id="pt_maxhold">—</div></div>
+          <div class="stat"><div class="k">Action</div><div class="v" id="pt_action">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #319795">
+      <h2>Closed-trade performance <span class="evb measured">LIFECYCLE</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Completed lifecycle trades (not per-horizon analytics). Legacy 1d horizon P/L kept below for comparison.</p>
+      <div class="row">
+        <div class="stat"><div class="k">Completed trades</div><div class="v" id="lc_trades">—</div></div>
+        <div class="stat"><div class="k">Lifecycle win rate</div><div class="v" id="lc_win">—</div></div>
+        <div class="stat"><div class="k">Net P/L</div><div class="v" id="lc_net">—</div></div>
+        <div class="stat"><div class="k">Expectancy</div><div class="v" id="lc_exp">—</div></div>
+        <div class="stat"><div class="k">Payoff ratio</div><div class="v" id="lc_payoff">—</div></div>
+        <div class="stat"><div class="k">Max drawdown</div><div class="v" id="lc_mdd">—</div></div>
+        <div class="stat"><div class="k">Avg hold (h)</div><div class="v" id="lc_hold">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:10px">Exit reason distribution</div>
+      <table><thead><tr><th>Reason</th><th>Count</th><th>%</th></tr></thead><tbody id="lc_exits"></tbody></table>
+      <div class="k muted" style="margin-top:10px">Max-hold policy comparison (backtest)</div>
+      <table><thead><tr><th>Max hold</th><th>Trades</th><th>Win%</th><th>Net P/L</th><th>Target%</th><th>Stop%</th><th>Hourly%</th><th>Max hold%</th></tr></thead><tbody id="lc_policy"></tbody></table>
+    </div>
+
+    <div class="card" style="border-left:4px solid #805ad5">
+      <h2>14-Day Hourly Profit Exit Replay <span class="evb measured">RESEARCH ONLY</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Read-only replay over stored recommendations. Does not replace production headline statistics.</p>
+      <p class="muted" id="r14_period">Period: —</p>
+      <p class="muted" id="r14_resolution">Price data: —</p>
+      <div class="row">
+        <div class="stat"><div class="k">Legacy trades (1d)</div><div class="v" id="r14_legacy_n">—</div></div>
+        <div class="stat"><div class="k">Replay trades (24h)</div><div class="v" id="r14_new_n">—</div></div>
+        <div class="stat"><div class="k">Legacy net</div><div class="v" id="r14_legacy_net">—</div></div>
+        <div class="stat"><div class="k">Replay net (24h)</div><div class="v" id="r14_new_net">—</div></div>
+        <div class="stat"><div class="k">Dupes removed</div><div class="v" id="r14_dupes">—</div></div>
+        <div class="stat"><div class="k">Top diff reason</div><div class="v" id="r14_diff" style="font-size:12px">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:10px">Max-hold variants (14-day replay)</div>
+      <table><thead><tr><th>Hold</th><th>Completed</th><th>Skipped (open)</th><th>Data insuff.</th><th>Win%</th><th>Net P/L</th><th>Expectancy</th><th>MDD</th></tr></thead><tbody id="r14_variants"></tbody></table>
+      <p style="margin-top:8px"><a id="r14_csv_link" href="/paper-trading/replay/14-day/csv" target="_blank">Download trade-by-trade CSV</a></p>
+    </div>
+
+    <div class="card" style="border-left:4px solid #38a169">
+      <h2>Exit Strategy Comparison <span class="esc-badge" id="esc_sample">—</span></h2>
+      <p class="muted" style="margin:4px 0 10px">SIMULATED PAPER PERFORMANCE — old fixed-horizon 1d vs exit at first net-profitable observation. Same notional/costs. No look-ahead. Not live trading.</p>
+      <p class="muted" id="esc_period">Period: —</p>
+      <p class="muted" id="esc_meta">Eligible: — · Excluded: — · Compared: — · Verdict: —</p>
+      <div class="grid2">
+        <div>
+          <div class="k muted">OLD METHOD (fixed-horizon 1d)</div>
+          <table class="esc-table"><tbody id="esc_old"></tbody></table>
+        </div>
+        <div>
+          <div class="k muted">NEW METHOD (first net profit)</div>
+          <table class="esc-table"><tbody id="esc_new"></tbody></table>
+        </div>
+      </div>
+      <div class="k muted" style="margin-top:12px">Difference</div>
+      <div class="row" id="esc_diff_row">
+        <div class="stat"><div class="k">Δ Net P/L</div><div class="v" id="esc_d_net">—</div></div>
+        <div class="stat"><div class="k">Δ Win rate</div><div class="v" id="esc_d_wr">—</div></div>
+        <div class="stat"><div class="k">Δ Avg P/L</div><div class="v" id="esc_d_avg">—</div></div>
+        <div class="stat"><div class="k">Δ Drawdown</div><div class="v" id="esc_d_dd">—</div></div>
+        <div class="stat"><div class="k">Verdict</div><div class="v" id="esc_verdict">—</div></div>
+      </div>
+      <details style="margin-top:10px">
+        <summary class="muted" style="cursor:pointer;color:#7fd0ff">Breakdowns &amp; since-rule-change (observational)</summary>
+        <pre id="esc_breakdowns" class="muted" style="white-space:pre-wrap;font-size:12px;margin-top:8px"></pre>
+      </details>
+    </div>
+
     <div class="card" style="border-left:4px solid #2f855a">
-      <h2>Paper hedge performance <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">SIMULATED PAPER PERFORMANCE</span></h2>
-      <p class="muted" style="margin:4px 0 10px">$100,000 notional · $40 round-trip cost · BUY_USD / SELL_USD only · no real trades.</p>
+      <h2>Paper hedge performance <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">LEGACY 1D HORIZON</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Legacy: one simulated P/L per recommendation at the 1d horizon (kept for comparison). Lifecycle performance is above.</p>
       <div class="row">
         <div class="stat"><div class="k">Actionable trades</div><div class="v" id="ph_trades">—</div></div>
         <div class="stat"><div class="k">Win rate</div><div class="v" id="ph_win">—</div></div>
@@ -539,11 +673,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     <div class="card" style="border-left:4px solid #6b46c1">
       <h2>Recommendation history <span class="src sample">stored signals</span></h2>
-      <p class="muted" style="margin:4px 0 10px">Every analysis is stored as a paper recommendation. Horizon cells show evaluation status (Pending until enough time passes). Paper P/L is the 1d simulated net result; NO_TRADE / PASS show N/A.</p>
+      <p class="muted" style="margin:4px 0 10px">Horizon cells = directional accuracy analytics (not separate trades). Legacy P/L = 1d horizon; Lifecycle P/L = hourly-profit-v1 trade.</p>
       <table>
         <thead><tr>
           <th>Time</th><th>Version</th><th>Signal</th><th>Grade</th><th>Conf</th>
-          <th>1h</th><th>4h</th><th>EOD</th><th>1d</th><th>2d</th><th>5d</th><th>Paper P/L</th>
+          <th>1h</th><th>4h</th><th>EOD</th><th>1d</th><th>2d</th><th>5d</th><th>Legacy 1d P/L</th><th>Lifecycle P/L</th>
         </tr></thead>
         <tbody id="rh_body"></tbody>
       </table>
@@ -790,6 +924,83 @@ DASHBOARD_HTML = """<!doctype html>
     // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
     // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
     function tlGradeLabel(grade){ return (grade != null && grade !== '') ? grade : '—'; }
+    function renderTradeDecisionCard(d){
+      const card = $('tradeDecisionCard'); if(!card) return;
+      const t = d.trade_decision_card || {};
+      const vis = t.visual || 'yellow';
+      card.className = 'card tdc ' + vis;
+      $('tdc_action').textContent = t.action || 'WAIT';
+      $('tdc_bias').textContent = 'BIAS: ' + (t.bias || 'WAIT');
+      $('tdc_pred').textContent = 'PREDICTION: ' + (t.prediction || 'No sufficiently strong setup');
+      $('tdc_now').textContent = tlRate4(t.spot);
+      $('tdc_4h').textContent = tlRate4(t.predicted_4h);
+      $('tdc_eod').textContent = tlRate4(t.predicted_eod);
+      $('tdc_inv_label').textContent = t.invalidation_label || 'Invalidation';
+      $('tdc_inv').textContent = tlRate4(t.invalidation_level);
+      $('tdc_why').textContent = 'WHY: ' + (t.why || '—');
+      const g = t.gates || {};
+      const keys = Object.keys(g);
+      $('tdc_gates').textContent = keys.length
+        ? ('Gates: ' + keys.map(function(k){ return k + '=' + g[k]; }).join(' · '))
+        : '';
+    }
+    function escRows(tbodyId, m){
+      const tb = $(tbodyId); if(!tb || !m){ if(tb) tb.innerHTML=''; return; }
+      const within = m.pct_exiting_profitably_within || {};
+      const rows = [
+        ['Evaluated trades', m.evaluated_trades],
+        ['Wins / Losses', (m.wins??'—')+' / '+(m.losses??'—')],
+        ['Win rate', m.win_rate==null?'—':(m.win_rate+'%')],
+        ['Gross profit', m.gross_profit],
+        ['Gross loss', m.gross_loss],
+        ['Transaction costs', m.transaction_costs],
+        ['Net P/L', m.net_pnl],
+        ['Average P/L', m.average_pnl],
+        ['Median P/L', m.median_pnl],
+        ['Avg holding (min)', m.average_holding_minutes],
+        ['Max drawdown', m.maximum_drawdown],
+        ['Best / Worst', (m.best_trade??'—')+' / '+(m.worst_trade??'—')],
+        ['Profit ≤1h', within['1_hour']==null?'—':(within['1_hour']+'%')],
+        ['Profit ≤4h', within['4_hours']==null?'—':(within['4_hours']+'%')],
+        ['Profit ≤EOD', within['end_of_day']==null?'—':(within['end_of_day']+'%')],
+        ['Profit ≤1d', within['1_day']==null?'—':(within['1_day']+'%')],
+      ];
+      tb.innerHTML = rows.map(function(r){
+        return '<tr><th>'+r[0]+'</th><td>'+(r[1]==null?'—':r[1])+'</td></tr>';
+      }).join('');
+    }
+    async function loadExitComparison(){
+      try {
+        const r = await fetch('/performance/exit-strategy-comparison');
+        const d = await r.json();
+        $('esc_sample').textContent = d.sample_completeness || '—';
+        const cp = d.comparison_period || {};
+        $('esc_period').textContent = 'Period: '+(cp.start||'—')+' → '+(cp.end||'—');
+        const diff = d.difference || {};
+        $('esc_meta').textContent =
+          'Eligible: '+(d.eligible_recommendations??'—')+
+          ' · Excluded: '+(d.excluded_count??'—')+
+          ' · Compared: '+(d.compared_trades??'—')+
+          ' · Verdict: '+(diff.verdict||'—');
+        escRows('esc_old', d.old_method);
+        escRows('esc_new', d.new_method);
+        $('esc_d_net').textContent = diff.net_pnl==null?'—':diff.net_pnl;
+        $('esc_d_wr').textContent = diff.win_rate_pp==null?'—':(diff.win_rate_pp+' pp');
+        $('esc_d_avg').textContent = diff.average_pnl==null?'—':diff.average_pnl;
+        $('esc_d_dd').textContent = diff.drawdown==null?'—':diff.drawdown;
+        $('esc_verdict').textContent = diff.verdict || '—';
+        const src = d.since_rule_change || {};
+        $('esc_breakdowns').textContent = JSON.stringify({
+          since_rule_change: src,
+          breakdowns: d.breakdowns,
+          model_versions_present: d.model_versions_present,
+          costs: d.costs,
+          excluded_sample: (d.excluded||[]).slice(0,20),
+        }, null, 2);
+      } catch(e) {
+        $('esc_meta').textContent = 'Exit comparison unavailable: '+e;
+      }
+    }
     function renderTopline(d){
       const row = $('tl_row'); if(!row) return;
       const tf = d.topline_forecast;
@@ -861,6 +1072,7 @@ DASHBOARD_HTML = """<!doctype html>
       if(v && v !== '••••••••') sessionStorage.setItem('aita_admin_secret', v);
       else if(!v) sessionStorage.removeItem('aita_admin_secret');
       loadResearchImportAdmin();
+      loadFixAdminDiagnostics();
     }
     function rdsStopImportPoll(){
       if(_rdsImportPoll){ clearInterval(_rdsImportPoll); _rdsImportPoll = null; }
@@ -1021,6 +1233,7 @@ DASHBOARD_HTML = """<!doctype html>
       const bi = $('rds_btn_incr'); if(bi) bi.onclick = function(){ rdsStartImport('incremental', false); };
       const br = $('rds_btn_rebuild'); if(br) br.onclick = rdsRebuildSnapshots;
       const ba = $('rds_btn_auth'); if(ba) ba.onclick = rdsSetAuth;
+      const fxr = $('fix_btn_refresh_diag'); if(fxr) fxr.onclick = loadFixAdminDiagnostics;
     })();
     async function loadResearchDatabase(){
       let s;
@@ -1170,8 +1383,10 @@ DASHBOARD_HTML = """<!doctype html>
       $('mkt_source').textContent = (ms.cached ? 'cached · ' : '') + (m.source || '—');
       $('mkt_closed_note').textContent = ms.is_open ? '' : 'Using latest available market data.';
 
-      // Topline Rate Forecast (top card) — decision support only.
+      // Top trade decision card — then Topline Rate Forecast.
+      renderTradeDecisionCard(d);
       renderTopline(d);
+      loadExitComparison();
 
       // Provider health panel.
       const ph = d.provider_health || {}; const box = $('provhealth'); box.innerHTML='';
@@ -1469,6 +1684,7 @@ DASHBOARD_HTML = """<!doctype html>
 
       const st = conn.status || sess.status || (fx.configured ? 'disconnected' : 'not_configured');
       const mdStatus = (mdSub.status || 'none').toUpperCase();
+      const mdDisplay = mdSub.display_status || mdStatus;
       badge.textContent = mdStatus === 'ACCEPTED' ? 'live' : (mdStatus === 'REJECTED' ? 'rejected' : st);
       badge.className = 'src ' + (
         mdStatus === 'ACCEPTED' ? 'live' :
@@ -1477,7 +1693,7 @@ DASHBOARD_HTML = """<!doctype html>
       );
 
       fill('fix_status', st);
-      fill('fix_md_sub', mdStatus);
+      fill('fix_md_sub', mdDisplay);
       fill('fix_requested_symbol', mdSub.requested_symbol || fx.configured_symbol_env || '—');
       fill('fix_bid', quote.bid != null ? Number(quote.bid).toFixed(5) : '—');
       fill('fix_ask', quote.ask != null ? Number(quote.ask).toFixed(5) : '—');
@@ -1497,7 +1713,63 @@ DASHBOARD_HTML = """<!doctype html>
         tcp + ' · ' + logon + ' · ' + hbOk + ' · last hb ' + hb +
         (fx.trading_enabled ? '' : ' · read-only (no orders)') +
         (fx.configured ? '' : ' · set CENTROID_MD_* + CENTROID_MD_ENABLED=true') +
-        (mdSub.status === 'pending' ? ' · awaiting MD snapshot (35=W) or incremental (35=X)' : '');
+        (mdSub.waiting_for_snapshot ? '' : (mdSub.status === 'pending' ? ' · awaiting MD snapshot (35=W) or incremental (35=X)' : ''));
+      loadFixAdminDiagnostics();
+    }
+
+    async function loadFixAdminDiagnostics(){
+      const el = $('fix_admin_log'); if(!el) return;
+      const secret = rdsAdminSecret();
+      if(!secret){
+        el.textContent = 'Set Admin Key to view raw FIX diagnostics.';
+        return;
+      }
+      try {
+        const r = await fetch('/admin/fix/diagnostics', {
+          headers: { 'Authorization': 'Bearer ' + secret }
+        });
+        if(r.status === 401){
+          el.textContent = 'Invalid admin key — click Set Admin Key.';
+          return;
+        }
+        if(!r.ok){
+          el.textContent = 'FIX diagnostics request failed (' + r.status + ').';
+          return;
+        }
+        const data = await r.json();
+        const lines = [];
+        const md = data.md_request_diagnostics || {};
+        lines.push('Last MarketDataRequest (35=V)');
+        lines.push('  MDReqID (262): ' + (md.md_req_id || '—'));
+        lines.push('  SubscriptionRequestType (263): ' + (md.subscription_request_type || '—'));
+        lines.push('  MarketDepth (264): ' + (md.market_depth || '—'));
+        lines.push('  MDUpdateType (265): ' + (md.md_update_type || '—'));
+        lines.push('  AggregatedBook (266): ' + (md.aggregated_book || '—'));
+        lines.push('  NoMDEntryTypes (267): ' + (md.no_md_entry_types || '—'));
+        lines.push('  MDEntryTypes (269): ' + ((md.md_entry_types || []).join(', ') || '—'));
+        lines.push('  NoRelatedSym (146): ' + (md.no_related_sym || '—'));
+        lines.push('  Symbol Tag 55: ' + (md.symbol_tag_55 || '—'));
+        lines.push('  Forbidden tags present (22/48): ' + ((md.forbidden_tags_present || []).join(', ') || 'none'));
+        lines.push('');
+        lines.push('Message log (raw scrubbed FIX):');
+        const log = data.message_log || [];
+        if(!log.length){
+          lines.push('  (no FIX messages recorded yet)');
+        } else {
+          log.slice().reverse().forEach(function(entry){
+            lines.push('  [' + (entry.direction || '?') + ' ' + (entry.msg_type || '?') + ' ' + (entry.msg_type_label || '') + ' @ ' + (entry.received_at || '') + ']');
+            if(entry.summary && Object.keys(entry.summary).length){
+              lines.push('    summary: ' + JSON.stringify(entry.summary));
+            }
+            if(entry.raw_fix){
+              lines.push('    raw: ' + entry.raw_fix);
+            }
+          });
+        }
+        el.textContent = lines.join('\\n');
+      } catch(e){
+        el.textContent = 'Failed to load FIX diagnostics.';
+      }
     }
 
     // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).
@@ -1587,12 +1859,73 @@ DASHBOARD_HTML = """<!doctype html>
       }).join('');
     }
     async function loadResearch(){
-      let s, ph, mo;
+      let s, ph, mo, ptActive, lcClosed, lcPolicy, r14;
       try {
         s = await (await fetch('/research/summary')).json();
         ph = await (await fetch('/performance/summary')).json();
         mo = await (await fetch('/performance/monthly')).json();
+        ptActive = await (await fetch('/paper-trading/active')).json();
+        lcClosed = await (await fetch('/paper-trading/closed-summary')).json();
+        lcPolicy = await (await fetch('/paper-trading/max-hold-comparison')).json();
+        r14 = await (await fetch('/paper-trading/replay/14-day')).json();
       } catch(e){ return; }
+
+      const pos = (ptActive||{}).position;
+      if(pos && pos.status === 'OPEN'){
+        $('pt_active_none').classList.add('hidden');
+        $('pt_active_body').classList.remove('hidden');
+        $('pt_dir').textContent = pos.direction || '—';
+        $('pt_entry').textContent = (pos.entry_rate||'—') + ' @ ' + (pos.entry_at ? new Date(pos.entry_at).toLocaleString() : '');
+        $('pt_current').textContent = pos.current_executable_rate ?? '—';
+        $('pt_target').textContent = pos.target_rate ?? '—';
+        $('pt_stop').textContent = pos.stop_rate ?? '—';
+        $('pt_net').textContent = usd(pos.current_net_pnl_usd);
+        $('pt_checkpoint').textContent = pos.next_checkpoint_at ? new Date(pos.next_checkpoint_at).toLocaleString() : '—';
+        $('pt_maxhold').textContent = pos.max_hold_deadline ? new Date(pos.max_hold_deadline).toLocaleString() : '—';
+        $('pt_action').textContent = pos.recommended_action || '—';
+      } else {
+        $('pt_active_none').classList.remove('hidden');
+        $('pt_active_body').classList.add('hidden');
+      }
+
+      $('lc_trades').textContent = lcClosed.trades ?? '—';
+      $('lc_win').textContent = pctTxt(lcClosed.win_rate);
+      $('lc_net').textContent = usd(lcClosed.net_pnl_usd);
+      $('lc_exp').textContent = usd(lcClosed.expectancy_per_trade_usd);
+      $('lc_payoff').textContent = lcClosed.payoff_ratio ?? '—';
+      $('lc_mdd').textContent = usd(lcClosed.max_drawdown_usd);
+      $('lc_hold').textContent = lcClosed.avg_holding_hours ?? '—';
+      const ex=$('lc_exits'); ex.innerHTML='';
+      const dist = lcClosed.exit_reason_distribution || {};
+      Object.keys(dist).forEach(function(k){
+        const d=dist[k]; ex.innerHTML += '<tr><td>'+k+'</td><td>'+d.count+'</td><td>'+d.pct+'%</td></tr>';
+      });
+      if(!Object.keys(dist).length) ex.innerHTML='<tr><td colspan="3" class="muted">No closed lifecycle trades yet.</td></tr>';
+      const pv=$('lc_policy'); pv.innerHTML='';
+      const vars=(lcPolicy||{}).variants||{};
+      Object.keys(vars).forEach(function(k){
+        const v=vars[k];
+        pv.innerHTML += '<tr><td>'+k+'</td><td>'+v.trades+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+pctTxt(v.target_hit_pct)+'</td><td>'+pctTxt(v.stop_hit_pct)+'</td><td>'+pctTxt(v.hourly_profit_exit_pct)+'</td><td>'+pctTxt(v.max_hold_exit_pct)+'</td></tr>';
+      });
+
+      if(r14 && r14.test_period){
+        $('r14_period').textContent = 'UTC ' + r14.test_period.start_utc + ' → ' + r14.test_period.end_utc + ' (' + r14.test_period.complete_days + ' days)';
+        $('r14_resolution').textContent = 'Price data resolution: ' + (r14.price_data_resolution || '—');
+        const cmp = r14.comparison || {};
+        $('r14_legacy_n').textContent = cmp.legacy_trade_count ?? '—';
+        $('r14_new_n').textContent = cmp.new_trade_count ?? '—';
+        $('r14_legacy_net').textContent = usd(cmp.legacy_net_pnl_usd);
+        $('r14_new_net').textContent = usd(cmp.new_net_pnl_usd);
+        $('r14_dupes').textContent = cmp.duplicate_overlapping_trades_removed ?? '—';
+        const dr = cmp.largest_difference_reason || {};
+        $('r14_diff').textContent = (dr.reason || '—') + (dr.magnitude != null ? ' ('+dr.magnitude+')' : '');
+        const rv=$('r14_variants'); rv.innerHTML='';
+        const v14 = r14.variants || {};
+        Object.keys(v14).forEach(function(k){
+          const v=v14[k];
+          rv.innerHTML += '<tr><td>'+k+'</td><td>'+(v.completed_trades??'—')+'</td><td>'+(v.recommendations_skipped_position_open??'—')+'</td><td>'+(v.data_insufficient_trades??'—')+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+usd(v.expectancy_per_trade_usd)+'</td><td>'+usd(v.max_drawdown_usd)+'</td></tr>';
+        });
+      }
 
       const ep = s.evaluation_progress || {};
       $('rl_stored').textContent = ep.recommendations_stored ?? '—';
@@ -1668,7 +2001,8 @@ DASHBOARD_HTML = """<!doctype html>
         const t = r.created_at ? new Date(r.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
         const hs = r.horizon_status || {};
         const cells = order.map(function(k){ return '<td>'+statusPill(hs[k]||'Pending')+'</td>'; }).join('');
-        const pnl = r.actionable ? (r.paper_pnl_usd==null ? '<span class="muted">Pending</span>' : usd(r.paper_pnl_usd)) : '<span class="muted">N/A</span>';
+        const legacyPnl = r.actionable ? (r.legacy_paper_pnl_usd==null||r.paper_pnl_usd==null ? '<span class="muted">Pending</span>' : usd(r.legacy_paper_pnl_usd||r.paper_pnl_usd)) : '<span class="muted">N/A</span>';
+        const lifePnl = r.paper_trade_opened ? (r.lifecycle_paper_pnl_usd==null ? '<span class="muted">Open</span>' : usd(r.lifecycle_paper_pnl_usd)) : (r.paper_trade_ignored_reason ? '<span class="muted" title="'+r.paper_trade_ignored_reason+'">—</span>' : '<span class="muted">—</span>');
         body.innerHTML += '<tr>'
           + '<td>'+t+'</td>'
           + '<td class="muted">'+(r.model_version||'—')+'</td>'
@@ -1676,7 +2010,8 @@ DASHBOARD_HTML = """<!doctype html>
           + '<td>'+(r.opportunity_grade||'—')+'</td>'
           + '<td>'+(r.confidence==null?'—':r.confidence)+'</td>'
           + cells
-          + '<td>'+pnl+'</td>'
+          + '<td>'+legacyPnl+'</td>'
+          + '<td>'+lifePnl+'</td>'
           + '</tr>';
       });
       $('rh_empty').textContent = (h.recommendations||[]).length ? '' :
