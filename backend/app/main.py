@@ -249,6 +249,10 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </header>
   <main>
+    <div id="dash_load_error" class="mkt-unavail" style="display:none">
+      <b>Dashboard load error.</b>
+      <span id="dash_load_error_msg">A section failed while loading. Other sections may still be available.</span>
+    </div>
     <div id="mkt_unavail" class="mkt-unavail" style="display:none">
       <b>Market data unavailable.</b>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
@@ -914,8 +918,29 @@ DASHBOARD_HTML = """<!doctype html>
   </main>
   <script>
     const $ = id => document.getElementById(id);
-    function fill(id, v, suffix){ $(id).textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—'; }
+    function setText(id, v){ const el=$(id); if(!el) return false; el.textContent = v; return true; }
+    function fill(id, v, suffix){
+      const el=$(id); if(!el) return;
+      el.textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—';
+    }
+    function showSectionError(id, msg){
+      const el=$(id); if(!el) return;
+      el.innerHTML = '<div class="mkt-unavail" style="margin:8px 0">'+msg+'</div>';
+    }
     function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+String(v).toLowerCase(); }
+    async function fetchJson(url){
+      const r = await fetch(url);
+      let body = null;
+      try { body = await r.json(); } catch(e){ body = null; }
+      if(!r.ok){
+        const detail = (body && (body.detail || body.reason)) ? String(body.detail || body.reason) : ('HTTP '+r.status);
+        const err = new Error(detail);
+        err.status = r.status;
+        err.url = url;
+        throw err;
+      }
+      return body;
+    }
     function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(); }catch(e){ return iso; } }
     function tlRate4(v){ return (v==null)?'—':Number(v).toFixed(4); }
     function tlMovePct(v){ return (v==null)?'':((v>0?'+':'')+v+'%'); }
@@ -928,20 +953,20 @@ DASHBOARD_HTML = """<!doctype html>
       const t = d.trade_decision_card || {};
       const vis = t.visual || 'yellow';
       card.className = 'card tdc ' + vis;
-      $('tdc_action').textContent = t.action || 'WAIT';
-      $('tdc_bias').textContent = 'BIAS: ' + (t.bias || 'WAIT');
-      $('tdc_pred').textContent = 'PREDICTION: ' + (t.prediction || 'No sufficiently strong setup');
-      $('tdc_now').textContent = tlRate4(t.spot);
-      $('tdc_4h').textContent = tlRate4(t.predicted_4h);
-      $('tdc_eod').textContent = tlRate4(t.predicted_eod);
-      $('tdc_inv_label').textContent = t.invalidation_label || 'Invalidation';
-      $('tdc_inv').textContent = tlRate4(t.invalidation_level);
-      $('tdc_why').textContent = 'WHY: ' + (t.why || '—');
+      setText('tdc_action', t.action || 'WAIT');
+      setText('tdc_bias', 'BIAS: ' + (t.bias || 'WAIT'));
+      setText('tdc_pred', 'PREDICTION: ' + (t.prediction || 'No sufficiently strong setup'));
+      setText('tdc_now', tlRate4(t.spot));
+      setText('tdc_4h', tlRate4(t.predicted_4h));
+      setText('tdc_eod', tlRate4(t.predicted_eod));
+      setText('tdc_inv_label', t.invalidation_label || 'Invalidation');
+      setText('tdc_inv', tlRate4(t.invalidation_level));
+      setText('tdc_why', 'WHY: ' + (t.why || '—'));
       const g = t.gates || {};
       const keys = Object.keys(g);
-      $('tdc_gates').textContent = keys.length
+      setText('tdc_gates', keys.length
         ? ('Gates: ' + keys.map(function(k){ return k + '=' + g[k]; }).join(' · '))
-        : '';
+        : '');
     }
     function escRows(tbodyId, m){
       const tb = $(tbodyId); if(!tb || !m){ if(tb) tb.innerHTML=''; return; }
@@ -970,34 +995,35 @@ DASHBOARD_HTML = """<!doctype html>
     }
     async function loadExitComparison(){
       try {
-        const r = await fetch('/performance/exit-strategy-comparison');
-        const d = await r.json();
-        $('esc_sample').textContent = d.sample_completeness || '—';
+        const d = await fetchJson('/performance/exit-strategy-comparison');
+        setText('esc_sample', d.sample_completeness || '—');
         const cp = d.comparison_period || {};
-        $('esc_period').textContent = 'Period: '+(cp.start||'—')+' → '+(cp.end||'—');
+        setText('esc_period', 'Period: '+(cp.start||'—')+' → '+(cp.end||'—'));
         const diff = d.difference || {};
-        $('esc_meta').textContent =
+        setText('esc_meta',
           'Eligible: '+(d.eligible_recommendations??'—')+
           ' · Excluded: '+(d.excluded_count??'—')+
           ' · Compared: '+(d.compared_trades??'—')+
-          ' · Verdict: '+(diff.verdict||'—');
+          ' · Verdict: '+(diff.verdict||'—'));
         escRows('esc_old', d.old_method);
         escRows('esc_new', d.new_method);
-        $('esc_d_net').textContent = diff.net_pnl==null?'—':diff.net_pnl;
-        $('esc_d_wr').textContent = diff.win_rate_pp==null?'—':(diff.win_rate_pp+' pp');
-        $('esc_d_avg').textContent = diff.average_pnl==null?'—':diff.average_pnl;
-        $('esc_d_dd').textContent = diff.drawdown==null?'—':diff.drawdown;
-        $('esc_verdict').textContent = diff.verdict || '—';
+        setText('esc_d_net', diff.net_pnl==null?'—':diff.net_pnl);
+        setText('esc_d_wr', diff.win_rate_pp==null?'—':(diff.win_rate_pp+' pp'));
+        setText('esc_d_avg', diff.average_pnl==null?'—':diff.average_pnl);
+        setText('esc_d_dd', diff.drawdown==null?'—':diff.drawdown);
+        setText('esc_verdict', diff.verdict || '—');
         const src = d.since_rule_change || {};
-        $('esc_breakdowns').textContent = JSON.stringify({
+        setText('esc_breakdowns', JSON.stringify({
           since_rule_change: src,
           breakdowns: d.breakdowns,
           model_versions_present: d.model_versions_present,
           costs: d.costs,
           excluded_sample: (d.excluded||[]).slice(0,20),
-        }, null, 2);
+        }, null, 2));
       } catch(e) {
-        $('esc_meta').textContent = 'Exit comparison unavailable: '+e;
+        setText('esc_meta', 'Exit comparison unavailable (simulated section): '+e.message);
+        showSectionError('esc_old', 'Could not load old-method stats.');
+        showSectionError('esc_new', 'Could not load first-profit stats.');
       }
     }
     function renderTopline(d){
@@ -1334,9 +1360,29 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
-      const d = await (await fetch('/analysis/usdmxn')).json();
+      const loadErr = $('dash_load_error');
+      if (loadErr) loadErr.style.display = 'none';
+      let d;
+      try {
+        d = await fetchJson('/analysis/usdmxn');
+      } catch(e) {
+        if (loadErr) {
+          loadErr.style.display = '';
+          setText('dash_load_error_msg', 'Primary analysis failed: ' + e.message);
+        }
+        // Still attempt optional panels so one failure does not blank the page.
+        loadPerformance();
+        loadScheduler();
+        loadDiagnostics();
+        loadFixMarketData();
+        loadResearchDatabase();
+        loadResearchImportAdmin();
+        loadExitComparison();
+        return;
+      }
       const m = d.market || {};
 
+      try {
       // Stale-fallback safety: show an explicit warning and never present a
       // fabricated/stale quote or actionable recommendation.
       const unavailable = !!(d.market_data_unavailable || (m.source === 'unavailable')
@@ -1347,21 +1393,21 @@ DASHBOARD_HTML = """<!doctype html>
         if (unavailable) {
           const msg = d.warning || (d.market_state || {}).warning
             || 'Live market data unavailable and no recent cached real quote exists.';
-          $('mkt_unavail_msg').textContent = msg;
+          setText('mkt_unavail_msg', msg);
         }
       }
 
       if (unavailable) {
         // Never show a fabricated/stale number — say so explicitly.
         ['px','inv','dxy','us2y','us10y','oil','gold','vix'].forEach(function(id){
-          const el = $(id); if (el) el.textContent = 'Unavailable';
+          setText(id, 'Unavailable');
         });
       } else {
         fill('px', m.usdmxn); fill('inv', m.inverse_usdmxn); fill('dxy', m.dxy);
         fill('us2y', m.us2y, '%'); fill('us10y', m.us10y, '%'); fill('oil', m.oil);
         fill('gold', m.gold); fill('vix', m.vix);
       }
-      $('src').textContent = 'source: ' + (m.source || '—') + ' · ' + (m.provider || '');
+      setText('src', 'source: ' + (m.source || '—') + ' · ' + (m.provider || ''));
 
       // Per-market-field provenance badges (live/fallback/mock).
       const fsrc = m.sources || {};
@@ -1371,31 +1417,37 @@ DASHBOARD_HTML = """<!doctype html>
 
       // Market status panel (open/closed, age, next refresh/open, provider).
       const ms = d.market_state || {};
-      const mb = $('mkt_badge'); mb.textContent = ms.market_status || '—';
-      mb.className = 'src ' + (ms.is_open ? 'live' : 'fallback');
-      $('mkt_reason').textContent = ms.market_reason || '';
-      $('mkt_fetched').textContent = fmtTime(ms.fetched_at);
-      $('mkt_age').textContent = (ms.age_minutes==null?'—':(ms.age_minutes+' min'+(ms.is_stale?' · stale':'')));
-      $('mkt_next').textContent = fmtTime(ms.next_refresh);
-      $('mkt_open').textContent = ms.is_open ? 'open now' : fmtTime(ms.next_market_open);
-      $('mkt_provider').textContent = m.provider || '—';
-      $('mkt_source').textContent = (ms.cached ? 'cached · ' : '') + (m.source || '—');
-      $('mkt_closed_note').textContent = ms.is_open ? '' : 'Using latest available market data.';
+      const mb = $('mkt_badge');
+      if (mb) {
+        mb.textContent = ms.market_status || '—';
+        mb.className = 'src ' + (ms.is_open ? 'live' : 'fallback');
+      }
+      setText('mkt_reason', ms.market_reason || '');
+      setText('mkt_fetched', fmtTime(ms.fetched_at));
+      setText('mkt_age', (ms.age_minutes==null?'—':(ms.age_minutes+' min'+(ms.is_stale?' · stale':''))));
+      setText('mkt_next', fmtTime(ms.next_refresh));
+      setText('mkt_open', ms.is_open ? 'open now' : fmtTime(ms.next_market_open));
+      setText('mkt_provider', m.provider || '—');
+      setText('mkt_source', (ms.cached ? 'cached · ' : '') + (m.source || '—'));
+      setText('mkt_closed_note', ms.is_open ? '' : 'Using latest available market data.');
 
       // Top trade decision card — then Topline Rate Forecast.
-      renderTradeDecisionCard(d);
-      renderTopline(d);
+      try { renderTradeDecisionCard(d); } catch(e) { showSectionError('tradeDecisionCard', 'Trade decision card failed: '+e.message); }
+      try { renderTopline(d); } catch(e) { showSectionError('tl_row', 'Topline forecast failed: '+e.message); }
       loadExitComparison();
 
       // Provider health panel.
-      const ph = d.provider_health || {}; const box = $('provhealth'); box.innerHTML='';
-      Object.keys(ph).forEach(function(k){
-        const r = ph[k] || {}; const s = document.createElement('span'); s.className='hstat';
-        const label = (r.status||'').replace(/_/g,' ');
-        s.innerHTML = '<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+label+(r.detail?(' <span class="muted">('+r.detail+')</span>'):'');
-        box.appendChild(s);
-      });
-      if (!Object.keys(ph).length) box.innerHTML = '<span class="muted">No provider activity yet.</span>';
+      const ph = d.provider_health || {}; const box = $('provhealth');
+      if (box) {
+        box.innerHTML='';
+        Object.keys(ph).forEach(function(k){
+          const r = ph[k] || {}; const s = document.createElement('span'); s.className='hstat';
+          const label = (r.status||'').replace(/_/g,' ');
+          s.innerHTML = '<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+label+(r.detail?(' <span class="muted">('+r.detail+')</span>'):'');
+          box.appendChild(s);
+        });
+        if (!Object.keys(ph).length) box.innerHTML = '<span class="muted">No provider activity yet.</span>';
+      }
 
       // Clearly label every data source (live/mock/fallback/imported/sample).
       const ds = d.data_sources || {};
@@ -1642,23 +1694,35 @@ DASHBOARD_HTML = """<!doctype html>
       if (!(ctx.upcoming_events||[]).length) ev.innerHTML = '<li class="muted">No upcoming events.</li>';
       const gaps = d.calendar_coverage_gaps || [];
       const gapEl = $('cal_gaps');
-      if (gaps.length) {
-        gapEl.innerHTML = '<div class="k">Unavailable from free sources</div><ul>'+
-          gaps.map(g => '<li><b>'+(g.event||'')+'</b> ('+(g.country||'')+') — '+(g.note||'unavailable')+'</li>').join('')+
-          '</ul>';
-      } else if (gapEl) { gapEl.innerHTML = ''; }
+      if (gapEl) {
+        if (gaps.length) {
+          gapEl.innerHTML = '<div class="k">Unavailable from free sources</div><ul>'+
+            gaps.map(g => '<li><b>'+(g.event||'')+'</b> ('+(g.country||'')+') — '+(g.note||'unavailable')+'</li>').join('')+
+            '</ul>';
+        } else { gapEl.innerHTML = ''; }
+      }
 
-      const rel = $('releases'); rel.innerHTML='';
-      (ctx.released_last_24h||[]).forEach(e => {
-        const li=document.createElement('li');
-        li.innerHTML = (e.event||'') + ' <span class="muted">(act '+(e.actual ?? 'n/a')+
-          ' vs fc '+(e.forecast ?? 'n/a')+')</span>';
-        rel.appendChild(li);
-      });
-      if (!(ctx.released_last_24h||[]).length) rel.innerHTML = '<li class="muted">No releases in the last 24h.</li>';
+      const rel = $('releases');
+      if (rel) {
+        rel.innerHTML='';
+        (ctx.released_last_24h||[]).forEach(e => {
+          const li=document.createElement('li');
+          li.innerHTML = (e.event||'') + ' <span class="muted">(act '+(e.actual ?? 'n/a')+
+            ' vs fc '+(e.forecast ?? 'n/a')+')</span>';
+          rel.appendChild(li);
+        });
+        if (!(ctx.released_last_24h||[]).length) rel.innerHTML = '<li class="muted">No releases in the last 24h.</li>';
+      }
 
-      $('newssrc').textContent = 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items';
-      $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      setText('newssrc', 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items');
+      setText('ts', 'Updated ' + new Date().toLocaleTimeString());
+      } catch (e) {
+        if (loadErr) {
+          loadErr.style.display = '';
+          setText('dash_load_error_msg', 'Dashboard render error: ' + e.message);
+        }
+      }
+      // Optional panels — each isolated so one failure cannot blank the page.
       loadPerformance();
       loadScheduler();
       loadDiagnostics();
@@ -1858,125 +1922,172 @@ DASHBOARD_HTML = """<!doctype html>
       }).join('');
     }
     async function loadResearch(){
-      let s, ph, mo, ptActive, lcClosed, lcPolicy, r14;
-      try {
-        s = await (await fetch('/research/summary')).json();
-        ph = await (await fetch('/performance/summary')).json();
-        mo = await (await fetch('/performance/monthly')).json();
-        ptActive = await (await fetch('/paper-trading/active')).json();
-        lcClosed = await (await fetch('/paper-trading/closed-summary')).json();
-        lcPolicy = await (await fetch('/paper-trading/max-hold-comparison')).json();
-        r14 = await (await fetch('/paper-trading/replay/14-day')).json();
-      } catch(e){ return; }
+      // Isolate optional endpoints with Promise.allSettled so a missing
+      // paper-trading route (or any one failure) cannot abort the whole panel.
+      const settled = await Promise.allSettled([
+        fetchJson('/research/summary'),
+        fetchJson('/performance/summary'),
+        fetchJson('/performance/monthly'),
+        fetchJson('/paper-trading/active'),
+        fetchJson('/paper-trading/closed-summary'),
+        fetchJson('/paper-trading/max-hold-comparison'),
+        fetchJson('/paper-trading/replay/14-day'),
+      ]);
+      const val = function(i){ return settled[i].status === 'fulfilled' ? settled[i].value : null; };
+      const s = val(0) || {};
+      const ph = val(1) || {};
+      const mo = val(2) || {};
+      const ptActive = val(3);
+      const lcClosed = val(4) || {};
+      const lcPolicy = val(5) || {};
+      const r14 = val(6);
+
+      if (settled[0].status !== 'fulfilled') {
+        showSectionError('rl_assess', 'Research summary unavailable: ' + ((settled[0].reason && settled[0].reason.message) || 'error'));
+      }
 
       const pos = (ptActive||{}).position;
       if(pos && pos.status === 'OPEN'){
-        $('pt_active_none').classList.add('hidden');
-        $('pt_active_body').classList.remove('hidden');
-        $('pt_dir').textContent = pos.direction || '—';
-        $('pt_entry').textContent = (pos.entry_rate||'—') + ' @ ' + (pos.entry_at ? new Date(pos.entry_at).toLocaleString() : '');
-        $('pt_current').textContent = pos.current_executable_rate ?? '—';
-        $('pt_target').textContent = pos.target_rate ?? '—';
-        $('pt_stop').textContent = pos.stop_rate ?? '—';
-        $('pt_net').textContent = usd(pos.current_net_pnl_usd);
-        $('pt_checkpoint').textContent = pos.next_checkpoint_at ? new Date(pos.next_checkpoint_at).toLocaleString() : '—';
-        $('pt_maxhold').textContent = pos.max_hold_deadline ? new Date(pos.max_hold_deadline).toLocaleString() : '—';
-        $('pt_action').textContent = pos.recommended_action || '—';
+        const n=$('pt_active_none'), b=$('pt_active_body');
+        if(n) n.classList.add('hidden');
+        if(b) b.classList.remove('hidden');
+        setText('pt_dir', pos.direction || '—');
+        setText('pt_entry', (pos.entry_rate||'—') + ' @ ' + (pos.entry_at ? new Date(pos.entry_at).toLocaleString() : ''));
+        setText('pt_current', pos.current_executable_rate ?? '—');
+        setText('pt_target', pos.target_rate ?? '—');
+        setText('pt_stop', pos.stop_rate ?? '—');
+        setText('pt_net', usd(pos.current_net_pnl_usd));
+        setText('pt_checkpoint', pos.next_checkpoint_at ? new Date(pos.next_checkpoint_at).toLocaleString() : '—');
+        setText('pt_maxhold', pos.max_hold_deadline ? new Date(pos.max_hold_deadline).toLocaleString() : '—');
+        setText('pt_action', pos.recommended_action || '—');
       } else {
-        $('pt_active_none').classList.remove('hidden');
-        $('pt_active_body').classList.add('hidden');
+        const n=$('pt_active_none'), b=$('pt_active_body');
+        if(n){
+          n.classList.remove('hidden');
+          n.textContent = settled[3].status !== 'fulfilled'
+            ? 'Paper lifecycle API unavailable (simulated section skipped).'
+            : 'No open paper position.';
+        }
+        if(b) b.classList.add('hidden');
       }
 
-      $('lc_trades').textContent = lcClosed.trades ?? '—';
-      $('lc_win').textContent = pctTxt(lcClosed.win_rate);
-      $('lc_net').textContent = usd(lcClosed.net_pnl_usd);
-      $('lc_exp').textContent = usd(lcClosed.expectancy_per_trade_usd);
-      $('lc_payoff').textContent = lcClosed.payoff_ratio ?? '—';
-      $('lc_mdd').textContent = usd(lcClosed.max_drawdown_usd);
-      $('lc_hold').textContent = lcClosed.avg_holding_hours ?? '—';
-      const ex=$('lc_exits'); ex.innerHTML='';
-      const dist = lcClosed.exit_reason_distribution || {};
-      Object.keys(dist).forEach(function(k){
-        const d=dist[k]; ex.innerHTML += '<tr><td>'+k+'</td><td>'+d.count+'</td><td>'+d.pct+'%</td></tr>';
-      });
-      if(!Object.keys(dist).length) ex.innerHTML='<tr><td colspan="3" class="muted">No closed lifecycle trades yet.</td></tr>';
-      const pv=$('lc_policy'); pv.innerHTML='';
-      const vars=(lcPolicy||{}).variants||{};
-      Object.keys(vars).forEach(function(k){
-        const v=vars[k];
-        pv.innerHTML += '<tr><td>'+k+'</td><td>'+v.trades+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+pctTxt(v.target_hit_pct)+'</td><td>'+pctTxt(v.stop_hit_pct)+'</td><td>'+pctTxt(v.hourly_profit_exit_pct)+'</td><td>'+pctTxt(v.max_hold_exit_pct)+'</td></tr>';
-      });
+      if (settled[4].status !== 'fulfilled') {
+        showSectionError('lc_exits', 'Closed-trade lifecycle summary unavailable.');
+      } else {
+        setText('lc_trades', lcClosed.trades ?? '—');
+        setText('lc_win', pctTxt(lcClosed.win_rate));
+        setText('lc_net', usd(lcClosed.net_pnl_usd));
+        setText('lc_exp', usd(lcClosed.expectancy_per_trade_usd));
+        setText('lc_payoff', lcClosed.payoff_ratio ?? '—');
+        setText('lc_mdd', usd(lcClosed.max_drawdown_usd));
+        setText('lc_hold', lcClosed.avg_holding_hours ?? '—');
+      }
+      const ex=$('lc_exits');
+      if(ex && settled[4].status === 'fulfilled'){
+        ex.innerHTML='';
+        const dist = lcClosed.exit_reason_distribution || {};
+        Object.keys(dist).forEach(function(k){
+          const row=dist[k]; ex.innerHTML += '<tr><td>'+k+'</td><td>'+row.count+'</td><td>'+row.pct+'%</td></tr>';
+        });
+        if(!Object.keys(dist).length) ex.innerHTML='<tr><td colspan="3" class="muted">No closed lifecycle trades yet.</td></tr>';
+      }
+      const lcPolicyEl=$('lc_policy');
+      if(lcPolicyEl){
+        lcPolicyEl.innerHTML='';
+        if (settled[5].status !== 'fulfilled') {
+          lcPolicyEl.innerHTML='<tr><td colspan="8" class="muted">Max-hold comparison unavailable.</td></tr>';
+        } else {
+          const vars=(lcPolicy||{}).variants||{};
+          Object.keys(vars).forEach(function(k){
+            const v=vars[k];
+            lcPolicyEl.innerHTML += '<tr><td>'+k+'</td><td>'+v.trades+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+pctTxt(v.target_hit_pct)+'</td><td>'+pctTxt(v.stop_hit_pct)+'</td><td>'+pctTxt(v.hourly_profit_exit_pct)+'</td><td>'+pctTxt(v.max_hold_exit_pct)+'</td></tr>';
+          });
+        }
+      }
 
       if(r14 && r14.test_period){
-        $('r14_period').textContent = 'UTC ' + r14.test_period.start_utc + ' → ' + r14.test_period.end_utc + ' (' + r14.test_period.complete_days + ' days)';
-        $('r14_resolution').textContent = 'Price data resolution: ' + (r14.price_data_resolution || '—');
+        setText('r14_period', 'UTC ' + r14.test_period.start_utc + ' → ' + r14.test_period.end_utc + ' (' + r14.test_period.complete_days + ' days)');
+        setText('r14_resolution', 'Price data resolution: ' + (r14.price_data_resolution || '—'));
         const cmp = r14.comparison || {};
-        $('r14_legacy_n').textContent = cmp.legacy_trade_count ?? '—';
-        $('r14_new_n').textContent = cmp.new_trade_count ?? '—';
-        $('r14_legacy_net').textContent = usd(cmp.legacy_net_pnl_usd);
-        $('r14_new_net').textContent = usd(cmp.new_net_pnl_usd);
-        $('r14_dupes').textContent = cmp.duplicate_overlapping_trades_removed ?? '—';
+        setText('r14_legacy_n', cmp.legacy_trade_count ?? '—');
+        setText('r14_new_n', cmp.new_trade_count ?? '—');
+        setText('r14_legacy_net', usd(cmp.legacy_net_pnl_usd));
+        setText('r14_new_net', usd(cmp.new_net_pnl_usd));
+        setText('r14_dupes', cmp.duplicate_overlapping_trades_removed ?? '—');
         const dr = cmp.largest_difference_reason || {};
-        $('r14_diff').textContent = (dr.reason || '—') + (dr.magnitude != null ? ' ('+dr.magnitude+')' : '');
-        const rv=$('r14_variants'); rv.innerHTML='';
-        const v14 = r14.variants || {};
-        Object.keys(v14).forEach(function(k){
-          const v=v14[k];
-          rv.innerHTML += '<tr><td>'+k+'</td><td>'+(v.completed_trades??'—')+'</td><td>'+(v.recommendations_skipped_position_open??'—')+'</td><td>'+(v.data_insufficient_trades??'—')+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+usd(v.expectancy_per_trade_usd)+'</td><td>'+usd(v.max_drawdown_usd)+'</td></tr>';
-        });
+        setText('r14_diff', (dr.reason || '—') + (dr.magnitude != null ? ' ('+dr.magnitude+')' : ''));
+        const rv=$('r14_variants'); if(rv){
+          rv.innerHTML='';
+          const v14 = r14.variants || {};
+          Object.keys(v14).forEach(function(k){
+            const v=v14[k];
+            rv.innerHTML += '<tr><td>'+k+'</td><td>'+(v.completed_trades??'—')+'</td><td>'+(v.recommendations_skipped_position_open??'—')+'</td><td>'+(v.data_insufficient_trades??'—')+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+usd(v.expectancy_per_trade_usd)+'</td><td>'+usd(v.max_drawdown_usd)+'</td></tr>';
+          });
+        }
+      } else if (settled[6].status !== 'fulfilled') {
+        setText('r14_period', '14-day replay unavailable (optional research endpoint).');
       }
 
       const ep = s.evaluation_progress || {};
-      $('rl_stored').textContent = ep.recommendations_stored ?? '—';
-      $('rl_evaluated').textContent = ep.recommendations_evaluated ?? '—';
-      $('rl_pending').textContent = ep.recommendations_pending ?? '—';
+      setText('rl_stored', ep.recommendations_stored ?? '—');
+      setText('rl_evaluated', ep.recommendations_evaluated ?? '—');
+      setText('rl_pending', ep.recommendations_pending ?? '—');
       const evB = ep.evaluated_by_horizon || {}, peB = ep.pending_by_horizon || {};
       const hmap = {'1h':'1h','4h':'4h','end_of_day':'eod','1d':'1d','2d':'2d','5d':'5d'};
       Object.keys(hmap).forEach(function(h){
         const sfx = hmap[h];
-        const ev=$('ev_'+sfx), pe=$('pe_'+sfx);
-        if(ev) ev.textContent = (evB[h] ?? 0);
-        if(pe) pe.textContent = (peB[h] ?? 0);
+        setText('ev_'+sfx, (evB[h] ?? 0));
+        setText('pe_'+sfx, (peB[h] ?? 0));
       });
 
-      $('rl_acc').textContent = pctTxt(s.overall_accuracy);
-      $('rl_stab').textContent = pctTxt((s.signal_stability||{}).stability);
-      $('rl_drift').textContent = pctTxt((s.signal_stability||{}).drift_rate);
-      const al=$('rl_assess'); al.innerHTML='';
-      (s.self_assessment||[]).forEach(function(o){ const li=document.createElement('li'); li.textContent=o; al.appendChild(li); });
+      setText('rl_acc', pctTxt(s.overall_accuracy));
+      setText('rl_stab', pctTxt((s.signal_stability||{}).stability));
+      setText('rl_drift', pctTxt((s.signal_stability||{}).drift_rate));
+      const al=$('rl_assess'); if(al){ al.innerHTML='';
+        (s.self_assessment||[]).forEach(function(o){ const li=document.createElement('li'); li.textContent=o; al.appendChild(li); });
+      }
 
-      $('rl_calib').innerHTML = accRows(s.confidence_calibration, [
+      const calib=$('rl_calib'); if(calib) calib.innerHTML = accRows(s.confidence_calibration, [
         (k)=>k, (k,a)=>pctTxt(a.predicted_confidence), (k,a)=>pctTxt(a.actual_accuracy),
         (k,a)=>(a.gap==null?'—':a.gap), (k,a)=>a.samples]);
-      $('rl_grade').innerHTML = accRows(s.accuracy_by_grade, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
-      $('rl_regime').innerHTML = accRows(s.accuracy_by_regime, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
-      $('rl_model').innerHTML = accRows(s.accuracy_by_model_version, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>usd(a.avg_net_pnl_usd),(k,a)=>a.samples]);
-      $('rl_sim').innerHTML = accRows(s.accuracy_by_historical_similarity, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>retTxt(a.avg_return_pct),(k,a)=>a.samples]);
+      const rlGrade=$('rl_grade'); if(rlGrade) rlGrade.innerHTML = accRows(s.accuracy_by_grade, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
+      const rlRegime=$('rl_regime'); if(rlRegime) rlRegime.innerHTML = accRows(s.accuracy_by_regime, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
+      const rlModel=$('rl_model'); if(rlModel) rlModel.innerHTML = accRows(s.accuracy_by_model_version, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>usd(a.avg_net_pnl_usd),(k,a)=>a.samples]);
+      const rlSim=$('rl_sim'); if(rlSim) rlSim.innerHTML = accRows(s.accuracy_by_historical_similarity, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>retTxt(a.avg_return_pct),(k,a)=>a.samples]);
 
       const drv=function(list){ return (list||[]).map(function(d){return '<tr><td>'+d.driver+'</td><td>'+pctTxt(d.accuracy)+'</td><td>'+d.samples+'</td></tr>';}).join(''); };
-      $('rl_topdrv').innerHTML = drv(s.top_drivers);
-      $('rl_weakdrv').innerHTML = drv(s.weakest_drivers);
+      const topdrv=$('rl_topdrv'); if(topdrv) topdrv.innerHTML = drv(s.top_drivers);
+      const weakdrv=$('rl_weakdrv'); if(weakdrv) weakdrv.innerHTML = drv(s.weakest_drivers);
 
-      const pv=s.provider_reliability||{}; const pb=$('rl_providers'); pb.innerHTML='';
-      Object.keys(pv).forEach(function(k){ const r=pv[k]||{}; const sp=document.createElement('span'); sp.className='hstat'; sp.innerHTML='<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+((r.status||'').replace(/_/g,' ')); pb.appendChild(sp); });
-      if(!Object.keys(pv).length) pb.innerHTML='<span class="muted">No provider activity yet.</span>';
+      const provRel=s.provider_reliability||{}; const pb=$('rl_providers');
+      if(pb){
+        pb.innerHTML='';
+        Object.keys(provRel).forEach(function(k){ const r=provRel[k]||{}; const sp=document.createElement('span'); sp.className='hstat'; sp.innerHTML='<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+((r.status||'').replace(/_/g,' ')); pb.appendChild(sp); });
+        if(!Object.keys(provRel).length) pb.innerHTML='<span class="muted">No provider activity yet.</span>';
+      }
 
-      $('ph_trades').textContent = ph.actionable_trades ?? '—';
-      $('ph_win').textContent = pctTxt(ph.win_rate);
-      $('ph_gross').textContent = usd(ph.gross_pnl_usd);
-      $('ph_costs').textContent = usd(ph.transaction_costs_usd);
-      $('ph_net').textContent = usd(ph.net_pnl_usd);
-      $('ph_ron').textContent = retTxt(ph.return_on_notional_pct);
-      $('ph_best').textContent = usd(ph.best_trade_usd);
-      $('ph_worst').textContent = usd(ph.worst_trade_usd);
+      if (settled[1].status !== 'fulfilled') {
+        showSectionError('ph_monthly', 'Paper hedge summary unavailable.');
+      } else {
+        setText('ph_trades', ph.actionable_trades ?? '—');
+        setText('ph_win', pctTxt(ph.win_rate));
+        setText('ph_gross', usd(ph.gross_pnl_usd));
+        setText('ph_costs', usd(ph.transaction_costs_usd));
+        setText('ph_net', usd(ph.net_pnl_usd));
+        setText('ph_ron', retTxt(ph.return_on_notional_pct));
+        setText('ph_best', usd(ph.best_trade_usd));
+        setText('ph_worst', usd(ph.worst_trade_usd));
+      }
 
-      const mb=$('ph_monthly'); mb.innerHTML='';
-      const months=(mo||{}).months||{};
-      Object.keys(months).sort().reverse().forEach(function(k){
-        const m=months[k];
-        mb.innerHTML += '<tr><td>'+k+'</td><td>'+m.total_recommendations+'</td><td>'+m.actionable_recommendations+'</td><td>'+pctTxt(m.win_rate)+'</td><td>'+usd(m.gross_pnl_usd)+'</td><td>'+usd(m.transaction_costs_usd)+'</td><td>'+usd(m.net_pnl_usd)+'</td><td>'+usd(m.best_trade_usd)+'</td><td>'+usd(m.worst_trade_usd)+'</td></tr>';
-      });
-      if(!Object.keys(months).length) mb.innerHTML='<tr><td colspan="9" class="muted">No evaluated months yet.</td></tr>';
+      const mb=$('ph_monthly'); if(mb){
+        mb.innerHTML='';
+        const months=(mo||{}).months||{};
+        Object.keys(months).sort().reverse().forEach(function(k){
+          const m=months[k];
+          mb.innerHTML += '<tr><td>'+k+'</td><td>'+m.total_recommendations+'</td><td>'+m.actionable_recommendations+'</td><td>'+pctTxt(m.win_rate)+'</td><td>'+usd(m.gross_pnl_usd)+'</td><td>'+usd(m.transaction_costs_usd)+'</td><td>'+usd(m.net_pnl_usd)+'</td><td>'+usd(m.best_trade_usd)+'</td><td>'+usd(m.worst_trade_usd)+'</td></tr>';
+        });
+        if(!Object.keys(months).length) mb.innerHTML='<tr><td colspan="9" class="muted">No evaluated months yet.</td></tr>';
+      }
       loadHistory();
     }
 
