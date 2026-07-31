@@ -136,6 +136,27 @@ DASHBOARD_HTML = """<!doctype html>
     .muted { color:#8aa0c6; font-size:13px; }
     .mkt-unavail { background:#3d1626; border:1px solid #7d2a44; color:#ffd0dc; padding:12px 16px; border-radius:10px; margin-bottom:16px; font-size:14px; }
     .mkt-unavail b { color:#ff9bb5; }
+    .tdc { border-left:6px solid #ffd98a; }
+    .tdc.green { border-left-color:#5be3a0; background:linear-gradient(180deg,#0f3d2e 0%,#111a2e 48%); }
+    .tdc.yellow { border-left-color:#ffd98a; background:linear-gradient(180deg,#3d3416 0%,#111a2e 48%); }
+    .tdc.red { border-left-color:#ff9bb5; background:linear-gradient(180deg,#3d1626 0%,#111a2e 48%); }
+    .tdc-action { font-size:42px; font-weight:800; letter-spacing:.04em; margin:4px 0 10px; line-height:1.1; }
+    .tdc.green .tdc-action { color:#5be3a0; }
+    .tdc.yellow .tdc-action { color:#ffd98a; }
+    .tdc.red .tdc-action { color:#ff9bb5; }
+    .tdc-bias { font-size:18px; font-weight:700; margin:2px 0; }
+    .tdc-pred { font-size:15px; color:#c5d4ef; margin:0 0 12px; }
+    .tdc-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:12px; }
+    @media (max-width:760px){ .tdc-grid { grid-template-columns:1fr 1fr; } }
+    .tdc-grid .k { font-size:11px; color:#8aa0c6; text-transform:uppercase; letter-spacing:.04em; }
+    .tdc-grid .v { font-size:22px; font-weight:700; margin-top:4px; }
+    .tdc-why { margin-top:14px; font-size:14px; color:#d7e2f5; }
+    .tdc-details { margin-top:10px; }
+    .tdc-details summary { cursor:pointer; color:#7fd0ff; font-size:13px; }
+    .esc-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .esc-table th, .esc-table td { text-align:left; padding:6px 8px; border-bottom:1px solid #1d2740; }
+    .esc-table th { color:#8aa0c6; font-weight:600; font-size:11px; text-transform:uppercase; }
+    .esc-badge { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; background:#3d3416; color:#ffd98a; }
     .tl { border-left:2px solid #1d2740; padding-left:14px; margin-left:4px; }
     .tl .item { margin-bottom:12px; }
     .tl .label { font-weight:600; }
@@ -228,10 +249,34 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </header>
   <main>
+    <div id="dash_load_error" class="mkt-unavail" style="display:none">
+      <b>Dashboard load error.</b>
+      <span id="dash_load_error_msg">A section failed while loading. Other sections may still be available.</span>
+    </div>
     <div id="mkt_unavail" class="mkt-unavail" style="display:none">
       <b>Market data unavailable.</b>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
+    </div>
+    <div class="card tdc yellow" id="tradeDecisionCard">
+      <h2>Trade Decision <span class="muted">(decision support only)</span></h2>
+      <div class="tdc-action" id="tdc_action">—</div>
+      <div class="tdc-bias" id="tdc_bias">BIAS: —</div>
+      <div class="tdc-pred" id="tdc_pred">PREDICTION: —</div>
+      <div class="tdc-grid">
+        <div><div class="k">Now</div><div class="v" id="tdc_now">—</div></div>
+        <div><div class="k">4 Hours</div><div class="v" id="tdc_4h">—</div></div>
+        <div><div class="k">End of Day</div><div class="v" id="tdc_eod">—</div></div>
+        <div><div class="k" id="tdc_inv_label">Invalidation</div><div class="v" id="tdc_inv">—</div></div>
+      </div>
+      <div class="tdc-why" id="tdc_why">WHY: —</div>
+      <details class="tdc-details">
+        <summary>View decision details</summary>
+        <p class="muted" style="margin:8px 0 0">Scrolls to the detailed analysis below (gates, expected value, historical support). Does not duplicate the full dashboard.</p>
+        <p class="muted" id="tdc_gates" style="margin:6px 0 0"></p>
+        <p style="margin:8px 0 0"><a href="#decisionDetailsAnchor" style="color:#7fd0ff">Jump to detailed analysis →</a></p>
+      </details>
+      <p class="muted" style="margin:10px 0 0">Decision support only — not an order. TRADE requires A/A+, confidence ≥70, positive EV, historical support, fresh data, forecast agreement, and no high-impact event risk.</p>
     </div>
     <div class="card" id="toplineCard" style="border-left:4px solid #7fd0ff">
       <h2>Topline Rate Forecast <span class="evb estimated" title="Projected rates and bailout levels are model estimates — not executable quotes or trade instructions.">ESTIMATED</span></h2>
@@ -283,6 +328,14 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="stat"><div class="k">Last reject</div><div class="v" id="fix_reject" style="font-size:13px">—</div></div>
       </div>
       <p class="muted" id="fix_health" style="margin-top:10px;font-size:12px"></p>
+      <div class="rds-admin" id="fix_admin_panel" style="margin-top:14px;padding-top:14px;border-top:1px solid #1d2740">
+        <h3 style="margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#8aa0c6">FIX Diagnostics (admin)</h3>
+        <p class="muted" style="margin:0 0 10px">Raw scrubbed FIX messages for MarketDataRequest (35=V) and inbound W/X/Y/3.</p>
+        <div class="rds-admin-actions">
+          <button type="button" class="rds-btn secondary" id="fix_btn_refresh_diag">Refresh FIX Log</button>
+        </div>
+        <pre id="fix_admin_log" class="muted" style="white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;background:#0f1729;padding:10px;border-radius:8px;border:1px solid #1d2740">Set Admin Key to view raw FIX diagnostics.</pre>
+      </div>
     </div>
 
     <div class="grid2">
@@ -398,7 +451,7 @@ DASHBOARD_HTML = """<!doctype html>
       <table style="margin-top:10px"><thead><tr><th>Source</th><th>Level</th><th>Metrics</th><th>Fields</th></tr></thead><tbody id="es_rows"></tbody></table>
     </div>
 
-    <div class="card" style="border-left:4px solid #d69e2e">
+    <div class="card" id="decisionDetailsAnchor" style="border-left:4px solid #d69e2e">
       <h2>Decision quality <span class="src sample">trade vs wait</span></h2>
       <p class="muted" style="margin:4px 0 10px">Decision support only — not trading execution. Helps judge whether a setup is worth taking now vs waiting; paper figures are simulated.</p>
       <div class="row">
@@ -520,9 +573,93 @@ DASHBOARD_HTML = """<!doctype html>
       <div id="rl_providers" style="margin-top:6px"></div>
     </div>
 
+    <div class="card" style="border-left:4px solid #d69e2e">
+      <h2>Active paper position <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">LIFECYCLE SIMULATION</span></h2>
+      <p class="muted" style="margin:4px 0 10px">One trade per actionable signal · hourly-profit-v1 · target/stop first, then hourly net-profit exit, then max hold.</p>
+      <div id="pt_active_none" class="muted">No open paper position.</div>
+      <div id="pt_active_body" class="hidden">
+        <div class="row">
+          <div class="stat"><div class="k">Direction</div><div class="v" id="pt_dir">—</div></div>
+          <div class="stat"><div class="k">Entry</div><div class="v" id="pt_entry">—</div></div>
+          <div class="stat"><div class="k">Current rate</div><div class="v" id="pt_current">—</div></div>
+          <div class="stat"><div class="k">Target</div><div class="v" id="pt_target">—</div></div>
+          <div class="stat"><div class="k">Stop</div><div class="v" id="pt_stop">—</div></div>
+          <div class="stat"><div class="k">Net P/L</div><div class="v" id="pt_net">—</div></div>
+          <div class="stat"><div class="k">Next checkpoint</div><div class="v" id="pt_checkpoint">—</div></div>
+          <div class="stat"><div class="k">Max hold</div><div class="v" id="pt_maxhold">—</div></div>
+          <div class="stat"><div class="k">Action</div><div class="v" id="pt_action">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="border-left:4px solid #319795">
+      <h2>Closed-trade performance <span class="evb measured">LIFECYCLE</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Completed lifecycle trades (not per-horizon analytics). Legacy 1d horizon P/L kept below for comparison.</p>
+      <div class="row">
+        <div class="stat"><div class="k">Completed trades</div><div class="v" id="lc_trades">—</div></div>
+        <div class="stat"><div class="k">Lifecycle win rate</div><div class="v" id="lc_win">—</div></div>
+        <div class="stat"><div class="k">Net P/L</div><div class="v" id="lc_net">—</div></div>
+        <div class="stat"><div class="k">Expectancy</div><div class="v" id="lc_exp">—</div></div>
+        <div class="stat"><div class="k">Payoff ratio</div><div class="v" id="lc_payoff">—</div></div>
+        <div class="stat"><div class="k">Max drawdown</div><div class="v" id="lc_mdd">—</div></div>
+        <div class="stat"><div class="k">Avg hold (h)</div><div class="v" id="lc_hold">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:10px">Exit reason distribution</div>
+      <table><thead><tr><th>Reason</th><th>Count</th><th>%</th></tr></thead><tbody id="lc_exits"></tbody></table>
+      <div class="k muted" style="margin-top:10px">Max-hold policy comparison (backtest)</div>
+      <table><thead><tr><th>Max hold</th><th>Trades</th><th>Win%</th><th>Net P/L</th><th>Target%</th><th>Stop%</th><th>Hourly%</th><th>Max hold%</th></tr></thead><tbody id="lc_policy"></tbody></table>
+    </div>
+
+    <div class="card" style="border-left:4px solid #805ad5">
+      <h2>14-Day Hourly Profit Exit Replay <span class="evb measured">RESEARCH ONLY</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Read-only replay over stored recommendations. Does not replace production headline statistics.</p>
+      <p class="muted" id="r14_period">Period: —</p>
+      <p class="muted" id="r14_resolution">Price data: —</p>
+      <div class="row">
+        <div class="stat"><div class="k">Legacy trades (1d)</div><div class="v" id="r14_legacy_n">—</div></div>
+        <div class="stat"><div class="k">Replay trades (24h)</div><div class="v" id="r14_new_n">—</div></div>
+        <div class="stat"><div class="k">Legacy net</div><div class="v" id="r14_legacy_net">—</div></div>
+        <div class="stat"><div class="k">Replay net (24h)</div><div class="v" id="r14_new_net">—</div></div>
+        <div class="stat"><div class="k">Dupes removed</div><div class="v" id="r14_dupes">—</div></div>
+        <div class="stat"><div class="k">Top diff reason</div><div class="v" id="r14_diff" style="font-size:12px">—</div></div>
+      </div>
+      <div class="k muted" style="margin-top:10px">Max-hold variants (14-day replay)</div>
+      <table><thead><tr><th>Hold</th><th>Completed</th><th>Skipped (open)</th><th>Data insuff.</th><th>Win%</th><th>Net P/L</th><th>Expectancy</th><th>MDD</th></tr></thead><tbody id="r14_variants"></tbody></table>
+      <p style="margin-top:8px"><a id="r14_csv_link" href="/paper-trading/replay/14-day/csv" target="_blank">Download trade-by-trade CSV</a></p>
+    </div>
+
+    <div class="card" style="border-left:4px solid #38a169">
+      <h2>Exit Strategy Comparison <span class="esc-badge" id="esc_sample">—</span></h2>
+      <p class="muted" style="margin:4px 0 10px">SIMULATED PAPER PERFORMANCE — old fixed-horizon 1d vs exit at first net-profitable observation. Same notional/costs. No look-ahead. Not live trading.</p>
+      <p class="muted" id="esc_period">Period: —</p>
+      <p class="muted" id="esc_meta">Eligible: — · Excluded: — · Compared: — · Verdict: —</p>
+      <div class="grid2">
+        <div>
+          <div class="k muted">OLD METHOD (fixed-horizon 1d)</div>
+          <table class="esc-table"><tbody id="esc_old"></tbody></table>
+        </div>
+        <div>
+          <div class="k muted">NEW METHOD (first net profit)</div>
+          <table class="esc-table"><tbody id="esc_new"></tbody></table>
+        </div>
+      </div>
+      <div class="k muted" style="margin-top:12px">Difference</div>
+      <div class="row" id="esc_diff_row">
+        <div class="stat"><div class="k">Δ Net P/L</div><div class="v" id="esc_d_net">—</div></div>
+        <div class="stat"><div class="k">Δ Win rate</div><div class="v" id="esc_d_wr">—</div></div>
+        <div class="stat"><div class="k">Δ Avg P/L</div><div class="v" id="esc_d_avg">—</div></div>
+        <div class="stat"><div class="k">Δ Drawdown</div><div class="v" id="esc_d_dd">—</div></div>
+        <div class="stat"><div class="k">Verdict</div><div class="v" id="esc_verdict">—</div></div>
+      </div>
+      <details style="margin-top:10px">
+        <summary class="muted" style="cursor:pointer;color:#7fd0ff">Breakdowns &amp; since-rule-change (observational)</summary>
+        <pre id="esc_breakdowns" class="muted" style="white-space:pre-wrap;font-size:12px;margin-top:8px"></pre>
+      </details>
+    </div>
+
     <div class="card" style="border-left:4px solid #2f855a">
-      <h2>Paper hedge performance <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">SIMULATED PAPER PERFORMANCE</span></h2>
-      <p class="muted" style="margin:4px 0 10px">$100,000 notional · $40 round-trip cost · BUY_USD / SELL_USD only · no real trades.</p>
+      <h2>Paper hedge performance <span class="tag" style="background:#3a2236;color:#f0a6d6;font-size:12px">LEGACY 1D HORIZON</span></h2>
+      <p class="muted" style="margin:4px 0 10px">Legacy: one simulated P/L per recommendation at the 1d horizon (kept for comparison). Lifecycle performance is above.</p>
       <div class="row">
         <div class="stat"><div class="k">Actionable trades</div><div class="v" id="ph_trades">—</div></div>
         <div class="stat"><div class="k">Win rate</div><div class="v" id="ph_win">—</div></div>
@@ -539,11 +676,11 @@ DASHBOARD_HTML = """<!doctype html>
 
     <div class="card" style="border-left:4px solid #6b46c1">
       <h2>Recommendation history <span class="src sample">stored signals</span></h2>
-      <p class="muted" style="margin:4px 0 10px">Every analysis is stored as a paper recommendation. Horizon cells show evaluation status (Pending until enough time passes). Paper P/L is the 1d simulated net result; NO_TRADE / PASS show N/A.</p>
+      <p class="muted" style="margin:4px 0 10px">Horizon cells = directional accuracy analytics (not separate trades). Legacy P/L = 1d horizon; Lifecycle P/L = hourly-profit-v1 trade.</p>
       <table>
         <thead><tr>
           <th>Time</th><th>Version</th><th>Signal</th><th>Grade</th><th>Conf</th>
-          <th>1h</th><th>4h</th><th>EOD</th><th>1d</th><th>2d</th><th>5d</th><th>Paper P/L</th>
+          <th>1h</th><th>4h</th><th>EOD</th><th>1d</th><th>2d</th><th>5d</th><th>Legacy 1d P/L</th><th>Lifecycle P/L</th>
         </tr></thead>
         <tbody id="rh_body"></tbody>
       </table>
@@ -781,8 +918,29 @@ DASHBOARD_HTML = """<!doctype html>
   </main>
   <script>
     const $ = id => document.getElementById(id);
-    function fill(id, v, suffix){ $(id).textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—'; }
+    function setText(id, v){ const el=$(id); if(!el) return false; el.textContent = v; return true; }
+    function fill(id, v, suffix){
+      const el=$(id); if(!el) return;
+      el.textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—';
+    }
+    function showSectionError(id, msg){
+      const el=$(id); if(!el) return;
+      el.innerHTML = '<div class="mkt-unavail" style="margin:8px 0">'+msg+'</div>';
+    }
     function setSrc(id, val){ const el=$(id); if(!el) return; const v=(val||'unknown'); el.textContent=v; el.className='src '+String(v).toLowerCase(); }
+    async function fetchJson(url){
+      const r = await fetch(url);
+      let body = null;
+      try { body = await r.json(); } catch(e){ body = null; }
+      if(!r.ok){
+        const detail = (body && (body.detail || body.reason)) ? String(body.detail || body.reason) : ('HTTP '+r.status);
+        const err = new Error(detail);
+        err.status = r.status;
+        err.url = url;
+        throw err;
+      }
+      return body;
+    }
     function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(); }catch(e){ return iso; } }
     function tlRate4(v){ return (v==null)?'—':Number(v).toFixed(4); }
     function tlMovePct(v){ return (v==null)?'':((v>0?'+':'')+v+'%'); }
@@ -790,6 +948,84 @@ DASHBOARD_HTML = """<!doctype html>
     // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
     // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
     function tlGradeLabel(grade){ return (grade != null && grade !== '') ? grade : '—'; }
+    function renderTradeDecisionCard(d){
+      const card = $('tradeDecisionCard'); if(!card) return;
+      const t = d.trade_decision_card || {};
+      const vis = t.visual || 'yellow';
+      card.className = 'card tdc ' + vis;
+      setText('tdc_action', t.action || 'WAIT');
+      setText('tdc_bias', 'BIAS: ' + (t.bias || 'WAIT'));
+      setText('tdc_pred', 'PREDICTION: ' + (t.prediction || 'No sufficiently strong setup'));
+      setText('tdc_now', tlRate4(t.spot));
+      setText('tdc_4h', tlRate4(t.predicted_4h));
+      setText('tdc_eod', tlRate4(t.predicted_eod));
+      setText('tdc_inv_label', t.invalidation_label || 'Invalidation');
+      setText('tdc_inv', tlRate4(t.invalidation_level));
+      setText('tdc_why', 'WHY: ' + (t.why || '—'));
+      const g = t.gates || {};
+      const keys = Object.keys(g);
+      setText('tdc_gates', keys.length
+        ? ('Gates: ' + keys.map(function(k){ return k + '=' + g[k]; }).join(' · '))
+        : '');
+    }
+    function escRows(tbodyId, m){
+      const tb = $(tbodyId); if(!tb || !m){ if(tb) tb.innerHTML=''; return; }
+      const within = m.pct_exiting_profitably_within || {};
+      const rows = [
+        ['Evaluated trades', m.evaluated_trades],
+        ['Wins / Losses', (m.wins??'—')+' / '+(m.losses??'—')],
+        ['Win rate', m.win_rate==null?'—':(m.win_rate+'%')],
+        ['Gross profit', m.gross_profit],
+        ['Gross loss', m.gross_loss],
+        ['Transaction costs', m.transaction_costs],
+        ['Net P/L', m.net_pnl],
+        ['Average P/L', m.average_pnl],
+        ['Median P/L', m.median_pnl],
+        ['Avg holding (min)', m.average_holding_minutes],
+        ['Max drawdown', m.maximum_drawdown],
+        ['Best / Worst', (m.best_trade??'—')+' / '+(m.worst_trade??'—')],
+        ['Profit ≤1h', within['1_hour']==null?'—':(within['1_hour']+'%')],
+        ['Profit ≤4h', within['4_hours']==null?'—':(within['4_hours']+'%')],
+        ['Profit ≤EOD', within['end_of_day']==null?'—':(within['end_of_day']+'%')],
+        ['Profit ≤1d', within['1_day']==null?'—':(within['1_day']+'%')],
+      ];
+      tb.innerHTML = rows.map(function(r){
+        return '<tr><th>'+r[0]+'</th><td>'+(r[1]==null?'—':r[1])+'</td></tr>';
+      }).join('');
+    }
+    async function loadExitComparison(){
+      try {
+        const d = await fetchJson('/performance/exit-strategy-comparison');
+        setText('esc_sample', d.sample_completeness || '—');
+        const cp = d.comparison_period || {};
+        setText('esc_period', 'Period: '+(cp.start||'—')+' → '+(cp.end||'—'));
+        const diff = d.difference || {};
+        setText('esc_meta',
+          'Eligible: '+(d.eligible_recommendations??'—')+
+          ' · Excluded: '+(d.excluded_count??'—')+
+          ' · Compared: '+(d.compared_trades??'—')+
+          ' · Verdict: '+(diff.verdict||'—'));
+        escRows('esc_old', d.old_method);
+        escRows('esc_new', d.new_method);
+        setText('esc_d_net', diff.net_pnl==null?'—':diff.net_pnl);
+        setText('esc_d_wr', diff.win_rate_pp==null?'—':(diff.win_rate_pp+' pp'));
+        setText('esc_d_avg', diff.average_pnl==null?'—':diff.average_pnl);
+        setText('esc_d_dd', diff.drawdown==null?'—':diff.drawdown);
+        setText('esc_verdict', diff.verdict || '—');
+        const src = d.since_rule_change || {};
+        setText('esc_breakdowns', JSON.stringify({
+          since_rule_change: src,
+          breakdowns: d.breakdowns,
+          model_versions_present: d.model_versions_present,
+          costs: d.costs,
+          excluded_sample: (d.excluded||[]).slice(0,20),
+        }, null, 2));
+      } catch(e) {
+        setText('esc_meta', 'Exit comparison unavailable (simulated section): '+e.message);
+        showSectionError('esc_old', 'Could not load old-method stats.');
+        showSectionError('esc_new', 'Could not load first-profit stats.');
+      }
+    }
     function renderTopline(d){
       const row = $('tl_row'); if(!row) return;
       const tf = d.topline_forecast;
@@ -861,6 +1097,7 @@ DASHBOARD_HTML = """<!doctype html>
       if(v && v !== '••••••••') sessionStorage.setItem('aita_admin_secret', v);
       else if(!v) sessionStorage.removeItem('aita_admin_secret');
       loadResearchImportAdmin();
+      loadFixAdminDiagnostics();
     }
     function rdsStopImportPoll(){
       if(_rdsImportPoll){ clearInterval(_rdsImportPoll); _rdsImportPoll = null; }
@@ -1021,6 +1258,7 @@ DASHBOARD_HTML = """<!doctype html>
       const bi = $('rds_btn_incr'); if(bi) bi.onclick = function(){ rdsStartImport('incremental', false); };
       const br = $('rds_btn_rebuild'); if(br) br.onclick = rdsRebuildSnapshots;
       const ba = $('rds_btn_auth'); if(ba) ba.onclick = rdsSetAuth;
+      const fxr = $('fix_btn_refresh_diag'); if(fxr) fxr.onclick = loadFixAdminDiagnostics;
     })();
     async function loadResearchDatabase(){
       let s;
@@ -1122,9 +1360,29 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function refresh() {
-      const d = await (await fetch('/analysis/usdmxn')).json();
+      const loadErr = $('dash_load_error');
+      if (loadErr) loadErr.style.display = 'none';
+      let d;
+      try {
+        d = await fetchJson('/analysis/usdmxn');
+      } catch(e) {
+        if (loadErr) {
+          loadErr.style.display = '';
+          setText('dash_load_error_msg', 'Primary analysis failed: ' + e.message);
+        }
+        // Still attempt optional panels so one failure does not blank the page.
+        loadPerformance();
+        loadScheduler();
+        loadDiagnostics();
+        loadFixMarketData();
+        loadResearchDatabase();
+        loadResearchImportAdmin();
+        loadExitComparison();
+        return;
+      }
       const m = d.market || {};
 
+      try {
       // Stale-fallback safety: show an explicit warning and never present a
       // fabricated/stale quote or actionable recommendation.
       const unavailable = !!(d.market_data_unavailable || (m.source === 'unavailable')
@@ -1135,21 +1393,21 @@ DASHBOARD_HTML = """<!doctype html>
         if (unavailable) {
           const msg = d.warning || (d.market_state || {}).warning
             || 'Live market data unavailable and no recent cached real quote exists.';
-          $('mkt_unavail_msg').textContent = msg;
+          setText('mkt_unavail_msg', msg);
         }
       }
 
       if (unavailable) {
         // Never show a fabricated/stale number — say so explicitly.
         ['px','inv','dxy','us2y','us10y','oil','gold','vix'].forEach(function(id){
-          const el = $(id); if (el) el.textContent = 'Unavailable';
+          setText(id, 'Unavailable');
         });
       } else {
         fill('px', m.usdmxn); fill('inv', m.inverse_usdmxn); fill('dxy', m.dxy);
         fill('us2y', m.us2y, '%'); fill('us10y', m.us10y, '%'); fill('oil', m.oil);
         fill('gold', m.gold); fill('vix', m.vix);
       }
-      $('src').textContent = 'source: ' + (m.source || '—') + ' · ' + (m.provider || '');
+      setText('src', 'source: ' + (m.source || '—') + ' · ' + (m.provider || ''));
 
       // Per-market-field provenance badges (live/fallback/mock).
       const fsrc = m.sources || {};
@@ -1159,29 +1417,37 @@ DASHBOARD_HTML = """<!doctype html>
 
       // Market status panel (open/closed, age, next refresh/open, provider).
       const ms = d.market_state || {};
-      const mb = $('mkt_badge'); mb.textContent = ms.market_status || '—';
-      mb.className = 'src ' + (ms.is_open ? 'live' : 'fallback');
-      $('mkt_reason').textContent = ms.market_reason || '';
-      $('mkt_fetched').textContent = fmtTime(ms.fetched_at);
-      $('mkt_age').textContent = (ms.age_minutes==null?'—':(ms.age_minutes+' min'+(ms.is_stale?' · stale':'')));
-      $('mkt_next').textContent = fmtTime(ms.next_refresh);
-      $('mkt_open').textContent = ms.is_open ? 'open now' : fmtTime(ms.next_market_open);
-      $('mkt_provider').textContent = m.provider || '—';
-      $('mkt_source').textContent = (ms.cached ? 'cached · ' : '') + (m.source || '—');
-      $('mkt_closed_note').textContent = ms.is_open ? '' : 'Using latest available market data.';
+      const mb = $('mkt_badge');
+      if (mb) {
+        mb.textContent = ms.market_status || '—';
+        mb.className = 'src ' + (ms.is_open ? 'live' : 'fallback');
+      }
+      setText('mkt_reason', ms.market_reason || '');
+      setText('mkt_fetched', fmtTime(ms.fetched_at));
+      setText('mkt_age', (ms.age_minutes==null?'—':(ms.age_minutes+' min'+(ms.is_stale?' · stale':''))));
+      setText('mkt_next', fmtTime(ms.next_refresh));
+      setText('mkt_open', ms.is_open ? 'open now' : fmtTime(ms.next_market_open));
+      setText('mkt_provider', m.provider || '—');
+      setText('mkt_source', (ms.cached ? 'cached · ' : '') + (m.source || '—'));
+      setText('mkt_closed_note', ms.is_open ? '' : 'Using latest available market data.');
 
-      // Topline Rate Forecast (top card) — decision support only.
-      renderTopline(d);
+      // Top trade decision card — then Topline Rate Forecast.
+      try { renderTradeDecisionCard(d); } catch(e) { showSectionError('tradeDecisionCard', 'Trade decision card failed: '+e.message); }
+      try { renderTopline(d); } catch(e) { showSectionError('tl_row', 'Topline forecast failed: '+e.message); }
+      loadExitComparison();
 
       // Provider health panel.
-      const ph = d.provider_health || {}; const box = $('provhealth'); box.innerHTML='';
-      Object.keys(ph).forEach(function(k){
-        const r = ph[k] || {}; const s = document.createElement('span'); s.className='hstat';
-        const label = (r.status||'').replace(/_/g,' ');
-        s.innerHTML = '<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+label+(r.detail?(' <span class="muted">('+r.detail+')</span>'):'');
-        box.appendChild(s);
-      });
-      if (!Object.keys(ph).length) box.innerHTML = '<span class="muted">No provider activity yet.</span>';
+      const ph = d.provider_health || {}; const box = $('provhealth');
+      if (box) {
+        box.innerHTML='';
+        Object.keys(ph).forEach(function(k){
+          const r = ph[k] || {}; const s = document.createElement('span'); s.className='hstat';
+          const label = (r.status||'').replace(/_/g,' ');
+          s.innerHTML = '<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+label+(r.detail?(' <span class="muted">('+r.detail+')</span>'):'');
+          box.appendChild(s);
+        });
+        if (!Object.keys(ph).length) box.innerHTML = '<span class="muted">No provider activity yet.</span>';
+      }
 
       // Clearly label every data source (live/mock/fallback/imported/sample).
       const ds = d.data_sources || {};
@@ -1428,23 +1694,35 @@ DASHBOARD_HTML = """<!doctype html>
       if (!(ctx.upcoming_events||[]).length) ev.innerHTML = '<li class="muted">No upcoming events.</li>';
       const gaps = d.calendar_coverage_gaps || [];
       const gapEl = $('cal_gaps');
-      if (gaps.length) {
-        gapEl.innerHTML = '<div class="k">Unavailable from free sources</div><ul>'+
-          gaps.map(g => '<li><b>'+(g.event||'')+'</b> ('+(g.country||'')+') — '+(g.note||'unavailable')+'</li>').join('')+
-          '</ul>';
-      } else if (gapEl) { gapEl.innerHTML = ''; }
+      if (gapEl) {
+        if (gaps.length) {
+          gapEl.innerHTML = '<div class="k">Unavailable from free sources</div><ul>'+
+            gaps.map(g => '<li><b>'+(g.event||'')+'</b> ('+(g.country||'')+') — '+(g.note||'unavailable')+'</li>').join('')+
+            '</ul>';
+        } else { gapEl.innerHTML = ''; }
+      }
 
-      const rel = $('releases'); rel.innerHTML='';
-      (ctx.released_last_24h||[]).forEach(e => {
-        const li=document.createElement('li');
-        li.innerHTML = (e.event||'') + ' <span class="muted">(act '+(e.actual ?? 'n/a')+
-          ' vs fc '+(e.forecast ?? 'n/a')+')</span>';
-        rel.appendChild(li);
-      });
-      if (!(ctx.released_last_24h||[]).length) rel.innerHTML = '<li class="muted">No releases in the last 24h.</li>';
+      const rel = $('releases');
+      if (rel) {
+        rel.innerHTML='';
+        (ctx.released_last_24h||[]).forEach(e => {
+          const li=document.createElement('li');
+          li.innerHTML = (e.event||'') + ' <span class="muted">(act '+(e.actual ?? 'n/a')+
+            ' vs fc '+(e.forecast ?? 'n/a')+')</span>';
+          rel.appendChild(li);
+        });
+        if (!(ctx.released_last_24h||[]).length) rel.innerHTML = '<li class="muted">No releases in the last 24h.</li>';
+      }
 
-      $('newssrc').textContent = 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items';
-      $('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+      setText('newssrc', 'news: ' + ((d.data_sources||{}).news || '—') + ' · ' + (ctx.recent_news||[]).length + ' items');
+      setText('ts', 'Updated ' + new Date().toLocaleTimeString());
+      } catch (e) {
+        if (loadErr) {
+          loadErr.style.display = '';
+          setText('dash_load_error_msg', 'Dashboard render error: ' + e.message);
+        }
+      }
+      // Optional panels — each isolated so one failure cannot blank the page.
       loadPerformance();
       loadScheduler();
       loadDiagnostics();
@@ -1469,6 +1747,7 @@ DASHBOARD_HTML = """<!doctype html>
 
       const st = conn.status || sess.status || (fx.configured ? 'disconnected' : 'not_configured');
       const mdStatus = (mdSub.status || 'none').toUpperCase();
+      const mdDisplay = mdSub.display_status || mdStatus;
       badge.textContent = mdStatus === 'ACCEPTED' ? 'live' : (mdStatus === 'REJECTED' ? 'rejected' : st);
       badge.className = 'src ' + (
         mdStatus === 'ACCEPTED' ? 'live' :
@@ -1477,7 +1756,7 @@ DASHBOARD_HTML = """<!doctype html>
       );
 
       fill('fix_status', st);
-      fill('fix_md_sub', mdStatus);
+      fill('fix_md_sub', mdDisplay);
       fill('fix_requested_symbol', mdSub.requested_symbol || fx.configured_symbol_env || '—');
       fill('fix_bid', quote.bid != null ? Number(quote.bid).toFixed(5) : '—');
       fill('fix_ask', quote.ask != null ? Number(quote.ask).toFixed(5) : '—');
@@ -1497,7 +1776,63 @@ DASHBOARD_HTML = """<!doctype html>
         tcp + ' · ' + logon + ' · ' + hbOk + ' · last hb ' + hb +
         (fx.trading_enabled ? '' : ' · read-only (no orders)') +
         (fx.configured ? '' : ' · set CENTROID_MD_* + CENTROID_MD_ENABLED=true') +
-        (mdSub.status === 'pending' ? ' · awaiting MD snapshot (35=W) or incremental (35=X)' : '');
+        (mdSub.waiting_for_snapshot ? '' : (mdSub.status === 'pending' ? ' · awaiting MD snapshot (35=W) or incremental (35=X)' : ''));
+      loadFixAdminDiagnostics();
+    }
+
+    async function loadFixAdminDiagnostics(){
+      const el = $('fix_admin_log'); if(!el) return;
+      const secret = rdsAdminSecret();
+      if(!secret){
+        el.textContent = 'Set Admin Key to view raw FIX diagnostics.';
+        return;
+      }
+      try {
+        const r = await fetch('/admin/fix/diagnostics', {
+          headers: { 'Authorization': 'Bearer ' + secret }
+        });
+        if(r.status === 401){
+          el.textContent = 'Invalid admin key — click Set Admin Key.';
+          return;
+        }
+        if(!r.ok){
+          el.textContent = 'FIX diagnostics request failed (' + r.status + ').';
+          return;
+        }
+        const data = await r.json();
+        const lines = [];
+        const md = data.md_request_diagnostics || {};
+        lines.push('Last MarketDataRequest (35=V)');
+        lines.push('  MDReqID (262): ' + (md.md_req_id || '—'));
+        lines.push('  SubscriptionRequestType (263): ' + (md.subscription_request_type || '—'));
+        lines.push('  MarketDepth (264): ' + (md.market_depth || '—'));
+        lines.push('  MDUpdateType (265): ' + (md.md_update_type || '—'));
+        lines.push('  AggregatedBook (266): ' + (md.aggregated_book || '—'));
+        lines.push('  NoMDEntryTypes (267): ' + (md.no_md_entry_types || '—'));
+        lines.push('  MDEntryTypes (269): ' + ((md.md_entry_types || []).join(', ') || '—'));
+        lines.push('  NoRelatedSym (146): ' + (md.no_related_sym || '—'));
+        lines.push('  Symbol Tag 55: ' + (md.symbol_tag_55 || '—'));
+        lines.push('  Forbidden tags present (22/48): ' + ((md.forbidden_tags_present || []).join(', ') || 'none'));
+        lines.push('');
+        lines.push('Message log (raw scrubbed FIX):');
+        const log = data.message_log || [];
+        if(!log.length){
+          lines.push('  (no FIX messages recorded yet)');
+        } else {
+          log.slice().reverse().forEach(function(entry){
+            lines.push('  [' + (entry.direction || '?') + ' ' + (entry.msg_type || '?') + ' ' + (entry.msg_type_label || '') + ' @ ' + (entry.received_at || '') + ']');
+            if(entry.summary && Object.keys(entry.summary).length){
+              lines.push('    summary: ' + JSON.stringify(entry.summary));
+            }
+            if(entry.raw_fix){
+              lines.push('    raw: ' + entry.raw_fix);
+            }
+          });
+        }
+        el.textContent = lines.join('\\n');
+      } catch(e){
+        el.textContent = 'Failed to load FIX diagnostics.';
+      }
     }
 
     // Active storage backend — Postgres (persistent) vs SQLite (ephemeral).
@@ -1587,64 +1922,172 @@ DASHBOARD_HTML = """<!doctype html>
       }).join('');
     }
     async function loadResearch(){
-      let s, ph, mo;
-      try {
-        s = await (await fetch('/research/summary')).json();
-        ph = await (await fetch('/performance/summary')).json();
-        mo = await (await fetch('/performance/monthly')).json();
-      } catch(e){ return; }
+      // Isolate optional endpoints with Promise.allSettled so a missing
+      // paper-trading route (or any one failure) cannot abort the whole panel.
+      const settled = await Promise.allSettled([
+        fetchJson('/research/summary'),
+        fetchJson('/performance/summary'),
+        fetchJson('/performance/monthly'),
+        fetchJson('/paper-trading/active'),
+        fetchJson('/paper-trading/closed-summary'),
+        fetchJson('/paper-trading/max-hold-comparison'),
+        fetchJson('/paper-trading/replay/14-day'),
+      ]);
+      const val = function(i){ return settled[i].status === 'fulfilled' ? settled[i].value : null; };
+      const s = val(0) || {};
+      const ph = val(1) || {};
+      const mo = val(2) || {};
+      const ptActive = val(3);
+      const lcClosed = val(4) || {};
+      const lcPolicy = val(5) || {};
+      const r14 = val(6);
+
+      if (settled[0].status !== 'fulfilled') {
+        showSectionError('rl_assess', 'Research summary unavailable: ' + ((settled[0].reason && settled[0].reason.message) || 'error'));
+      }
+
+      const pos = (ptActive||{}).position;
+      if(pos && pos.status === 'OPEN'){
+        const n=$('pt_active_none'), b=$('pt_active_body');
+        if(n) n.classList.add('hidden');
+        if(b) b.classList.remove('hidden');
+        setText('pt_dir', pos.direction || '—');
+        setText('pt_entry', (pos.entry_rate||'—') + ' @ ' + (pos.entry_at ? new Date(pos.entry_at).toLocaleString() : ''));
+        setText('pt_current', pos.current_executable_rate ?? '—');
+        setText('pt_target', pos.target_rate ?? '—');
+        setText('pt_stop', pos.stop_rate ?? '—');
+        setText('pt_net', usd(pos.current_net_pnl_usd));
+        setText('pt_checkpoint', pos.next_checkpoint_at ? new Date(pos.next_checkpoint_at).toLocaleString() : '—');
+        setText('pt_maxhold', pos.max_hold_deadline ? new Date(pos.max_hold_deadline).toLocaleString() : '—');
+        setText('pt_action', pos.recommended_action || '—');
+      } else {
+        const n=$('pt_active_none'), b=$('pt_active_body');
+        if(n){
+          n.classList.remove('hidden');
+          n.textContent = settled[3].status !== 'fulfilled'
+            ? 'Paper lifecycle API unavailable (simulated section skipped).'
+            : 'No open paper position.';
+        }
+        if(b) b.classList.add('hidden');
+      }
+
+      if (settled[4].status !== 'fulfilled') {
+        showSectionError('lc_exits', 'Closed-trade lifecycle summary unavailable.');
+      } else {
+        setText('lc_trades', lcClosed.trades ?? '—');
+        setText('lc_win', pctTxt(lcClosed.win_rate));
+        setText('lc_net', usd(lcClosed.net_pnl_usd));
+        setText('lc_exp', usd(lcClosed.expectancy_per_trade_usd));
+        setText('lc_payoff', lcClosed.payoff_ratio ?? '—');
+        setText('lc_mdd', usd(lcClosed.max_drawdown_usd));
+        setText('lc_hold', lcClosed.avg_holding_hours ?? '—');
+      }
+      const ex=$('lc_exits');
+      if(ex && settled[4].status === 'fulfilled'){
+        ex.innerHTML='';
+        const dist = lcClosed.exit_reason_distribution || {};
+        Object.keys(dist).forEach(function(k){
+          const row=dist[k]; ex.innerHTML += '<tr><td>'+k+'</td><td>'+row.count+'</td><td>'+row.pct+'%</td></tr>';
+        });
+        if(!Object.keys(dist).length) ex.innerHTML='<tr><td colspan="3" class="muted">No closed lifecycle trades yet.</td></tr>';
+      }
+      const lcPolicyEl=$('lc_policy');
+      if(lcPolicyEl){
+        lcPolicyEl.innerHTML='';
+        if (settled[5].status !== 'fulfilled') {
+          lcPolicyEl.innerHTML='<tr><td colspan="8" class="muted">Max-hold comparison unavailable.</td></tr>';
+        } else {
+          const vars=(lcPolicy||{}).variants||{};
+          Object.keys(vars).forEach(function(k){
+            const v=vars[k];
+            lcPolicyEl.innerHTML += '<tr><td>'+k+'</td><td>'+v.trades+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+pctTxt(v.target_hit_pct)+'</td><td>'+pctTxt(v.stop_hit_pct)+'</td><td>'+pctTxt(v.hourly_profit_exit_pct)+'</td><td>'+pctTxt(v.max_hold_exit_pct)+'</td></tr>';
+          });
+        }
+      }
+
+      if(r14 && r14.test_period){
+        setText('r14_period', 'UTC ' + r14.test_period.start_utc + ' → ' + r14.test_period.end_utc + ' (' + r14.test_period.complete_days + ' days)');
+        setText('r14_resolution', 'Price data resolution: ' + (r14.price_data_resolution || '—'));
+        const cmp = r14.comparison || {};
+        setText('r14_legacy_n', cmp.legacy_trade_count ?? '—');
+        setText('r14_new_n', cmp.new_trade_count ?? '—');
+        setText('r14_legacy_net', usd(cmp.legacy_net_pnl_usd));
+        setText('r14_new_net', usd(cmp.new_net_pnl_usd));
+        setText('r14_dupes', cmp.duplicate_overlapping_trades_removed ?? '—');
+        const dr = cmp.largest_difference_reason || {};
+        setText('r14_diff', (dr.reason || '—') + (dr.magnitude != null ? ' ('+dr.magnitude+')' : ''));
+        const rv=$('r14_variants'); if(rv){
+          rv.innerHTML='';
+          const v14 = r14.variants || {};
+          Object.keys(v14).forEach(function(k){
+            const v=v14[k];
+            rv.innerHTML += '<tr><td>'+k+'</td><td>'+(v.completed_trades??'—')+'</td><td>'+(v.recommendations_skipped_position_open??'—')+'</td><td>'+(v.data_insufficient_trades??'—')+'</td><td>'+pctTxt(v.win_rate)+'</td><td>'+usd(v.net_pnl_usd)+'</td><td>'+usd(v.expectancy_per_trade_usd)+'</td><td>'+usd(v.max_drawdown_usd)+'</td></tr>';
+          });
+        }
+      } else if (settled[6].status !== 'fulfilled') {
+        setText('r14_period', '14-day replay unavailable (optional research endpoint).');
+      }
 
       const ep = s.evaluation_progress || {};
-      $('rl_stored').textContent = ep.recommendations_stored ?? '—';
-      $('rl_evaluated').textContent = ep.recommendations_evaluated ?? '—';
-      $('rl_pending').textContent = ep.recommendations_pending ?? '—';
+      setText('rl_stored', ep.recommendations_stored ?? '—');
+      setText('rl_evaluated', ep.recommendations_evaluated ?? '—');
+      setText('rl_pending', ep.recommendations_pending ?? '—');
       const evB = ep.evaluated_by_horizon || {}, peB = ep.pending_by_horizon || {};
       const hmap = {'1h':'1h','4h':'4h','end_of_day':'eod','1d':'1d','2d':'2d','5d':'5d'};
       Object.keys(hmap).forEach(function(h){
         const sfx = hmap[h];
-        const ev=$('ev_'+sfx), pe=$('pe_'+sfx);
-        if(ev) ev.textContent = (evB[h] ?? 0);
-        if(pe) pe.textContent = (peB[h] ?? 0);
+        setText('ev_'+sfx, (evB[h] ?? 0));
+        setText('pe_'+sfx, (peB[h] ?? 0));
       });
 
-      $('rl_acc').textContent = pctTxt(s.overall_accuracy);
-      $('rl_stab').textContent = pctTxt((s.signal_stability||{}).stability);
-      $('rl_drift').textContent = pctTxt((s.signal_stability||{}).drift_rate);
-      const al=$('rl_assess'); al.innerHTML='';
-      (s.self_assessment||[]).forEach(function(o){ const li=document.createElement('li'); li.textContent=o; al.appendChild(li); });
+      setText('rl_acc', pctTxt(s.overall_accuracy));
+      setText('rl_stab', pctTxt((s.signal_stability||{}).stability));
+      setText('rl_drift', pctTxt((s.signal_stability||{}).drift_rate));
+      const al=$('rl_assess'); if(al){ al.innerHTML='';
+        (s.self_assessment||[]).forEach(function(o){ const li=document.createElement('li'); li.textContent=o; al.appendChild(li); });
+      }
 
-      $('rl_calib').innerHTML = accRows(s.confidence_calibration, [
+      const calib=$('rl_calib'); if(calib) calib.innerHTML = accRows(s.confidence_calibration, [
         (k)=>k, (k,a)=>pctTxt(a.predicted_confidence), (k,a)=>pctTxt(a.actual_accuracy),
         (k,a)=>(a.gap==null?'—':a.gap), (k,a)=>a.samples]);
-      $('rl_grade').innerHTML = accRows(s.accuracy_by_grade, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
-      $('rl_regime').innerHTML = accRows(s.accuracy_by_regime, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
-      $('rl_model').innerHTML = accRows(s.accuracy_by_model_version, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>usd(a.avg_net_pnl_usd),(k,a)=>a.samples]);
-      $('rl_sim').innerHTML = accRows(s.accuracy_by_historical_similarity, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>retTxt(a.avg_return_pct),(k,a)=>a.samples]);
+      const rlGrade=$('rl_grade'); if(rlGrade) rlGrade.innerHTML = accRows(s.accuracy_by_grade, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
+      const rlRegime=$('rl_regime'); if(rlRegime) rlRegime.innerHTML = accRows(s.accuracy_by_regime, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>a.samples]);
+      const rlModel=$('rl_model'); if(rlModel) rlModel.innerHTML = accRows(s.accuracy_by_model_version, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>usd(a.avg_net_pnl_usd),(k,a)=>a.samples]);
+      const rlSim=$('rl_sim'); if(rlSim) rlSim.innerHTML = accRows(s.accuracy_by_historical_similarity, [(k)=>k,(k,a)=>pctTxt(a.accuracy),(k,a)=>retTxt(a.avg_return_pct),(k,a)=>a.samples]);
 
       const drv=function(list){ return (list||[]).map(function(d){return '<tr><td>'+d.driver+'</td><td>'+pctTxt(d.accuracy)+'</td><td>'+d.samples+'</td></tr>';}).join(''); };
-      $('rl_topdrv').innerHTML = drv(s.top_drivers);
-      $('rl_weakdrv').innerHTML = drv(s.weakest_drivers);
+      const topdrv=$('rl_topdrv'); if(topdrv) topdrv.innerHTML = drv(s.top_drivers);
+      const weakdrv=$('rl_weakdrv'); if(weakdrv) weakdrv.innerHTML = drv(s.weakest_drivers);
 
-      const pv=s.provider_reliability||{}; const pb=$('rl_providers'); pb.innerHTML='';
-      Object.keys(pv).forEach(function(k){ const r=pv[k]||{}; const sp=document.createElement('span'); sp.className='hstat'; sp.innerHTML='<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+((r.status||'').replace(/_/g,' ')); pb.appendChild(sp); });
-      if(!Object.keys(pv).length) pb.innerHTML='<span class="muted">No provider activity yet.</span>';
+      const provRel=s.provider_reliability||{}; const pb=$('rl_providers');
+      if(pb){
+        pb.innerHTML='';
+        Object.keys(provRel).forEach(function(k){ const r=provRel[k]||{}; const sp=document.createElement('span'); sp.className='hstat'; sp.innerHTML='<span class="dot '+(r.status||'')+'"></span><b>'+k+'</b>: '+((r.status||'').replace(/_/g,' ')); pb.appendChild(sp); });
+        if(!Object.keys(provRel).length) pb.innerHTML='<span class="muted">No provider activity yet.</span>';
+      }
 
-      $('ph_trades').textContent = ph.actionable_trades ?? '—';
-      $('ph_win').textContent = pctTxt(ph.win_rate);
-      $('ph_gross').textContent = usd(ph.gross_pnl_usd);
-      $('ph_costs').textContent = usd(ph.transaction_costs_usd);
-      $('ph_net').textContent = usd(ph.net_pnl_usd);
-      $('ph_ron').textContent = retTxt(ph.return_on_notional_pct);
-      $('ph_best').textContent = usd(ph.best_trade_usd);
-      $('ph_worst').textContent = usd(ph.worst_trade_usd);
+      if (settled[1].status !== 'fulfilled') {
+        showSectionError('ph_monthly', 'Paper hedge summary unavailable.');
+      } else {
+        setText('ph_trades', ph.actionable_trades ?? '—');
+        setText('ph_win', pctTxt(ph.win_rate));
+        setText('ph_gross', usd(ph.gross_pnl_usd));
+        setText('ph_costs', usd(ph.transaction_costs_usd));
+        setText('ph_net', usd(ph.net_pnl_usd));
+        setText('ph_ron', retTxt(ph.return_on_notional_pct));
+        setText('ph_best', usd(ph.best_trade_usd));
+        setText('ph_worst', usd(ph.worst_trade_usd));
+      }
 
-      const mb=$('ph_monthly'); mb.innerHTML='';
-      const months=(mo||{}).months||{};
-      Object.keys(months).sort().reverse().forEach(function(k){
-        const m=months[k];
-        mb.innerHTML += '<tr><td>'+k+'</td><td>'+m.total_recommendations+'</td><td>'+m.actionable_recommendations+'</td><td>'+pctTxt(m.win_rate)+'</td><td>'+usd(m.gross_pnl_usd)+'</td><td>'+usd(m.transaction_costs_usd)+'</td><td>'+usd(m.net_pnl_usd)+'</td><td>'+usd(m.best_trade_usd)+'</td><td>'+usd(m.worst_trade_usd)+'</td></tr>';
-      });
-      if(!Object.keys(months).length) mb.innerHTML='<tr><td colspan="9" class="muted">No evaluated months yet.</td></tr>';
+      const mb=$('ph_monthly'); if(mb){
+        mb.innerHTML='';
+        const months=(mo||{}).months||{};
+        Object.keys(months).sort().reverse().forEach(function(k){
+          const m=months[k];
+          mb.innerHTML += '<tr><td>'+k+'</td><td>'+m.total_recommendations+'</td><td>'+m.actionable_recommendations+'</td><td>'+pctTxt(m.win_rate)+'</td><td>'+usd(m.gross_pnl_usd)+'</td><td>'+usd(m.transaction_costs_usd)+'</td><td>'+usd(m.net_pnl_usd)+'</td><td>'+usd(m.best_trade_usd)+'</td><td>'+usd(m.worst_trade_usd)+'</td></tr>';
+        });
+        if(!Object.keys(months).length) mb.innerHTML='<tr><td colspan="9" class="muted">No evaluated months yet.</td></tr>';
+      }
       loadHistory();
     }
 
@@ -1668,7 +2111,8 @@ DASHBOARD_HTML = """<!doctype html>
         const t = r.created_at ? new Date(r.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
         const hs = r.horizon_status || {};
         const cells = order.map(function(k){ return '<td>'+statusPill(hs[k]||'Pending')+'</td>'; }).join('');
-        const pnl = r.actionable ? (r.paper_pnl_usd==null ? '<span class="muted">Pending</span>' : usd(r.paper_pnl_usd)) : '<span class="muted">N/A</span>';
+        const legacyPnl = r.actionable ? (r.legacy_paper_pnl_usd==null||r.paper_pnl_usd==null ? '<span class="muted">Pending</span>' : usd(r.legacy_paper_pnl_usd||r.paper_pnl_usd)) : '<span class="muted">N/A</span>';
+        const lifePnl = r.paper_trade_opened ? (r.lifecycle_paper_pnl_usd==null ? '<span class="muted">Open</span>' : usd(r.lifecycle_paper_pnl_usd)) : (r.paper_trade_ignored_reason ? '<span class="muted" title="'+r.paper_trade_ignored_reason+'">—</span>' : '<span class="muted">—</span>');
         body.innerHTML += '<tr>'
           + '<td>'+t+'</td>'
           + '<td class="muted">'+(r.model_version||'—')+'</td>'
@@ -1676,7 +2120,8 @@ DASHBOARD_HTML = """<!doctype html>
           + '<td>'+(r.opportunity_grade||'—')+'</td>'
           + '<td>'+(r.confidence==null?'—':r.confidence)+'</td>'
           + cells
-          + '<td>'+pnl+'</td>'
+          + '<td>'+legacyPnl+'</td>'
+          + '<td>'+lifePnl+'</td>'
           + '</tr>';
       });
       $('rh_empty').textContent = (h.recommendations||[]).length ? '' :

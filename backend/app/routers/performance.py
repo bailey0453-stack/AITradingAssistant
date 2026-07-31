@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Recommendation
 from app.routers.recommendations import serialize_recommendation
-from app.services import research_lab
+from app.services import exit_strategy_comparison, research_lab
 
 router = APIRouter(prefix="/performance", tags=["performance"])
 
@@ -39,3 +39,12 @@ def recommendations(
         "count": len(rows),
         "recommendations": [serialize_recommendation(r, with_outcomes=True) for r in rows],
     }
+
+
+@router.get("/exit-strategy-comparison")
+def exit_strategy_comparison_endpoint(
+    persist: bool = Query(default=True),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Compare fixed-horizon 1d vs first-net-profit exits (simulated only)."""
+    return exit_strategy_comparison.compare_exit_strategies(db, persist=persist)

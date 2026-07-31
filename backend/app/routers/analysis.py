@@ -500,6 +500,12 @@ def _unavailable_analysis_payload(market, market_meta: dict, news_source: str) -
     }
     # Safe, non-actionable topline (no spot -> range-bound rates, N/A bailouts).
     payload["topline_forecast"] = topline_forecast.build(payload)
+    try:
+        from app.services import trade_decision_card
+
+        payload["trade_decision_card"] = trade_decision_card.build_trade_decision_card(payload)
+    except Exception:  # noqa: BLE001
+        logger.exception("Trade decision card failed on unavailable path; continuing.")
     return payload
 
 
@@ -675,6 +681,14 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         payload["evidence_overview"] = provenance.overview(prov)
     except Exception:  # noqa: BLE001
         logger.exception("Provenance build failed; continuing.")
+
+    # Top decision card: TRADE / WAIT / EXIT from explicit gates (not should_trade_now).
+    try:
+        from app.services import trade_decision_card
+
+        payload["trade_decision_card"] = trade_decision_card.build_trade_decision_card(payload)
+    except Exception:  # noqa: BLE001
+        logger.exception("Trade decision card failed; continuing.")
 
     return payload
 
