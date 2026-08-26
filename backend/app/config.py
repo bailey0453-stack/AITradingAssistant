@@ -45,9 +45,6 @@ class Settings(BaseSettings):
     refresh_policies: Optional[Dict[str, float]] = None
     market_holidays: Optional[List[str]] = None
 
-    # Centroid/GFC FIX 4.4 market-data connection. Only the persistent worker
-    # should set CENTROID_MD_ENABLED=true. Serverless consumers use
-    # FIX_WORKER_BASE_URL to read the worker's current quote over HTTPS.
     centroid_md_host: Optional[str] = None
     centroid_md_port: Optional[int] = None
     centroid_md_username: Optional[str] = None
@@ -61,6 +58,8 @@ class Settings(BaseSettings):
     centroid_md_subscription_request_type: int = 1
     centroid_md_market_depth: int = 1
     centroid_md_include_md_update_type: bool = True
+    # HTTPS endpoint for the persistent Railway FIX worker. Vercel reads this
+    # instead of opening a second FIX TCP session.
     fix_worker_base_url: Optional[str] = None
 
     centroid_td_host: Optional[str] = None
@@ -92,6 +91,23 @@ class Settings(BaseSettings):
     @property
     def macro_live_enabled(self) -> bool:
         return (not self.use_mock_data) and bool(self.fred_api_key or self.alpha_vantage_api_key)
+
+    @property
+    def calendar_live_enabled(self) -> bool:
+        return (not self.use_mock_data) and bool(self.calendar_api_key or self.fred_api_key)
+
+    @property
+    def calendar_official_enabled(self) -> bool:
+        if not self.fred_api_key or self.use_mock_data:
+            return False
+        name = (self.calendar_provider or "auto").lower()
+        if name in ("tradingeconomics", "finnhub", "csv", "mock"):
+            return False
+        return name in ("official", "fred", "composite", "auto", "")
+
+    @property
+    def calendar_csv_enabled(self) -> bool:
+        return (self.calendar_provider or "").lower() == "csv" and bool(self.calendar_csv_path)
 
 
 @lru_cache
