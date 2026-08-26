@@ -65,6 +65,11 @@ class Recommendation(Base):
 
     pair: Mapped[str] = mapped_column(String(16), default="USDMXN", index=True)
     spot_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Executable FIX bid/ask captured at recommendation time (nullable for
+    # older rows that predate quote persistence). Historical hedge P/L uses
+    # these sides; it never invents a spread from the model spot feed.
+    fix_bid: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fix_ask: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     direction: Mapped[str] = mapped_column(String(16), index=True)
     confidence: Mapped[Optional[float]] = mapped_column(Float, index=True)
