@@ -1589,17 +1589,27 @@ def test_recommendation_history_and_pending():
             assert buy["horizon_status"]["1d"] == "Target"   # target 18.10 reached
             assert buy["horizon_status"]["2d"] == "Pending"  # not due / no price
             assert buy["paper_pnl_usd"] is not None          # 1d evaluated
+            # Old consumers still get horizon_status; new clients get horizon_results.
+            assert "horizon_results" in buy and "horizon_status" in buy
+            assert buy["horizon_results"]["1h"]["status"] == "Win"
+            assert buy["horizon_results"]["2d"]["status"] == "Pending"
+            assert buy["horizon_results"]["2d"]["net_pnl_usd"] is None
+            # These seeded rows predate stored FIX quotes — do not invent P/L.
+            assert buy["horizon_results"]["1h"]["pricing_basis"] == "unavailable"
+            assert buy["horizon_results"]["1h"]["net_pnl_usd"] is None
 
             nt = rows["hist-nt"]
             assert nt["actionable"] is False
             assert nt["paper_pnl_usd"] is None, "NO_TRADE must show N/A paper P/L"
             assert nt["horizon_status"]["1d"] == "N/A"
             assert nt["horizon_status"]["2d"] == "Pending"
+            assert nt["horizon_results"]["1d"]["net_pnl_usd"] is None
 
             fresh = rows["hist-fresh"]
             assert fresh["actionable"] is True
             assert all(v == "Pending" for v in fresh["horizon_status"].values()), fresh["horizon_status"]
             assert fresh["paper_pnl_usd"] is None             # actionable but pending
+            assert all(v["status"] == "Pending" for v in fresh["horizon_results"].values())
 
     check("pending evaluation counts (stored/evaluated/by-horizon)", pending_counts_are_correct)
     check("recommendation history: per-horizon status + paper P/L", history_rows_have_status_and_pnl)

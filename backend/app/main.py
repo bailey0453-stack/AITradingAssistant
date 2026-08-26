@@ -219,6 +219,11 @@ DASHBOARD_HTML = """<!doctype html>
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #1d2740; }
     th { color:#8aa0c6; font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:.04em; }
+    .hz-cell { padding:4px 6px; line-height:1.15; vertical-align:top; white-space:nowrap; }
+    .hz-pnl { font-size:11px; font-weight:600; margin-top:1px; }
+    .hz-pnl.pos { color:#5be3a0; }
+    .hz-pnl.neg { color:#ff9bb5; }
+    .hz-pnl.na { color:#8aa0c6; font-weight:500; }
     .lean { font-weight:700; }
     .lean-usd { color:#5be3a0; }
     .lean-mxn { color:#ff9bb5; }
@@ -676,7 +681,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     <div class="card" style="border-left:4px solid #6b46c1">
       <h2>Recommendation history <span class="src sample">stored signals</span></h2>
-      <p class="muted" style="margin:4px 0 10px">Horizon cells = directional accuracy analytics (not separate trades). Legacy P/L = 1d horizon; Lifecycle P/L = hourly-profit-v1 trade.</p>
+      <p class="muted" style="margin:4px 0 10px">Horizon cells show directional accuracy plus estimated net $100K hedge P&amp;L after FIX spread and $20-per-side fees.</p>
       <table>
         <thead><tr>
           <th>Time</th><th>Version</th><th>Signal</th><th>Grade</th><th>Conf</th>
@@ -2096,6 +2101,20 @@ DASHBOARD_HTML = """<!doctype html>
       const c=colors[st]||'#4a5568';
       return '<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;background:'+c+'22;color:'+c+';border:1px solid '+c+'66">'+st+'</span>';
     }
+    function formatHorizonPnl(usd){
+      if(usd==null || usd==='') return '<div class="hz-pnl na">—</div>';
+      const n=Number(usd);
+      if(!isFinite(n)) return '<div class="hz-pnl na">—</div>';
+      if(n===0) return '<div class="hz-pnl">$0</div>';
+      const abs=Math.round(Math.abs(n));
+      if(n>0) return '<div class="hz-pnl pos">+$'+abs+'</div>';
+      return '<div class="hz-pnl neg">-$'+abs+'</div>';
+    }
+    function horizonCell(status, result){
+      const st=(result && result.status) || status || 'Pending';
+      const pnl=result ? result.net_pnl_usd : null;
+      return '<td class="hz-cell">'+statusPill(st)+formatHorizonPnl(pnl)+'</td>';
+    }
     function signalPill(dir){
       const c = dir==='BUY_USD'?'#3182ce':(dir==='SELL_USD'?'#dd6b20':'#718096');
       return '<span style="color:'+c+';font-weight:600">'+(dir||'—')+'</span>';
@@ -2110,7 +2129,8 @@ DASHBOARD_HTML = """<!doctype html>
       (h.recommendations||[]).forEach(function(r){
         const t = r.created_at ? new Date(r.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
         const hs = r.horizon_status || {};
-        const cells = order.map(function(k){ return '<td>'+statusPill(hs[k]||'Pending')+'</td>'; }).join('');
+        const hr = r.horizon_results || {};
+        const cells = order.map(function(k){ return horizonCell(hs[k], hr[k]); }).join('');
         const legacyPnl = r.actionable ? (r.legacy_paper_pnl_usd==null||r.paper_pnl_usd==null ? '<span class="muted">Pending</span>' : usd(r.legacy_paper_pnl_usd||r.paper_pnl_usd)) : '<span class="muted">N/A</span>';
         const lifePnl = r.paper_trade_opened ? (r.lifecycle_paper_pnl_usd==null ? '<span class="muted">Open</span>' : usd(r.lifecycle_paper_pnl_usd)) : (r.paper_trade_ignored_reason ? '<span class="muted" title="'+r.paper_trade_ignored_reason+'">—</span>' : '<span class="muted">—</span>');
         body.innerHTML += '<tr>'

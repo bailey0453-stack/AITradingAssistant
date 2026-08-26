@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AnalysisSnapshot, MarketSnapshot, Recommendation
+from app.services.hedge_pnl import historical_horizon_pnl, stored_fix_quote
 from app.services.recommendation_evaluator import (
     HORIZONS,
     evaluate_due,
@@ -39,16 +40,39 @@ def _news_category(market_snapshot: MarketSnapshot) -> str | None:
     return max(counts, key=counts.get) if counts else None
 
 
+def _capture_fix_quote() -> tuple[float | None, float | None]:
+    """Live executable FIX bid/ask at recommendation time, or (None, None)."""
+    try:
+        from app.services.fix.provider import get_fix_quote
+
+        quote = get_fix_quote()
+    except Exception:  # noqa: BLE001 - capture is best-effort
+        return None, None
+    if not quote:
+        return None, None
+    try:
+        bid = float(quote["bid"])
+        ask = float(quote["ask"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None, None
+    return bid, ask
+
+
 def store_recommendation(
     db: Session, analysis: AnalysisSnapshot, market_snapshot: MarketSnapshot
 ) -> Recommendation:
     """Persist a versioned, indexed paper recommendation from an analysis snapshot."""
     regime = (analysis.market_regime or {}).get("primary") if analysis.market_regime else None
     vols = version_tags()
+    fix_bid, fix_ask = _capture_fix_quote()
     reco = Recommendation(
         **vols,
         pair=analysis.pair,
         spot_price=market_snapshot.usdmxn if market_snapshot else None,
+        fix_bid=fix_bid,
+        fix_ask=fix_ask,
         direction=analysis.direction,
         confidence=analysis.confidence,
         opportunity_grade=analysis.opportunity_grade,
@@ -95,6 +119,8 @@ def serialize_recommendation(reco: Recommendation, with_outcomes: bool = False) 
         "historical_engine_version": reco.historical_engine_version,
         "pair": reco.pair,
         "spot_price": reco.spot_price,
+        "fix_bid": reco.fix_bid,
+        "fix_ask": reco.fix_ask,
         "direction": reco.direction,
         "confidence": reco.confidence,
         "opportunity_grade": reco.opportunity_grade,
@@ -170,10 +196,47 @@ def _horizon_status(outcome, direction: str) -> str:
     return "N/A"
 
 
+def _horizon_result(reco: Recommendation, _horizon: str, outcome, status: str) -> dict:
+    """Directional status plus estimated $100k FIX hedge P/L at one horizon.
+
+    Reuses the stored outcome's evaluation spot (no independent price lookup).
+    Win/Loss is the existing directional grade and is independent of P/L sign.
+    """
+    if status == "Pending":
+        return {
+            "status": status,
+            "net_pnl_usd": None,
+            "exit_rate": None,
+            "pricing_basis": None,
+        }
+    if reco.direction not in _ACTIONABLE or outcome is None:
+        return {
+            "status": status,
+            "net_pnl_usd": None,
+            "exit_rate": None,
+            "pricing_basis": None,
+        }
+    pnl = historical_horizon_pnl(
+        reco.direction,
+        reco.spot_price,
+        outcome.spot_at_evaluation,
+        stored_fix_quote(reco),
+    )
+    return {
+        "status": status,
+        "net_pnl_usd": pnl["net_pnl_usd"],
+        "exit_rate": pnl["exit_rate"],
+        "pricing_basis": pnl["pricing_basis"],
+    }
+
+
 def serialize_history_row(reco: Recommendation) -> dict:
     """Compact row for the Recommendation History table (reads stored data only)."""
     by_h = {o.horizon: o for o in (reco.outcomes or [])}
     horizon_status = {h: _horizon_status(by_h.get(h), reco.direction) for h in HORIZONS}
+    horizon_results = {
+        h: _horizon_result(reco, h, by_h.get(h), horizon_status[h]) for h in HORIZONS
+    }
     actionable = reco.direction in _ACTIONABLE
     pnl_outcome = by_h.get(PAPER_PNL_HORIZON)
     paper_pnl_usd = (
@@ -193,6 +256,7 @@ def serialize_history_row(reco: Recommendation) -> dict:
         "stop": reco.stop,
         "evaluation_status": reco.evaluation_status,
         "horizon_status": horizon_status,
+        "horizon_results": horizon_results,
         "actionable": actionable,
         "paper_pnl_horizon": PAPER_PNL_HORIZON,
         "paper_pnl_usd": paper_pnl_usd,

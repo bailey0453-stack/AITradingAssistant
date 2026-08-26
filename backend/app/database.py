@@ -162,10 +162,22 @@ def _apply_additive_migrations() -> None:
     from sqlalchemy import inspect, text
 
     insp = inspect(engine)
+    stmts: list[str] = []
+    if insp.has_table("recommendations"):
+        rcols = {c["name"] for c in insp.get_columns("recommendations")}
+        if "fix_bid" not in rcols:
+            stmts.append("ALTER TABLE recommendations ADD COLUMN fix_bid FLOAT")
+        if "fix_ask" not in rcols:
+            stmts.append("ALTER TABLE recommendations ADD COLUMN fix_ask FLOAT")
     if not insp.has_table("similarity_matches"):
+        for sql in stmts:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(sql))
+            except Exception:  # noqa: BLE001
+                pass
         return
     cols = {c["name"] for c in insp.get_columns("similarity_matches")}
-    stmts: list[str] = []
     if "research_snapshot_id" not in cols:
         stmts.append(
             "ALTER TABLE similarity_matches ADD COLUMN research_snapshot_id INTEGER"

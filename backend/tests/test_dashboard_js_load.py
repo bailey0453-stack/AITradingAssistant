@@ -82,6 +82,22 @@ def test_optional_endpoint_failure_does_not_abort_core_refresh_structure():
     assert refresh_chunk.find("renderTradeDecisionCard") < js.find("loadPerformance()")
 
 
+def test_history_cells_show_status_and_hedge_pnl():
+    html = DASHBOARD_HTML
+    assert (
+        "Horizon cells show directional accuracy plus estimated net $100K hedge P&L after FIX spread and $20-per-side fees."
+        in html
+        or "Horizon cells show directional accuracy plus estimated net $100K hedge P&amp;L after FIX spread and $20-per-side fees."
+        in html
+    )
+    js = _dashboard_js()
+    assert "horizon_results" in js
+    assert "function formatHorizonPnl" in js
+    assert "function horizonCell" in js
+    assert "hz-pnl pos" in js
+    assert "hz-pnl neg" in js
+
+
 def test_decision_card_above_topline_and_null_safe_helpers():
     html = DASHBOARD_HTML
     assert html.find("tradeDecisionCard") < html.find("toplineCard")

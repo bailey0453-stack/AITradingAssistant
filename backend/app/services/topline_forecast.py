@@ -12,63 +12,23 @@ from __future__ import annotations
 from typing import Optional
 
 from app.services.fix.provider import get_fix_quote
+from app.services.hedge_pnl import (
+    FEE_PER_SIDE_USD as _FEE_PER_SIDE_USD,
+    HEDGE_USD as _HEDGE_USD,
+    net_hedge_pnl_usd,
+    reanchor_to_fix,
+)
 
 _INTRADAY = "1-4 hours"
 _EOD = "End of day"
 _MULTIDAY = "1-2 days"
 _DEFAULT_STOP_PCT = 0.002
-_HEDGE_USD = 100_000.0
-_FEE_PER_SIDE_USD = 20.0
 
 
 def _move_pct(rate: Optional[float], spot: Optional[float]) -> Optional[float]:
     if rate is None or not spot:
         return None
     return round((rate / spot - 1) * 100, 3)
-
-
-def _reanchor_to_fix(forecast_rate: Optional[float], model_spot: Optional[float], fix: dict | None) -> Optional[float]:
-    """Apply the model's absolute forecast move to the live FIX midpoint."""
-    if forecast_rate is None:
-        return None
-    if not model_spot or not fix:
-        return forecast_rate
-    try:
-        bid = float(fix["bid"])
-        ask = float(fix["ask"])
-    except (KeyError, TypeError, ValueError):
-        return forecast_rate
-    if bid <= 0 or ask <= 0 or ask < bid:
-        return forecast_rate
-    fix_mid = (bid + ask) / 2.0
-    return fix_mid + (float(forecast_rate) - float(model_spot))
-
-
-def _hedge_pnl(direction: str, forecast_mid: Optional[float], fix: dict | None) -> Optional[float]:
-    if direction not in ("BUY_USD", "SELL_USD") or forecast_mid is None or not fix:
-        return None
-    try:
-        bid = float(fix["bid"])
-        ask = float(fix["ask"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if bid <= 0 or ask <= 0 or ask < bid or forecast_mid <= 0:
-        return None
-    half_spread = (ask - bid) / 2.0
-    future_bid = forecast_mid - half_spread
-    future_ask = forecast_mid + half_spread
-    if future_bid <= 0 or future_ask <= 0:
-        return None
-    fees = 2.0 * _FEE_PER_SIDE_USD
-    if direction == "SELL_USD":
-        mxn_received = _HEDGE_USD * bid
-        usd_to_rebuy = mxn_received / future_ask
-        gross = usd_to_rebuy - _HEDGE_USD
-    else:
-        mxn_cost = _HEDGE_USD * ask
-        usd_recovered = mxn_cost / future_bid
-        gross = _HEDGE_USD - usd_recovered
-    return round(gross - fees, 2)
 
 
 def _display_grade(grade: Optional[str], pnl: Optional[float]) -> Optional[str]:
@@ -79,8 +39,8 @@ def _display_grade(grade: Optional[str], pnl: Optional[float]) -> Optional[str]:
 
 
 def _entry(label: str, rate: Optional[float], bias: Optional[str], confidence: Optional[float], spot: Optional[float], *, grade: Optional[str] = None, direction: str = "NO_TRADE", fix: dict | None = None) -> dict:
-    executable_forecast_mid = _reanchor_to_fix(rate, spot, fix)
-    pnl = _hedge_pnl(direction, executable_forecast_mid, fix)
+    executable_forecast_mid = reanchor_to_fix(rate, spot, fix)
+    pnl = net_hedge_pnl_usd(direction, executable_forecast_mid, fix)
     return {
         "horizon": label,
         "expected_rate": round(rate, 4) if rate is not None else None,
