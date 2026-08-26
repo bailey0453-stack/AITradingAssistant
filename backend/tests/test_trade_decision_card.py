@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from app.services.trade_decision_card import build_trade_decision_card
 
 
@@ -23,7 +25,7 @@ def _base(**overrides):
             "short_usd_bailout": 17.4068,
         },
         "decision_quality": {
-            "should_trade_now": True,  # must be ignored for TRADE gate
+            "should_trade_now": True,
             "expected_value": {"expected_value_usd": 120.0},
             "similar_track_record": {
                 "enough_history": True,
@@ -38,6 +40,15 @@ def _base(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _event(hours: float, title: str = "CPI", status: str = "upcoming") -> dict:
+    return {
+        "importance": "high",
+        "title": title,
+        "status": status,
+        "release_time": (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat(),
+    }
 
 
 def test_grade_b_negative_ev_returns_wait():
@@ -70,21 +81,42 @@ def test_grade_a_positive_ev_no_event_returns_trade():
     assert card["prediction"] == "USD/MXN LOWER"
 
 
-def test_high_impact_event_changes_trade_to_wait():
+def test_high_impact_event_inside_four_hours_changes_trade_to_wait():
     base = _base()
     assert build_trade_decision_card(base)["action"] == "TRADE"
     card = build_trade_decision_card(
-        _base(
-            decision_quality={
-                **base["decision_quality"],
-                "high_impact_event_count": 1,
-                "components": {"event_risk": 75.0},
-            },
-            context={"upcoming_events": [{"importance": "high", "title": "CPI"}]},
-        )
+        _base(context={"upcoming_events": [_event(1.5)]})
     )
     assert card["action"] == "WAIT"
-    assert "event" in card["why"].lower() or any("event" in r.lower() for r in card["wait_reasons"])
+    assert card["blocking_event"]["name"] == "CPI"
+    assert 1.0 < card["blocking_event"]["hours_away"] < 2.0
+    assert "CPI in" in card["why"]
+
+
+def test_high_impact_event_beyond_four_hours_does_not_block_intraday_trade():
+    card = build_trade_decision_card(
+        _base(context={"upcoming_events": [_event(8.0, "Nonfarm Payrolls")]})
+    )
+    assert card["action"] == "TRADE"
+    assert card["blocking_event"] is None
+    assert card["gates"]["no_event_risk"] is True
+
+
+def test_past_high_impact_event_does_not_block_trade():
+    card = build_trade_decision_card(
+        _base(context={"upcoming_events": [_event(-1.0, "CPI", status="released")]})
+    )
+    assert card["action"] == "TRADE"
+    assert card["blocking_event"] is None
+
+
+def test_unknown_time_high_impact_event_fails_safe_with_event_name():
+    card = build_trade_decision_card(
+        _base(context={"upcoming_events": [{"importance": "high", "title": "Fed Chair Speech"}]})
+    )
+    assert card["action"] == "WAIT"
+    assert card["blocking_event"]["name"] == "Fed Chair Speech"
+    assert "time unavailable" in card["why"]
 
 
 def test_stale_required_data_changes_trade_to_wait():
