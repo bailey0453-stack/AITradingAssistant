@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+
 from app.config import Settings, get_settings
 from app.services.fix.centroid_md_session import get_centroid_md_session, start_centroid_md_background, stop_centroid_md_background
 from app.services.fix.quote_store import FixQuoteStore
@@ -34,8 +36,24 @@ def _format_reject_display(last_inbound: dict[str, Any], requested_symbol: str |
     return text
 
 
+def _remote_worker_status(settings: Settings) -> dict[str, Any] | None:
+    if not settings.fix_worker_base_url:
+        return None
+    url = settings.fix_worker_base_url.rstrip("/") + "/admin/research/snapshots/fix-status"
+    try:
+        response = httpx.get(url, timeout=min(settings.http_timeout_seconds, 5.0))
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
 def get_fix_quote(symbol: str | None = None, settings: Settings | None = None) -> dict | None:
     settings = settings or get_settings()
+    remote = _remote_worker_status(settings)
+    if remote and isinstance(remote.get("quote"), dict):
+        return remote["quote"]
     sym = symbol or settings.centroid_md_symbol_usdmxn or "USD/MXN"
     quote = FixQuoteStore.get().get_quote(sym)
     return quote.to_dict() if quote else None
@@ -49,6 +67,10 @@ def request_fix_security_discovery(settings: Settings | None = None) -> dict[str
 
 def get_fix_diagnostics(settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
+    remote = _remote_worker_status(settings)
+    if remote:
+        remote["remote_worker"] = True
+        return remote
     store = FixQuoteStore.get()
     sym = settings.centroid_md_symbol_usdmxn or "USD/MXN"
     payload = store.diagnostics(primary_symbol=sym)
@@ -74,12 +96,7 @@ def get_fix_diagnostics(settings: Settings | None = None) -> dict[str, Any]:
             pass
     md_status = session.get("md_subscription_status") or "none"
     requested_symbol = last_md.get("symbol") or sym
-    payload["connection"] = {
-        "status": session.get("status"), "tcp_connected": bool(session.get("tcp_connected")), "fix_logged_on": bool(session.get("fix_logged_on")),
-        "logon_accepted_at": session.get("last_logon_at"), "sender_comp_id": session.get("sender_comp_id"), "target_comp_id": session.get("target_comp_id"),
-        "host": session.get("host"), "port": session.get("port"), "ssl_enabled": bool(session.get("ssl_enabled")), "outbound_seq": session.get("outbound_seq"),
-        "inbound_seq": session.get("inbound_seq"), "heartbeat_ok": heartbeat_ok, "last_heartbeat_at": session.get("last_heartbeat_at"),
-    }
+    payload["connection"] = {"status": session.get("status"), "tcp_connected": bool(session.get("tcp_connected")), "fix_logged_on": bool(session.get("fix_logged_on")), "logon_accepted_at": session.get("last_logon_at"), "sender_comp_id": session.get("sender_comp_id"), "target_comp_id": session.get("target_comp_id"), "host": session.get("host"), "port": session.get("port"), "ssl_enabled": bool(session.get("ssl_enabled")), "outbound_seq": session.get("outbound_seq"), "inbound_seq": session.get("inbound_seq"), "heartbeat_ok": heartbeat_ok, "last_heartbeat_at": session.get("last_heartbeat_at")}
     payload["market_data_subscription"] = {"status": md_status, "requested_symbol": requested_symbol, "active": md_status == "accepted", "reject_display": _format_reject_display(last_inbound, requested_symbol) if md_status == "rejected" else None}
     payload["security_discovery"] = discovery
     payload["last_md_request"] = last_md
