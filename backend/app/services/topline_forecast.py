@@ -1,8 +1,10 @@
 """Topline Rate Forecast (decision support only — never trade execution).
 
 Adds estimated net P/L for a $100k USD hedge using the live Centroid FIX
-bid/ask as the executable entry, preserving the current FIX spread at each
-forecast horizon, and deducting $20 per $100k on both entry and exit.
+bid/ask as the executable entry. Forecast moves are re-anchored from the model
+spot to the current FIX midpoint so feed-basis differences are not counted as
+hedge P/L. Preserves the current FIX spread at each forecast horizon and
+deducts $20 per $100k on both entry and exit.
 """
 
 from __future__ import annotations
@@ -23,6 +25,23 @@ def _move_pct(rate: Optional[float], spot: Optional[float]) -> Optional[float]:
     if rate is None or not spot:
         return None
     return round((rate / spot - 1) * 100, 3)
+
+
+def _reanchor_to_fix(forecast_rate: Optional[float], model_spot: Optional[float], fix: dict | None) -> Optional[float]:
+    """Apply the model's absolute forecast move to the live FIX midpoint."""
+    if forecast_rate is None:
+        return None
+    if not model_spot or not fix:
+        return forecast_rate
+    try:
+        bid = float(fix["bid"])
+        ask = float(fix["ask"])
+    except (KeyError, TypeError, ValueError):
+        return forecast_rate
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return forecast_rate
+    fix_mid = (bid + ask) / 2.0
+    return fix_mid + (float(forecast_rate) - float(model_spot))
 
 
 def _hedge_pnl(direction: str, forecast_mid: Optional[float], fix: dict | None) -> Optional[float]:
@@ -53,7 +72,6 @@ def _hedge_pnl(direction: str, forecast_mid: Optional[float], fix: dict | None) 
 
 
 def _display_grade(grade: Optional[str], pnl: Optional[float]) -> Optional[str]:
-    """Decorate the per-horizon dashboard grade with its net $100k hedge P/L."""
     if grade is None or pnl is None:
         return grade
     sign = "+" if pnl >= 0 else "-"
@@ -61,7 +79,8 @@ def _display_grade(grade: Optional[str], pnl: Optional[float]) -> Optional[str]:
 
 
 def _entry(label: str, rate: Optional[float], bias: Optional[str], confidence: Optional[float], spot: Optional[float], *, grade: Optional[str] = None, direction: str = "NO_TRADE", fix: dict | None = None) -> dict:
-    pnl = _hedge_pnl(direction, rate, fix)
+    executable_forecast_mid = _reanchor_to_fix(rate, spot, fix)
+    pnl = _hedge_pnl(direction, executable_forecast_mid, fix)
     return {
         "horizon": label,
         "expected_rate": round(rate, 4) if rate is not None else None,
@@ -71,6 +90,7 @@ def _entry(label: str, rate: Optional[float], bias: Optional[str], confidence: O
         "grade": _display_grade(grade, pnl),
         "opportunity_grade": grade,
         "hedge_pnl_usd": pnl,
+        "hedge_forecast_fix_mid": round(executable_forecast_mid, 4) if executable_forecast_mid is not None else None,
     }
 
 
@@ -137,6 +157,7 @@ def build(payload: dict) -> dict:
     long_bailout, short_bailout = _bailouts(spot, direction, primary_stop)
     fix_bid = fix.get("bid") if fix else None
     fix_ask = fix.get("ask") if fix else None
+    fix_mid = (float(fix_bid) + float(fix_ask)) / 2.0 if fix_bid is not None and fix_ask is not None else None
     entry_rate = fix_bid if direction == "SELL_USD" else fix_ask if direction == "BUY_USD" else None
     return {
         "now": round(spot, 4) if spot is not None else None,
@@ -150,9 +171,11 @@ def build(payload: dict) -> dict:
             "round_trip_fees_usd": 2 * _FEE_PER_SIDE_USD,
             "fix_bid": fix_bid,
             "fix_ask": fix_ask,
+            "fix_mid": round(fix_mid, 5) if fix_mid is not None else None,
             "fix_spread": fix.get("spread") if fix else None,
             "entry_rate": entry_rate,
             "entry_side": "FIX bid" if direction == "SELL_USD" else "FIX ask" if direction == "BUY_USD" else None,
+            "forecast_basis": "Model move re-anchored to live FIX midpoint",
             "available": entry_rate is not None,
         },
         "explanation": _explanation(direction, spot, long_bailout, short_bailout, grade=overall_grade),
