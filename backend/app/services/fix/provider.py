@@ -6,11 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import Settings, get_settings
-from app.services.fix.centroid_md_session import (
-    get_centroid_md_session,
-    start_centroid_md_background,
-    stop_centroid_md_background,
-)
+from app.services.fix.centroid_md_session import get_centroid_md_session, start_centroid_md_background, stop_centroid_md_background
 from app.services.fix.quote_store import FixQuoteStore
 from app.services.fix.simulation import SimulatedOrder
 from app.services.secrets import scrub
@@ -24,11 +20,7 @@ def _scrub_text(text: str | None, settings: Settings) -> str | None:
     return scrub(text, settings.centroid_md_password, settings.centroid_md_username)
 
 
-def _format_reject_display(
-    last_inbound: dict[str, Any],
-    requested_symbol: str | None,
-) -> str | None:
-    """Human-readable reject line for dashboard/API."""
+def _format_reject_display(last_inbound: dict[str, Any], requested_symbol: str | None) -> str | None:
     text = last_inbound.get("text") or last_inbound.get("raw_reject_text")
     if not text:
         return None
@@ -49,85 +41,58 @@ def get_fix_quote(symbol: str | None = None, settings: Settings | None = None) -
     return quote.to_dict() if quote else None
 
 
+def request_fix_security_discovery(settings: Settings | None = None) -> dict[str, Any]:
+    settings = settings or get_settings()
+    session = get_centroid_md_session(settings)
+    return session.request_security_list()
+
+
 def get_fix_diagnostics(settings: Settings | None = None) -> dict[str, Any]:
-    """Read-only FIX status for dashboard/API — secrets redacted."""
     settings = settings or get_settings()
     store = FixQuoteStore.get()
     sym = settings.centroid_md_symbol_usdmxn or "USD/MXN"
     payload = store.diagnostics(primary_symbol=sym)
-
     session = dict(payload.get("session") or {})
     last_md = dict(payload.get("last_md_request") or {})
     last_inbound = dict(payload.get("last_inbound") or {})
-
+    discovery = dict(payload.get("security_discovery") or {})
     if session.get("last_error"):
         session["last_error"] = _scrub_text(session["last_error"], settings)
-    session["warnings"] = [
-        _scrub_text(w, settings) or w for w in (session.get("warnings") or [])
-    ]
-
+    session["warnings"] = [_scrub_text(w, settings) or w for w in (session.get("warnings") or [])]
     for key in ("text", "raw_reject_text", "md_req_reject_reason"):
         if last_inbound.get(key):
             last_inbound[key] = _scrub_text(last_inbound[key], settings)
-
+    if discovery.get("error"):
+        discovery["error"] = _scrub_text(discovery["error"], settings)
     now = datetime.now(timezone.utc)
     hb_at = session.get("last_heartbeat_at")
     heartbeat_ok = False
     if hb_at:
         try:
-            hb_dt = datetime.fromisoformat(hb_at.replace("Z", "+00:00"))
-            heartbeat_ok = (now - hb_dt).total_seconds() <= _HEARTBEAT_STALE_SECONDS
+            heartbeat_ok = (now - datetime.fromisoformat(hb_at.replace("Z", "+00:00"))).total_seconds() <= _HEARTBEAT_STALE_SECONDS
         except ValueError:
-            heartbeat_ok = False
-
+            pass
     md_status = session.get("md_subscription_status") or "none"
     requested_symbol = last_md.get("symbol") or sym
-
     payload["connection"] = {
-        "status": session.get("status"),
-        "tcp_connected": bool(session.get("tcp_connected")),
-        "fix_logged_on": bool(session.get("fix_logged_on")),
-        "logon_accepted_at": session.get("last_logon_at"),
-        "sender_comp_id": session.get("sender_comp_id"),
-        "target_comp_id": session.get("target_comp_id"),
-        "host": session.get("host"),
-        "port": session.get("port"),
-        "ssl_enabled": bool(session.get("ssl_enabled")),
-        "outbound_seq": session.get("outbound_seq"),
-        "inbound_seq": session.get("inbound_seq"),
-        "heartbeat_ok": heartbeat_ok,
-        "last_heartbeat_at": session.get("last_heartbeat_at"),
+        "status": session.get("status"), "tcp_connected": bool(session.get("tcp_connected")), "fix_logged_on": bool(session.get("fix_logged_on")),
+        "logon_accepted_at": session.get("last_logon_at"), "sender_comp_id": session.get("sender_comp_id"), "target_comp_id": session.get("target_comp_id"),
+        "host": session.get("host"), "port": session.get("port"), "ssl_enabled": bool(session.get("ssl_enabled")), "outbound_seq": session.get("outbound_seq"),
+        "inbound_seq": session.get("inbound_seq"), "heartbeat_ok": heartbeat_ok, "last_heartbeat_at": session.get("last_heartbeat_at"),
     }
-    payload["market_data_subscription"] = {
-        "status": md_status,
-        "requested_symbol": requested_symbol,
-        "active": md_status == "accepted",
-        "reject_display": _format_reject_display(last_inbound, requested_symbol)
-        if md_status == "rejected"
-        else None,
-    }
+    payload["market_data_subscription"] = {"status": md_status, "requested_symbol": requested_symbol, "active": md_status == "accepted", "reject_display": _format_reject_display(last_inbound, requested_symbol) if md_status == "rejected" else None}
+    payload["security_discovery"] = discovery
     payload["last_md_request"] = last_md
     payload["last_inbound"] = last_inbound
     payload["session"] = session
-
     payload["configured"] = settings.centroid_md_enabled
     payload["config_complete"] = settings.centroid_md_configured
     payload["configured_symbol_env"] = sym
     payload["phase"] = "1_read_only_market_data"
     payload["trading_enabled"] = False
     payload["simulation_only"] = True
-    payload["credentials"] = {
-        "md_host_set": bool(settings.centroid_md_host),
-        "md_username_set": bool(settings.centroid_md_username),
-        "md_password_set": bool(settings.centroid_md_password),
-        "md_sender_comp_id": settings.centroid_md_sender_comp_id,
-        "md_target_comp_id": settings.centroid_md_target_comp_id,
-    }
-    payload["md_request_config"] = {
-        "subscription_request_type": str(settings.centroid_md_subscription_request_type),
-        "market_depth": str(settings.centroid_md_market_depth),
-        "include_md_update_type": bool(settings.centroid_md_include_md_update_type),
-    }
+    payload["credentials"] = {"md_host_set": bool(settings.centroid_md_host), "md_username_set": bool(settings.centroid_md_username), "md_password_set": bool(settings.centroid_md_password), "md_sender_comp_id": settings.centroid_md_sender_comp_id, "md_target_comp_id": settings.centroid_md_target_comp_id}
+    payload["md_request_config"] = {"subscription_request_type": str(settings.centroid_md_subscription_request_type), "market_depth": str(settings.centroid_md_market_depth), "include_md_update_type": bool(settings.centroid_md_include_md_update_type)}
     return payload
 
 
@@ -138,14 +103,7 @@ def ensure_fix_session_started(settings: Settings | None = None) -> None:
 
 
 def stop_fix_session(settings: Settings | None = None) -> None:
-    settings = settings or get_settings()
-    stop_centroid_md_background(settings)
+    stop_centroid_md_background(settings or get_settings())
 
 
-__all__ = [
-    "SimulatedOrder",
-    "ensure_fix_session_started",
-    "get_fix_diagnostics",
-    "get_fix_quote",
-    "stop_fix_session",
-]
+__all__ = ["SimulatedOrder", "ensure_fix_session_started", "get_fix_diagnostics", "get_fix_quote", "request_fix_security_discovery", "stop_fix_session"]
