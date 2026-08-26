@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +15,7 @@ from app.services.fix.simulation import SimulatedOrder
 from app.services.secrets import scrub
 
 _HEARTBEAT_STALE_SECONDS = 90
+_RAILWAY_FIX_WORKER = "https://centroid-fix-worker-production.up.railway.app"
 
 
 def _scrub_text(text: str | None, settings: Settings) -> str | None:
@@ -36,12 +38,20 @@ def _format_reject_display(last_inbound: dict[str, Any], requested_symbol: str |
     return text
 
 
+def _worker_base_url(settings: Settings) -> str | None:
+    if settings.fix_worker_base_url:
+        return settings.fix_worker_base_url.rstrip("/")
+    if os.getenv("VERCEL"):
+        return _RAILWAY_FIX_WORKER
+    return None
+
+
 def _remote_worker_status(settings: Settings) -> dict[str, Any] | None:
-    if not settings.fix_worker_base_url:
+    base = _worker_base_url(settings)
+    if not base:
         return None
-    url = settings.fix_worker_base_url.rstrip("/") + "/admin/research/snapshots/fix-status"
     try:
-        response = httpx.get(url, timeout=min(settings.http_timeout_seconds, 5.0))
+        response = httpx.get(base + "/admin/research/snapshots/fix-status", timeout=min(settings.http_timeout_seconds, 5.0))
         response.raise_for_status()
         payload = response.json()
         return payload if isinstance(payload, dict) else None
@@ -115,12 +125,19 @@ def get_fix_diagnostics(settings: Settings | None = None) -> dict[str, Any]:
 
 def ensure_fix_session_started(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
+    # Vercel is a serverless consumer only. Railway owns the single persistent
+    # Centroid TCP session, preventing duplicate logons on page/API requests.
+    if os.getenv("VERCEL"):
+        return
     if settings.centroid_md_enabled:
         start_centroid_md_background(settings)
 
 
 def stop_fix_session(settings: Settings | None = None) -> None:
-    stop_centroid_md_background(settings or get_settings())
+    stop_fix_session_settings = settings or get_settings()
+    if os.getenv("VERCEL"):
+        return
+    stop_centroid_md_background(stop_fix_session_settings)
 
 
 __all__ = ["SimulatedOrder", "ensure_fix_session_started", "get_fix_diagnostics", "get_fix_quote", "request_fix_security_discovery", "stop_fix_session"]
