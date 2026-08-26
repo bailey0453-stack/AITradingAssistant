@@ -6,11 +6,13 @@ Does **not** copy ``should_trade_now`` from decision_quality.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 _ACTIONABLE = {"BUY_USD", "SELL_USD"}
 _TRADE_GRADES = {"A", "A+"}
 _MIN_CONFIDENCE = 70.0
+_EVENT_BLOCK_WINDOW_HOURS = 4.0
 
 
 def _f(v: Any) -> Optional[float]:
@@ -58,7 +60,6 @@ def _historical_supports(dq: dict, mp: Optional[dict]) -> bool:
         return True
     if avg_ret is not None and float(avg_ret) > 0:
         return True
-    # Fallback: broader historical win-rate / measured expectancy when similar is thin.
     wr = similar.get("similar_win_rate")
     if wr is None:
         wr = similar.get("win_rate")
@@ -71,21 +72,86 @@ def _historical_supports(dq: dict, mp: Optional[dict]) -> bool:
     return False
 
 
-def _event_risk_near(payload: dict, dq: dict) -> bool:
-    if (dq or {}).get("high_impact_event_count"):
-        return int(dq["high_impact_event_count"]) > 0
-    comps = (dq or {}).get("components") or {}
-    # event_risk component is 100 with zero high-impact events; drops by 25 each.
-    er = comps.get("event_risk")
-    if er is not None and float(er) < 100.0:
-        return True
+def _parse_event_time(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def _event_name(ev: dict) -> str:
+    return str(ev.get("event") or ev.get("title") or ev.get("name") or "High-impact event")
+
+
+def _blocking_event(payload: dict) -> Optional[dict]:
+    """Return the nearest genuinely imminent high-impact event.
+
+    The previous gate treated *any* high-impact item in ``upcoming_events`` as
+    imminent, even if it was already released or days away. For the headline
+    intraday trade decision, only future events inside the 4-hour decision
+    horizon block execution. Unknown/malformed timestamps remain conservative.
+    """
     ctx = payload.get("context") or {}
     upcoming = ctx.get("upcoming_events") or []
+    now = datetime.now(timezone.utc)
+    candidates: list[dict] = []
+    malformed: list[dict] = []
+
     for ev in upcoming:
         impact = str(ev.get("impact") or ev.get("importance") or "").lower()
-        if impact in ("high", "3", "red"):
-            return True
-    return False
+        if impact not in ("high", "3", "red"):
+            continue
+        status = str(ev.get("status") or "upcoming").lower()
+        if status in {"released", "past", "completed"}:
+            continue
+        when = _parse_event_time(ev.get("release_time") or ev.get("time") or ev.get("datetime"))
+        if when is None:
+            malformed.append(ev)
+            continue
+        hours = (when - now).total_seconds() / 3600.0
+        if hours < 0:
+            continue
+        if hours <= _EVENT_BLOCK_WINDOW_HOURS:
+            candidates.append({
+                "name": _event_name(ev),
+                "release_time": when.isoformat(),
+                "hours_away": round(hours, 2),
+                "importance": "high",
+            })
+
+    if candidates:
+        return min(candidates, key=lambda item: item["hours_away"])
+
+    # If the provider says an event is upcoming/high-impact but gives no usable
+    # timestamp, fail safely rather than silently trading through unknown risk.
+    if malformed:
+        ev = malformed[0]
+        return {
+            "name": _event_name(ev),
+            "release_time": ev.get("release_time") or ev.get("time"),
+            "hours_away": None,
+            "importance": "high",
+        }
+    return None
+
+
+def _format_event_wait(event: dict) -> str:
+    name = event.get("name") or "High-impact event"
+    hours = event.get("hours_away")
+    if hours is None:
+        return f"{name} is approaching (time unavailable)"
+    minutes = max(0, int(round(float(hours) * 60)))
+    if minutes < 60:
+        return f"{name} in {minutes} min"
+    h, m = divmod(minutes, 60)
+    if m == 0:
+        return f"{name} in {h}h"
+    return f"{name} in {h}h {m}m"
 
 
 def _data_fresh_enough(payload: dict) -> bool:
@@ -96,9 +162,7 @@ def _data_fresh_enough(payload: dict) -> bool:
     ms = payload.get("market_state") or {}
     if ms.get("is_stale") is True:
         return False
-    # Cached is allowed for WAIT directional analysis, but not for TRADE.
     if ms.get("cached") is True and not ms.get("is_open"):
-        # Closed market with fresh last session quote can still TRADE if not stale.
         age = ms.get("age_minutes")
         if age is not None and float(age) > 24 * 60:
             return False
@@ -146,7 +210,6 @@ def build_trade_decision_card(payload: dict) -> dict:
     tl = payload.get("topline_forecast") or {}
 
     labels = _direction_labels(direction if direction in _ACTIONABLE else None)
-    # Keep directional forecast even when WAIT — use model direction if present.
     if direction in _ACTIONABLE:
         labels = _direction_labels(direction)
 
@@ -158,12 +221,10 @@ def build_trade_decision_card(payload: dict) -> dict:
             rate_4h = _f(entry.get("expected_rate"))
         if h in ("end of day", "eod") and rate_eod is None:
             rate_eod = _f(entry.get("expected_rate"))
-    # Named keys used by topline_forecast.build
     if rate_4h is None:
         rate_4h = _f((tl.get("four_hours") or {}).get("expected_rate") if isinstance(tl.get("four_hours"), dict) else tl.get("four_hours"))
     if rate_eod is None:
         rate_eod = _f((tl.get("end_of_day") or {}).get("expected_rate") if isinstance(tl.get("end_of_day"), dict) else tl.get("end_of_day"))
-    # Path list with horizon labels from build()
     for key, dest in (("4_hours", "4h"), ("end_of_day", "eod"), ("four_hour", "4h")):
         node = tl.get(key)
         if isinstance(node, dict):
@@ -179,7 +240,6 @@ def build_trade_decision_card(payload: dict) -> dict:
         long_bailout = _f((tl.get("bailouts") or {}).get("long_usd"))
     if short_bailout is None:
         short_bailout = _f((tl.get("bailouts") or {}).get("short_usd"))
-    # Fall back to recommendation stop as the primary invalidation side.
     stop = _f(payload.get("stop"))
     if direction == "BUY_USD" and long_bailout is None:
         long_bailout = stop
@@ -197,7 +257,6 @@ def build_trade_decision_card(payload: dict) -> dict:
 
     predicted_primary = rate_4h if rate_4h is not None else rate_eod
     forecast_ok = _forecast_agrees(direction, spot, predicted_primary)
-    # Also accept agreement with end-of-day if 4h missing
     if not forecast_ok and rate_eod is not None:
         forecast_ok = _forecast_agrees(direction, spot, rate_eod)
 
@@ -220,7 +279,8 @@ def build_trade_decision_card(payload: dict) -> dict:
     conf_ok = confidence >= _MIN_CONFIDENCE
     ev_ok = ev is not None and ev > 0
     hist_ok = _historical_supports(dq, mp)
-    event_near = _event_risk_near(payload, dq)
+    blocking_event = _blocking_event(payload)
+    event_near = blocking_event is not None
     fresh_ok = _data_fresh_enough(payload)
 
     if not actionable:
@@ -235,8 +295,8 @@ def build_trade_decision_card(payload: dict) -> dict:
         )
     if actionable and not hist_ok:
         wait_reasons.append("Historical comparable setups do not support acting")
-    if event_near:
-        wait_reasons.append("A high-impact event is approaching")
+    if blocking_event:
+        wait_reasons.append(_format_event_wait(blocking_event))
     if not fresh_ok:
         wait_reasons.append("Required market inputs are stale or insufficient")
     if actionable and not forecast_ok:
@@ -287,6 +347,8 @@ def build_trade_decision_card(payload: dict) -> dict:
         "invalidation_level": round(invalidation_level, 4) if invalidation_level is not None else None,
         "why": why,
         "wait_reasons": wait_reasons,
+        "blocking_event": blocking_event,
+        "event_block_window_hours": _EVENT_BLOCK_WINDOW_HOURS,
         "gates": {
             "actionable": actionable,
             "grade_ok": grade_ok,
