@@ -26,13 +26,6 @@ def _move_pct(rate: Optional[float], spot: Optional[float]) -> Optional[float]:
 
 
 def _hedge_pnl(direction: str, forecast_mid: Optional[float], fix: dict | None) -> Optional[float]:
-    """Estimated round-trip USD P/L for a $100k hedge, net of $40 fees.
-
-    SELL_USD: sell $100k at current FIX bid, later buy the same $100k at the
-    forecast ask. BUY_USD is the reverse. The current FIX spread is held
-    constant around each forecast midpoint so the estimate includes both the
-    observed executable spread and the stated $20-per-side transaction fee.
-    """
     if direction not in ("BUY_USD", "SELL_USD") or forecast_mid is None or not fix:
         return None
     try:
@@ -59,15 +52,25 @@ def _hedge_pnl(direction: str, forecast_mid: Optional[float], fix: dict | None) 
     return round(gross - fees, 2)
 
 
+def _display_grade(grade: Optional[str], pnl: Optional[float]) -> Optional[str]:
+    """Decorate the per-horizon dashboard grade with its net $100k hedge P/L."""
+    if grade is None or pnl is None:
+        return grade
+    sign = "+" if pnl >= 0 else "-"
+    return f"{grade} · Net {sign}${abs(pnl):,.0f}"
+
+
 def _entry(label: str, rate: Optional[float], bias: Optional[str], confidence: Optional[float], spot: Optional[float], *, grade: Optional[str] = None, direction: str = "NO_TRADE", fix: dict | None = None) -> dict:
+    pnl = _hedge_pnl(direction, rate, fix)
     return {
         "horizon": label,
         "expected_rate": round(rate, 4) if rate is not None else None,
         "bias": bias or "HOLD",
         "confidence": round(float(confidence), 1) if confidence is not None else 0.0,
         "expected_move_pct": _move_pct(rate, spot),
-        "grade": grade,
-        "hedge_pnl_usd": _hedge_pnl(direction, rate, fix),
+        "grade": _display_grade(grade, pnl),
+        "opportunity_grade": grade,
+        "hedge_pnl_usd": pnl,
     }
 
 
