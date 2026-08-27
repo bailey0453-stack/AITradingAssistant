@@ -1,16 +1,9 @@
 """Market data providers for USD/MXN and macro drivers.
 
-`get_market_data()` is the single entrypoint used by the routers. It is
-resilient by design:
-
-  - USE_MOCK_DATA=true            -> MockMarketDataProvider, source="mock"
-  - live desired + fetch ok       -> LiveMarketDataProvider,  source="live"
-  - live desired + key missing    -> mock data,               source="fallback"
-  - live desired + fetch fails     -> mock data,               source="fallback"
-
-Only the USD/MXN spot price is fetched live in Phase 1. DXY, US 10Y yield and
-oil remain placeholders (mocked) until dedicated macro providers are added, so
-the analysis engine always has drivers to work with.
+Centroid/GFC FIX is the preferred USD/MXN source when a fresh executable
+bid/ask is available.  The neutral market spot is the FIX midpoint; callers
+that need executable BUY/SELL economics use the ask/bid directly via the FIX
+provider.  The existing hourly FX provider remains the fallback.
 """
 
 from __future__ import annotations
@@ -37,35 +30,28 @@ class MarketData:
     pair: str = "USDMXN"
     usdmxn: float | None = None
     inverse_usdmxn: float | None = None
-    dxy: float | None = None  # US Dollar Index (placeholder)
-    us2y: float | None = None  # US 2Y yield % (placeholder)
-    us10y: float | None = None  # US 10Y yield % (placeholder)
-    treasury_yield: float | None = None  # legacy alias of us10y
-    oil: float | None = None  # WTI crude USD/bbl (placeholder)
-    gold: float | None = None  # USD/oz (placeholder)
-    sp_futures: float | None = None  # S&P 500 futures (placeholder)
-    vix: float | None = None  # volatility index (placeholder)
-    provider: str = "mock"  # provider name, e.g. openexchangerates / mock
-    source: str = "mock"  # overall USD/MXN spot source: mock | live | fallback
-    timestamp: str | None = None  # ISO 8601
+    dxy: float | None = None
+    us2y: float | None = None
+    us10y: float | None = None
+    treasury_yield: float | None = None
+    oil: float | None = None
+    gold: float | None = None
+    sp_futures: float | None = None
+    vix: float | None = None
+    provider: str = "mock"
+    source: str = "mock"
+    timestamp: str | None = None
     drivers: dict = field(default_factory=dict)
-    # Per-field provenance: field name -> "live" | "fallback" | "mock".
     field_sources: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-# Fields whose provenance is tracked individually for source transparency, and
-# the provider that supplies each when live.
 MACRO_FIELDS = ("dxy", "us2y", "us10y", "oil", "gold", "sp_futures", "vix")
 _FIELD_PROVIDER = {
-    "us2y": "fred",
-    "us10y": "fred",
-    "dxy": "alphavantage",
-    "gold": "alphavantage",
-    "oil": "alphavantage",
-    "vix": "alphavantage",
+    "us2y": "fred", "us10y": "fred", "dxy": "alphavantage",
+    "gold": "alphavantage", "oil": "alphavantage", "vix": "alphavantage",
     "sp_futures": "alphavantage",
 }
 
@@ -75,7 +61,6 @@ class MarketDataProvider(ABC):
 
     @abstractmethod
     def get_usdmxn(self) -> MarketData:
-        """Return a current USD/MXN snapshot with macro drivers."""
         raise NotImplementedError
 
 
@@ -86,12 +71,8 @@ def _inverse(usdmxn: float | None) -> float | None:
 
 
 class MockMarketDataProvider(MarketDataProvider):
-    """Deterministic-ish but lively mocked data, good enough to build against."""
-
     source = "mock"
     provider = "mock"
-
-    # Rough, realistic baselines around which we jitter.
     BASE_USDMXN = 17.85
     BASE_DXY = 104.2
     BASE_US2Y = 4.70
@@ -102,69 +83,22 @@ class MockMarketDataProvider(MarketDataProvider):
     BASE_VIX = 14.5
 
     def _macro(self) -> dict:
-        """Mocked macro placeholders shared by mock + live providers."""
         us10y = round(self.BASE_US10Y + random.uniform(-0.08, 0.08), 3)
-        return {
-            "dxy": round(self.BASE_DXY + random.uniform(-0.6, 0.6), 2),
-            "us2y": round(self.BASE_US2Y + random.uniform(-0.07, 0.07), 3),
-            "us10y": us10y,
-            "treasury_yield": us10y,  # legacy alias
-            "oil": round(self.BASE_OIL + random.uniform(-2.5, 2.5), 2),
-            "gold": round(self.BASE_GOLD + random.uniform(-25, 25), 2),
-            "sp_futures": round(self.BASE_SP + random.uniform(-40, 40), 2),
-            "vix": round(self.BASE_VIX + random.uniform(-2.5, 4.0), 2),
-        }
+        return {"dxy": round(self.BASE_DXY + random.uniform(-0.6, 0.6), 2), "us2y": round(self.BASE_US2Y + random.uniform(-0.07, 0.07), 3), "us10y": us10y, "treasury_yield": us10y, "oil": round(self.BASE_OIL + random.uniform(-2.5, 2.5), 2), "gold": round(self.BASE_GOLD + random.uniform(-25, 25), 2), "sp_futures": round(self.BASE_SP + random.uniform(-40, 40), 2), "vix": round(self.BASE_VIX + random.uniform(-2.5, 4.0), 2)}
 
     def get_usdmxn(self) -> MarketData:
-        usdmxn = round(self.BASE_USDMXN + random.uniform(-0.25, 0.25), 4)
-        macro = self._macro()
-        return self._assemble(usdmxn, macro, provider=self.provider, source=self.source)
+        return self._assemble(round(self.BASE_USDMXN + random.uniform(-0.25, 0.25), 4), self._macro(), self.provider, self.source)
 
     @classmethod
     def _assemble(cls, usdmxn: float, macro: dict, provider: str, source: str) -> MarketData:
-        return MarketData(
-            pair="USDMXN",
-            usdmxn=usdmxn,
-            inverse_usdmxn=_inverse(usdmxn),
-            dxy=macro["dxy"],
-            us2y=macro["us2y"],
-            us10y=macro["us10y"],
-            treasury_yield=macro["treasury_yield"],
-            oil=macro["oil"],
-            gold=macro["gold"],
-            sp_futures=macro["sp_futures"],
-            vix=macro["vix"],
-            provider=provider,
-            source=source,
-            timestamp=_utcnow_iso(),
-            drivers=cls._drivers(usdmxn, macro),
-        )
+        return MarketData(pair="USDMXN", usdmxn=usdmxn, inverse_usdmxn=_inverse(usdmxn), dxy=macro["dxy"], us2y=macro["us2y"], us10y=macro["us10y"], treasury_yield=macro["treasury_yield"], oil=macro["oil"], gold=macro["gold"], sp_futures=macro["sp_futures"], vix=macro["vix"], provider=provider, source=source, timestamp=_utcnow_iso(), drivers=cls._drivers(usdmxn, macro))
 
     @classmethod
     def _drivers(cls, usdmxn: float, macro: dict) -> dict:
-        # Deltas vs baseline give the analysis engine something to chew on.
-        return {
-            "dxy_delta": round(macro["dxy"] - cls.BASE_DXY, 3),
-            "yield_delta": round(macro["us10y"] - cls.BASE_US10Y, 3),
-            "us2y_delta": round(macro["us2y"] - cls.BASE_US2Y, 3),
-            "oil_delta": round(macro["oil"] - cls.BASE_OIL, 3),
-            "gold_delta": round(macro["gold"] - cls.BASE_GOLD, 2),
-            "sp_delta": round(macro["sp_futures"] - cls.BASE_SP, 2),
-            "vix_delta": round(macro["vix"] - cls.BASE_VIX, 2),
-            "usdmxn_delta": round(usdmxn - cls.BASE_USDMXN, 4),
-        }
+        return {"dxy_delta": round(macro["dxy"] - cls.BASE_DXY, 3), "yield_delta": round(macro["us10y"] - cls.BASE_US10Y, 3), "us2y_delta": round(macro["us2y"] - cls.BASE_US2Y, 3), "oil_delta": round(macro["oil"] - cls.BASE_OIL, 3), "gold_delta": round(macro["gold"] - cls.BASE_GOLD, 2), "sp_delta": round(macro["sp_futures"] - cls.BASE_SP, 2), "vix_delta": round(macro["vix"] - cls.BASE_VIX, 2), "usdmxn_delta": round(usdmxn - cls.BASE_USDMXN, 4)}
 
 
 class LiveMarketDataProvider(MarketDataProvider):
-    """Fetches a real USD/MXN spot price from an FX API.
-
-    Default provider: Open Exchange Rates (USD-based `latest.json`). USD/MXN is
-    simply `rates["MXN"]` because rates are quoted per USD. Macro indicators
-    remain mocked placeholders in Phase 1.
-
-    Raises on any failure so the orchestrator can fall back to mock data.
-    """
-
     source = "live"
     DEFAULT_BASE_URL = "https://openexchangerates.org/api/latest.json"
 
@@ -176,148 +110,109 @@ class LiveMarketDataProvider(MarketDataProvider):
     def _fetch_usdmxn(self) -> float:
         if not self.settings.fx_api_key:
             raise RuntimeError("FX_API_KEY is not configured.")
-
-        # Send the key in the Authorization header (Open Exchange Rates supports
-        # `Token <app_id>`) so it never appears in the request URL or in any
-        # httpx error message / log line.
         headers = {"Authorization": f"Token {self.settings.fx_api_key}"}
-        params = {"symbols": "MXN"}
         try:
-            resp = httpx.get(
-                self.base_url, params=params, headers=headers, timeout=self.timeout
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:  # noqa: BLE001 - re-raise scrubbed
-            raise RuntimeError(
-                f"FX request failed: {_scrub(str(exc), self.settings.fx_api_key)}"
-            ) from None
-
-        # Some providers wrap errors in a 200 body.
+            resp = httpx.get(self.base_url, params={"symbols": "MXN"}, headers=headers, timeout=self.timeout)
+            resp.raise_for_status(); data = resp.json()
+        except Exception as exc:
+            raise RuntimeError(f"FX request failed: {_scrub(str(exc), self.settings.fx_api_key)}") from None
         if isinstance(data, dict) and data.get("error"):
             raise RuntimeError(f"FX provider error: {data.get('description', data)}")
-
-        rates = (data or {}).get("rates") or {}
-        rate = rates.get("MXN")
+        rate = ((data or {}).get("rates") or {}).get("MXN")
         if rate is None:
             raise ValueError(f"USD/MXN not present in FX response: {data}")
         return float(rate)
 
     def get_usdmxn(self) -> MarketData:
-        usdmxn = round(self._fetch_usdmxn(), 4)
-        # Macro indicators remain mocked placeholders for now.
-        macro = MockMarketDataProvider()._macro()
-        provider = self.settings.fx_provider or "live"
-        return MockMarketDataProvider._assemble(
-            usdmxn, macro, provider=provider, source=self.source
-        )
+        return MockMarketDataProvider._assemble(round(self._fetch_usdmxn(), 4), MockMarketDataProvider()._macro(), self.settings.fx_provider or "live", self.source)
 
 
 def _scrub(text: str, secret: str | None) -> str:
-    """Remove the API key from any string before it is logged."""
-    if secret and secret in text:
-        return text.replace(secret, "***REDACTED***")
-    return text
-
-
-def _fallback_data() -> MarketData:
-    data = MockMarketDataProvider().get_usdmxn()
-    data.source = "fallback"
-    return data
+    return text.replace(secret, "***REDACTED***") if secret and secret in text else text
 
 
 def get_market_provider(settings: Settings | None = None) -> MarketDataProvider:
-    """Return the preferred provider (live when enabled, else mock).
-
-    Note: prefer `get_market_data()` for request handling — it adds the
-    fallback behavior and correct source tagging.
-    """
     settings = settings or get_settings()
-    if settings.fx_live_enabled:
-        return LiveMarketDataProvider(settings)
-    return MockMarketDataProvider()
+    return LiveMarketDataProvider(settings) if settings.fx_live_enabled else MockMarketDataProvider()
 
 
 def _mock_all(data: MarketData) -> MarketData:
-    """Tag every tracked field as mock and return the snapshot."""
     data.field_sources = {f: "mock" for f in ("usdmxn", *MACRO_FIELDS)}
     return data
 
 
+def _fresh_fix_midpoint(max_age_seconds: float = 30.0) -> tuple[float, str] | None:
+    """Return fresh executable FIX midpoint and timestamp, otherwise None."""
+    try:
+        from app.services.fix.provider import get_fix_quote
+        quote = get_fix_quote()
+        if not quote or quote.get("bid") is None or quote.get("ask") is None:
+            return None
+        updated = quote.get("updated_at")
+        if not updated:
+            return None
+        dt = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - dt).total_seconds() > max_age_seconds:
+            return None
+        return (float(quote["bid"]) + float(quote["ask"])) / 2.0, str(updated)
+    except Exception as exc:
+        logger.warning("Centroid FIX midpoint unavailable; using hourly FX fallback (%s).", exc)
+        return None
+
+
 def get_market_data(settings: Settings | None = None) -> MarketData:
-    """Resilient USD/MXN + macro fetch with per-field source tagging.
-
-    Each field is independently ``live`` / ``fallback`` / ``mock`` so a single
-    unavailable provider/symbol degrades only that field. The overall
-    ``source`` mirrors the USD/MXN spot source for backward compatibility.
-    """
     settings = settings or get_settings()
-
-    # Explicit mock mode — everything mocked.
     if settings.is_mock:
         return _mock_all(MockMarketDataProvider().get_usdmxn())
 
-    # Start from a full mock baseline, then overlay whatever we can fetch live.
     data = MockMarketDataProvider().get_usdmxn()
     field_sources: dict[str, str] = {}
 
-    # --- USD/MXN spot (FX provider) ---
-    if settings.fx_api_key:
+    # Primary USD/MXN: executable Centroid bid/ask midpoint.  Only use a fresh
+    # quote; otherwise retain the existing hourly provider as fallback.
+    fix = _fresh_fix_midpoint()
+    if fix:
+        spot, fix_timestamp = fix
+        data.usdmxn = round(spot, 5)
+        data.inverse_usdmxn = _inverse(spot)
+        data.provider = "centroid_fix"
+        data.source = "live"
+        data.timestamp = fix_timestamp
+        field_sources["usdmxn"] = "live"
+    elif settings.fx_api_key:
         try:
             spot = round(LiveMarketDataProvider(settings)._fetch_usdmxn(), 4)
-            data.usdmxn = spot
-            data.inverse_usdmxn = _inverse(spot)
-            data.provider = settings.fx_provider or "live"
-            data.source = "live"
+            data.usdmxn = spot; data.inverse_usdmxn = _inverse(spot)
+            data.provider = settings.fx_provider or "live"; data.source = "live"
             field_sources["usdmxn"] = "live"
-        except Exception as exc:  # noqa: BLE001 - degrade gracefully
-            logger.warning(
-                "Live FX fetch failed (%s); using fallback for USD/MXN.",
-                _scrub(str(exc), settings.fx_api_key),
-            )
-            data.source = "fallback"
-            field_sources["usdmxn"] = "fallback"
+        except Exception as exc:
+            logger.warning("Live FX fetch failed (%s); using fallback for USD/MXN.", _scrub(str(exc), settings.fx_api_key))
+            data.source = "fallback"; field_sources["usdmxn"] = "fallback"
     else:
-        logger.warning("Live FX requested but FX_API_KEY missing; USD/MXN fallback.")
-        data.source = "fallback"
-        field_sources["usdmxn"] = "fallback"
+        data.source = "fallback"; field_sources["usdmxn"] = "fallback"
 
-    # --- Macro drivers (FRED + Alpha Vantage), per field ---
     live_macro: dict[str, float] = {}
     if settings.macro_live_enabled:
         try:
             from app.services.macro_data import fetch_live_macro
-
             live_macro = fetch_live_macro(settings)
-        except Exception as exc:  # noqa: BLE001 - never break the snapshot
-            logger.warning("Macro fetch failed wholesale (%s); using fallback.",
-                           _scrub(str(exc), settings.fred_api_key or ""))
-
-    have_key = {
-        "fred": bool(settings.fred_api_key),
-        "alphavantage": bool(settings.alpha_vantage_api_key),
-    }
+        except Exception as exc:
+            logger.warning("Macro fetch failed wholesale (%s); using fallback.", _scrub(str(exc), settings.fred_api_key or ""))
+    have_key = {"fred": bool(settings.fred_api_key), "alphavantage": bool(settings.alpha_vantage_api_key)}
     for fld in MACRO_FIELDS:
         if fld in live_macro:
-            setattr(data, fld, live_macro[fld])
-            field_sources[fld] = "live"
+            setattr(data, fld, live_macro[fld]); field_sources[fld] = "live"
         elif have_key.get(_FIELD_PROVIDER[fld]):
-            # Live was attempted for this field's provider but it was
-            # unavailable — keep the mock value, tagged as a fallback.
             field_sources[fld] = "fallback"
         else:
             field_sources[fld] = "mock"
-
     if "treasury_yield" in live_macro:
         data.treasury_yield = live_macro["treasury_yield"]
-
-    # Recompute driver deltas so they reflect the (possibly live) macro values.
-    macro = {
-        "dxy": data.dxy, "us2y": data.us2y, "us10y": data.us10y,
-        "treasury_yield": data.treasury_yield, "oil": data.oil,
-        "gold": data.gold, "sp_futures": data.sp_futures, "vix": data.vix,
-    }
+    macro = {"dxy": data.dxy, "us2y": data.us2y, "us10y": data.us10y, "treasury_yield": data.treasury_yield, "oil": data.oil, "gold": data.gold, "sp_futures": data.sp_futures, "vix": data.vix}
     data.drivers = MockMarketDataProvider._drivers(data.usdmxn, macro)
     data.field_sources = field_sources
-    data.timestamp = _utcnow_iso()
+    if not fix:
+        data.timestamp = _utcnow_iso()
     return data
