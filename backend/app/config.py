@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     refresh_policies: Optional[Dict[str, float]] = None
     market_holidays: Optional[List[str]] = None
 
+    # Telegram BUY/SELL alerts.
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+
     centroid_md_host: Optional[str] = None
     centroid_md_port: Optional[int] = None
     centroid_md_username: Optional[str] = None
@@ -75,6 +79,10 @@ class Settings(BaseSettings):
     @property
     def centroid_md_configured(self) -> bool:
         return bool(self.centroid_md_host and self.centroid_md_port and self.centroid_md_sender_comp_id and self.centroid_md_target_comp_id)
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_chat_id)
 
     @property
     def is_mock(self) -> bool:
