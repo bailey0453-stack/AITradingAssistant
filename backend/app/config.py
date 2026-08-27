@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     refresh_policies: Optional[Dict[str, float]] = None
     market_holidays: Optional[List[str]] = None
 
-    # Telegram BUY/SELL alerts.
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
 
@@ -62,8 +61,6 @@ class Settings(BaseSettings):
     centroid_md_subscription_request_type: int = 1
     centroid_md_market_depth: int = 1
     centroid_md_include_md_update_type: bool = True
-    # HTTPS endpoint for the persistent Railway FIX worker. Vercel reads this
-    # instead of opening a second FIX TCP session.
     fix_worker_base_url: Optional[str] = None
 
     centroid_td_host: Optional[str] = None
