@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,20 @@ from app.services.research_database_status import research_database_status
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/diagnostics", tags=["diagnostics"])
+
+
+@router.on_event("startup")
+def _enable_live_fix_dashboard_polling() -> None:
+    """Refresh the FIX card every 2.5s without requiring a manual page reload."""
+    try:
+        import app.main as main
+
+        marker = "</body>"
+        script = "<script>setInterval(function(){if(typeof loadFixMarketData==='function'){loadFixMarketData();}},2500);</script>"
+        if script not in main.DASHBOARD_HTML and marker in main.DASHBOARD_HTML:
+            main.DASHBOARD_HTML = main.DASHBOARD_HTML.replace(marker, script + marker)
+    except Exception:  # noqa: BLE001
+        logger.exception("Unable to enable live FIX dashboard polling")
 
 
 def _count(db: Session, model) -> int:
@@ -86,8 +100,16 @@ def research_database_panel(db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/fix")
-def fix_market_data_diagnostics() -> dict:
+def fix_market_data_diagnostics(response: Response) -> dict:
     """Read-only Centroid/GFC FIX market-data session status (no secrets)."""
     from app.services.fix.provider import get_fix_diagnostics
 
-    return get_fix_diagnostics()
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    payload = get_fix_diagnostics()
+    session = payload.get("session") or {}
+    # The dashboard historically labeled len(symbols) as quote count.  Show the
+    # actual number of market-data updates received by the persistent worker.
+    if session.get("quotes_received_count") is not None:
+        payload["quote_count"] = session["quotes_received_count"]
+    return payload
