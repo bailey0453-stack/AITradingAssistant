@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import threading
 
 import requests
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import event, select
 
 from app.config import get_settings
 from app.models import Recommendation
@@ -36,40 +35,16 @@ def send_message(text: str) -> bool:
             timeout=min(float(settings.http_timeout_seconds or 8), 8.0),
         )
         response.raise_for_status()
-        payload = response.json()
-        if not payload.get("ok"):
-            logger.warning("Telegram returned ok=false")
-            return False
-        return True
+        ok = bool(response.json().get("ok"))
+        logger.info("Telegram delivery %s", "succeeded" if ok else "returned ok=false")
+        return ok
     except Exception:  # noqa: BLE001
         logger.exception("Telegram delivery failed")
         return False
 
 
-def _previous_direction(db: Session, current_id: int) -> Optional[str]:
-    """Direction immediately before the newly stored recommendation."""
-    return db.execute(
-        select(Recommendation.direction)
-        .where(Recommendation.id < current_id)
-        .order_by(Recommendation.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-
-
-def maybe_send_signal_alert(db: Session, reco: Recommendation) -> bool:
-    """Alert once when the persisted signal transitions into BUY or SELL.
-
-    Repeated SELL->SELL or BUY->BUY analyses are silent. WAIT/NO_TRADE rows are
-    intentionally persisted by the normal recommendation flow, so a later
-    WAIT->BUY or WAIT->SELL transition produces a fresh alert.
-    """
+def _message(reco: Recommendation, previous: str | None) -> str:
     direction = str(reco.direction or "")
-    if direction not in _ACTIONABLE:
-        return False
-    previous = _previous_direction(db, reco.id)
-    if previous == direction:
-        return False
-
     label = "BUY USD / SELL MXN" if direction == "BUY_USD" else "SELL USD / BUY MXN"
     lines = [
         "FX Intelligence Signal",
@@ -85,7 +60,30 @@ def maybe_send_signal_alert(db: Session, reco: Recommendation) -> bool:
         lines.append(f"{invalid}: {_fmt(reco.stop, 4)}")
     if previous:
         lines.append(f"Signal changed: {previous} -> {direction}")
-    return send_message("\n".join(lines))
+    return "\n".join(lines)
+
+
+@event.listens_for(Recommendation, "after_insert")
+def _alert_after_insert(mapper, connection, target: Recommendation) -> None:  # noqa: ARG001
+    """Send only when the persisted direction transitions into BUY/SELL.
+
+    The prior direction is read from durable recommendation history, so cold
+    starts and multiple Vercel instances do not reset duplicate suppression.
+    Delivery runs off-thread and cannot block/abort the recommendation commit.
+    """
+    direction = str(target.direction or "")
+    if direction not in _ACTIONABLE:
+        return
+    previous = connection.execute(
+        select(Recommendation.direction)
+        .where(Recommendation.id < target.id)
+        .order_by(Recommendation.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if previous == direction:
+        return
+    text = _message(target, previous)
+    threading.Thread(target=send_message, args=(text,), daemon=True).start()
 
 
 def send_test_alert() -> bool:
