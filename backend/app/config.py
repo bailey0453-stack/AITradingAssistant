@@ -44,7 +44,6 @@ class Settings(BaseSettings):
     market_max_age_minutes: int = 180
     refresh_policies: Optional[Dict[str, float]] = None
     market_holidays: Optional[List[str]] = None
-
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
 
@@ -118,3 +117,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# Register the SQLAlchemy recommendation listener after configuration is fully
+# defined. Import is intentionally side-effect-only.
+from app.services import telegram_alerts as _telegram_alerts  # noqa: E402,F401
