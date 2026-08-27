@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 
-import requests
+import httpx
 from sqlalchemy import event, select
 
 from app.config import get_settings
@@ -29,7 +29,7 @@ def send_message(text: str) -> bool:
         logger.info("Telegram alerts not configured; skipping message")
         return False
     try:
-        response = requests.post(
+        response = httpx.post(
             f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
             json={"chat_id": settings.telegram_chat_id, "text": text},
             timeout=min(float(settings.http_timeout_seconds or 8), 8.0),
