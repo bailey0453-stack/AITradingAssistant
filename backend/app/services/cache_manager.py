@@ -25,9 +25,11 @@ from typing import Callable, Optional
 
 # --- Refresh policies -------------------------------------------------------
 # Default cadence per provider key, in SECONDS. ``market_gated`` keys are only
-# refreshed while the FX market is open.
+# refreshed while the FX market is open. USD/MXN is now supplied by the
+# persistent Centroid FIX worker, so each analysis request should ask for the
+# freshest executable quote instead of reusing the old hourly spot snapshot.
 DEFAULT_REFRESH_POLICIES: dict[str, int] = {
-    "usdmxn": 60 * 60,   # 60 min, market hours only
+    "usdmxn": 0,         # live Centroid FIX; refresh on every analysis request
     "news": 5 * 60,      # 5 min
     "calendar": 30 * 60,  # 30 min
     "treasury": 15 * 60,  # 15 min (US 2Y / 10Y)
@@ -51,6 +53,10 @@ def get_refresh_seconds(key: str, settings=None) -> int:
             seconds = int(float(overrides[key]) * 60)
         except (TypeError, ValueError):
             pass
+    # Centroid FIX is the authoritative USD/MXN source. Do not allow a legacy
+    # REFRESH_POLICIES override to reintroduce hourly caching for spot.
+    if key == "usdmxn":
+        seconds = 0
     return max(0, seconds)
 
 
