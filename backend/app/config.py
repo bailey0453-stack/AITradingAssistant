@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     fx_provider: str = "openexchangerates"
     fx_base_url: Optional[str] = None
     fred_api_key: Optional[str] = None
+    banxico_api_token: Optional[str] = None
     alpha_vantage_api_key: Optional[str] = None
     macro_cache_seconds: int = 600
     news_api_key: Optional[str] = None
