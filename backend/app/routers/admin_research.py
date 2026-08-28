@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.admin_auth import require_admin_auth
+from app.services.rate_repair import repair_policy_rates
 from app.services.research_import_service import (
     continue_import_steps,
     get_active_job,
@@ -35,7 +36,6 @@ class RebuildSnapshotsRequest(BaseModel):
 
 @router.get("/import")
 def import_overview(db: Session = Depends(get_db)) -> dict:
-    """Read-only import status (no auth — safe for dashboard polling)."""
     return get_import_overview(db)
 
 
@@ -48,12 +48,7 @@ def import_job_detail(job_uuid: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/import/full", dependencies=[Depends(require_admin_auth)])
-def import_full(
-    body: Optional[FullImportRequest] = None,
-    force: bool = Query(default=False),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Start or resume a full historical research import."""
+def import_full(body: Optional[FullImportRequest] = None, force: bool = Query(default=False), db: Session = Depends(get_db)) -> dict:
     use_force = body.force if body is not None else force
     result = start_full_import(db, force=use_force)
     if not result.get("ok"):
@@ -63,39 +58,30 @@ def import_full(
 
 @router.post("/import/incremental", dependencies=[Depends(require_admin_auth)])
 def import_incremental(db: Session = Depends(get_db)) -> dict:
-    """Import new market data since the latest research snapshot."""
     return start_incremental_import(db)
 
 
 @router.post("/rebuild-snapshots", dependencies=[Depends(require_admin_auth)])
-def rebuild_snapshots(
-    body: Optional[RebuildSnapshotsRequest] = None,
-    db: Session = Depends(get_db),
-) -> dict:
-    """Regenerate research snapshots from existing raw historical data (no full re-import)."""
+def rebuild_snapshots(body: Optional[RebuildSnapshotsRequest] = None, db: Session = Depends(get_db)) -> dict:
     if get_active_job(db):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "reason": "import_in_progress",
-                "hint": "Wait for the current import to finish before rebuilding snapshots.",
-            },
-        )
+        raise HTTPException(status_code=409, detail={"reason": "import_in_progress", "hint": "Wait for the current import to finish before rebuilding snapshots."})
     backfill = body.backfill_scalars if body is not None else True
     return rebuild_research_snapshots_from_raw(db, backfill_scalars=backfill)
 
 
+@router.post("/repair-policy-rates", dependencies=[Depends(require_admin_auth)])
+def repair_rates(db: Session = Depends(get_db)) -> dict:
+    """Backfill authentic Fed Funds and Banxico policy rates into research snapshots."""
+    if get_active_job(db):
+        raise HTTPException(status_code=409, detail={"reason": "import_in_progress"})
+    return repair_policy_rates(db)
+
+
 @router.post("/import/{job_uuid}/step", dependencies=[Depends(require_admin_auth)])
 def import_step(job_uuid: str, db: Session = Depends(get_db)) -> dict:
-    """Advance an import job by one stage (serverless-safe)."""
     return run_import_step(db, job_uuid)
 
 
 @router.post("/import/{job_uuid}/continue", dependencies=[Depends(require_admin_auth)])
-def import_continue(
-    job_uuid: str,
-    max_steps: int = Query(default=1, ge=1, le=5),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Run multiple import stages in one request."""
+def import_continue(job_uuid: str, max_steps: int = Query(default=1, ge=1, le=5), db: Session = Depends(get_db)) -> dict:
     return continue_import_steps(db, job_uuid, max_steps=max_steps)
