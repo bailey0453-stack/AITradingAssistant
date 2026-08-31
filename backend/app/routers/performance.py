@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Recommendation
 from app.routers.recommendations import serialize_recommendation
-from app.services import exit_strategy_comparison, research_lab
+from app.services import calibration_preview, exit_strategy_comparison, research_lab
 
 router = APIRouter(prefix="/performance", tags=["performance"])
 
@@ -23,6 +23,12 @@ def monthly(db: Session = Depends(get_db)) -> dict:
 def summary(db: Session = Depends(get_db)) -> dict:
     """Overall paper hedge summary (SIMULATED PAPER PERFORMANCE)."""
     return research_lab.paper_hedge_performance(db)
+
+
+@router.get("/calibration-preview")
+def calibration_preview_endpoint(db: Session = Depends(get_db)) -> dict:
+    """Preview execution-based calibration against stored paper outcomes."""
+    return calibration_preview.build_calibration_preview(db)
 
 
 @router.get("/recommendations")
