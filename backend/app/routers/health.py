@@ -19,5 +19,6 @@ def health() -> dict:
         "version": __version__,
         "environment": settings.environment,
         "mock_data": settings.is_mock,
+        "customer_auth_required": settings.customer_auth_required,
         "time": datetime.now(timezone.utc).isoformat(),
     }
