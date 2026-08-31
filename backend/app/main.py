@@ -13,12 +13,13 @@ Endpoints:
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.config import get_settings
 from app.database import init_db
 from app.routers import (
+    auth,
     analysis,
     calendar,
     decision,
@@ -82,6 +83,7 @@ app = FastAPI(
 )
 
 app.include_router(health.router)
+app.include_router(auth.router)
 app.include_router(market.router)
 app.include_router(analysis.router)
 app.include_router(news.router)
@@ -96,6 +98,25 @@ app.include_router(jobs.router)
 app.include_router(admin_research.router)
 app.include_router(diagnostics.router)
 app.include_router(fix_admin.router)
+
+
+@app.middleware("http")
+async def customer_auth_middleware(request: Request, call_next):
+    from app.services.customer_auth import (
+        get_customer_session,
+        has_admin_secret,
+        is_public_path,
+    )
+
+    settings = get_settings()
+    if not settings.customer_auth_required:
+        return await call_next(request)
+    path = request.url.path or "/"
+    if is_public_path(path) or path.startswith("/admin") or path.startswith("/jobs"):
+        return await call_next(request)
+    if get_customer_session(request) or has_admin_secret(request):
+        return await call_next(request)
+    return JSONResponse({"detail": "Authentication required"}, status_code=401)
 
 
 DASHBOARD_HTML = """<!doctype html>
@@ -239,12 +260,27 @@ DASHBOARD_HTML = """<!doctype html>
     .grade-D { color:#ffb3c6; }
     .grade-PASS { color:#9fb3d9; }
     .regime { font-size:20px; font-weight:700; }
+    .aita-gate { position:fixed; inset:0; background:#0b1220; display:none; align-items:center; justify-content:center; z-index:50; padding:24px; }
+    .aita-gate.show { display:flex; }
+    .aita-gate-card { max-width:460px; background:#111a2e; border:1px solid #1d2740; border-radius:12px; padding:28px 24px; text-align:center; }
+    .aita-user { font-size:12px; color:#8aa0c6; margin-right:10px; }
+    .aita-logout { background:#1a365d; }
   </style>
 </head>
 <body>
+  <div id="aita_auth_gate" class="aita-gate" role="dialog" aria-modal="true">
+    <div class="aita-gate-card">
+      <h1>AI Trading Assistant</h1>
+      <p class="muted" id="aita_gate_msg">Sign in through the Border Currency portal to use market intelligence.</p>
+    </div>
+  </div>
   <header>
     <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 5 · evidence-based forecasting)</span></h1>
-    <div><span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button></div>
+    <div>
+      <span id="aita_user" class="aita-user" hidden></span>
+      <button id="aita_logout" class="aita-logout" type="button" hidden onclick="aitaLogout()">Logout</button>
+      <span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button>
+    </div>
     <div class="sources">
       <span class="lbl">Data sources:</span>
       <span>Market <span id="ds_market" class="src">—</span></span>
@@ -923,6 +959,67 @@ DASHBOARD_HTML = """<!doctype html>
   </main>
   <script>
     const $ = id => document.getElementById(id);
+    let aitaSession = null;
+    function aitaShowGate(msg){
+      const gate=$('aita_auth_gate');
+      const text=$('aita_gate_msg');
+      if(text && msg) text.textContent = msg;
+      if(gate) gate.classList.add('show');
+    }
+    function aitaHideGate(){
+      const gate=$('aita_auth_gate');
+      if(gate) gate.classList.remove('show');
+    }
+    function aitaHideAdmin(){
+      ['rds_admin','fix_admin_panel','rds_btn_auth'].forEach(function(id){
+        const el=$(id); if(el) el.style.display='none';
+      });
+    }
+    async function aitaLogout(){
+      try { await fetch('/auth/logout', { method:'POST', credentials:'include' }); } catch(e){}
+      aitaSession = null;
+      aitaShowGate('You have been signed out. Return to Border Currency to open AI Trading Assistant.');
+    }
+    async function aitaBootstrap(){
+      const hash = location.hash || '';
+      const match = hash.match(/(?:^[#&])sso=([^&]+)/);
+      if(match){
+        const token = decodeURIComponent(match[1]);
+        try { history.replaceState({}, '', location.pathname + location.search); } catch(e){}
+        const redeem = await fetch('/auth/sso/redeem', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          credentials:'include',
+          body: JSON.stringify({ token: token })
+        });
+        if(!redeem.ok){
+          aitaShowGate('Sign-in link is invalid or expired. Return to Border Currency to open AI Trading Assistant.');
+          return false;
+        }
+      }
+      const sessionRes = await fetch('/auth/session', { credentials:'include' });
+      if(sessionRes.ok){
+        aitaSession = await sessionRes.json();
+        aitaHideGate();
+        const userEl=$('aita_user');
+        const outEl=$('aita_logout');
+        if(userEl){
+          userEl.hidden = false;
+          userEl.textContent = (aitaSession.name || aitaSession.email || 'Signed in');
+        }
+        if(outEl) outEl.hidden = false;
+        if(aitaSession.customer) aitaHideAdmin();
+        return true;
+      }
+      let health = {};
+      try { health = await (await fetch('/health')).json(); } catch(e){}
+      if(!health.customer_auth_required){
+        aitaHideGate();
+        return true;
+      }
+      aitaShowGate('Sign in through the Border Currency portal to use AI Trading Assistant.');
+      return false;
+    }
     function setText(id, v){ const el=$(id); if(!el) return false; el.textContent = v; return true; }
     function fill(id, v, suffix){
       const el=$(id); if(!el) return;
@@ -2241,7 +2338,7 @@ DASHBOARD_HTML = """<!doctype html>
       $('dq_empty').textContent = (s.all_trades && s.all_trades.trades) ? '' :
         'No scored actionable trades yet — selective analysis populates as recommendations are evaluated.';
     }
-    refresh();
+    aitaBootstrap().then(function(ok){ if(ok) refresh(); });
   </script>
 </body>
 </html>"""

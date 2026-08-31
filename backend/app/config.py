@@ -37,6 +37,19 @@ class Settings(BaseSettings):
     ai_model: str = "gpt-4o-mini"
     http_timeout_seconds: float = 8.0
     cron_secret: Optional[str] = None
+    border_sso_signing_secret: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "AI_TRADING_ASSISTANT_SSO_SECRET",
+            "BORDER_SSO_SIGNING_SECRET",
+            "border_sso_signing_secret",
+        ),
+    )
+    aita_session_secret: Optional[str] = None
+    aita_session_ttl_seconds: int = 28800
+    aita_require_customer_auth: Optional[bool] = None
+    border_sso_issuer: str = "border-currency-shipments"
+    border_sso_audience: str = "ai-trading-assistant"
     signal_weights: Optional[Dict[str, float]] = None
     similarity_weights: Optional[Dict[str, float]] = None
     confidence_weights: Optional[Dict[str, float]] = None
@@ -84,6 +97,18 @@ class Settings(BaseSettings):
     @property
     def is_mock(self) -> bool:
         return self.use_mock_data
+
+    @property
+    def customer_auth_required(self) -> bool:
+        if self.aita_require_customer_auth is False:
+            return False
+        if self.aita_require_customer_auth is True:
+            return True
+        return (not self.is_mock) and bool(self.border_sso_signing_secret)
+
+    @property
+    def session_signing_secret(self) -> Optional[str]:
+        return self.aita_session_secret or self.border_sso_signing_secret
 
     @property
     def fx_live_enabled(self) -> bool:
