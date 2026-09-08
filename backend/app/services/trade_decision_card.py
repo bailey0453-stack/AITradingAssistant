@@ -149,6 +149,19 @@ def _why_wait(reasons):
     return "; ".join(reasons[:4]).rstrip(".") + "."
 
 
+def _current_calibration(confidence: float) -> tuple[dict | None, str | None]:
+    """Read measured 4h calibration without ever breaking a decision response."""
+    try:
+        from app.services import current_calibration
+
+        cal = current_calibration.calibration_for_confidence(confidence, horizon="4h")
+        return cal, current_calibration.calibration_text(cal)
+    except Exception:
+        # Calibration is explanatory only. A research DB hiccup must never alter
+        # or prevent the trading decision itself.
+        return None, None
+
+
 def build_trade_decision_card(payload: dict) -> dict:
     direction = payload.get("direction")
     grade = payload.get("opportunity_grade") or payload.get("grade")
@@ -192,8 +205,6 @@ def build_trade_decision_card(payload: dict) -> dict:
         invalidation_level = short_bailout
         invalidation_label = "INVALID ABOVE"
 
-    # Near Friday close there is deliberately no artificial 4-hour quote. Use
-    # the actual session-close forecast as the primary directional check.
     predicted_primary = rate_4h if rate_4h is not None else rate_close if rate_close is not None else rate_eod
     forecast_ok = _forecast_agrees(direction, spot, predicted_primary)
     if not forecast_ok and rate_close is not None:
@@ -202,11 +213,6 @@ def build_trade_decision_card(payload: dict) -> dict:
         forecast_ok = _forecast_agrees(direction, spot, rate_eod)
 
     actionable = direction in _ACTIONABLE
-    # The raw signal direction can remain BUY/SELL even when the topline model
-    # declines to publish a directional rate (for example because inputs are
-    # insufficient). In that case the dashboard must not present a confident
-    # BUY/SELL headline. Only show directional labels when a numeric forecast
-    # exists and agrees with the raw signal; otherwise show neutral/range-bound.
     has_numeric_forecast = any(v is not None for v in (rate_4h, rate_close, rate_eod))
     directional_forecast = actionable and has_numeric_forecast and forecast_ok
     labels = _direction_labels(direction if directional_forecast else None)
@@ -254,6 +260,13 @@ def build_trade_decision_card(payload: dict) -> dict:
         visual = "yellow"
         why = _why_wait(wait_reasons)
 
+    calibration, calibration_summary = _current_calibration(confidence)
+    # Existing dashboard renders ``why`` prominently on the top card, so the
+    # measured calibration is visible immediately without requiring users to
+    # open the Research Lab. Structured fields are also returned for richer UI.
+    if calibration_summary:
+        why = f"{why} {calibration_summary}"
+
     return {
         "action": action,
         "visual": visual,
@@ -268,6 +281,8 @@ def build_trade_decision_card(payload: dict) -> dict:
         "invalidation_label": invalidation_label,
         "invalidation_level": round(invalidation_level, 4) if invalidation_level is not None else None,
         "why": why,
+        "calibration": calibration,
+        "calibration_summary": calibration_summary,
         "wait_reasons": wait_reasons,
         "blocking_event": blocking_event,
         "event_block_window_hours": _EVENT_BLOCK_WINDOW_HOURS,
