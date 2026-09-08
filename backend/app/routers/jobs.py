@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.rate_repair import repair_fed_funds
 from app.services.scheduled_jobs import job_status, run_hourly_usdmxn_job
 from app.services.research_import_service import (
     cron_daily_research_update,
@@ -67,8 +68,15 @@ def require_cron_auth(request: Request) -> None:
     dependencies=[Depends(require_cron_auth)],
 )
 def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
-    """Run the hourly USD/MXN analysis job (cron-triggered or manual)."""
-    return run_hourly_usdmxn_job(db)
+    """Run the hourly USD/MXN analysis job and heal Fed Funds coverage if needed."""
+    summary = run_hourly_usdmxn_job(db)
+    try:
+        summary["fed_funds_repair"] = repair_fed_funds(db)
+    except Exception as exc:  # noqa: BLE001 - rate repair must not block analysis
+        logger.exception("Fed Funds repair failed during hourly job")
+        db.rollback()
+        summary["fed_funds_repair"] = {"ok": False, "reason": str(exc)}
+    return summary
 
 
 @router.get("/status")
