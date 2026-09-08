@@ -84,9 +84,7 @@ def test_grade_a_positive_ev_no_event_returns_trade():
 def test_high_impact_event_inside_four_hours_changes_trade_to_wait():
     base = _base()
     assert build_trade_decision_card(base)["action"] == "TRADE"
-    card = build_trade_decision_card(
-        _base(context={"upcoming_events": [_event(1.5)]})
-    )
+    card = build_trade_decision_card(_base(context={"upcoming_events": [_event(1.5)]}))
     assert card["action"] == "WAIT"
     assert card["blocking_event"]["name"] == "CPI"
     assert 1.0 < card["blocking_event"]["hours_away"] < 2.0
@@ -94,26 +92,20 @@ def test_high_impact_event_inside_four_hours_changes_trade_to_wait():
 
 
 def test_high_impact_event_beyond_four_hours_does_not_block_intraday_trade():
-    card = build_trade_decision_card(
-        _base(context={"upcoming_events": [_event(8.0, "Nonfarm Payrolls")]})
-    )
+    card = build_trade_decision_card(_base(context={"upcoming_events": [_event(8.0, "Nonfarm Payrolls")] }))
     assert card["action"] == "TRADE"
     assert card["blocking_event"] is None
     assert card["gates"]["no_event_risk"] is True
 
 
 def test_past_high_impact_event_does_not_block_trade():
-    card = build_trade_decision_card(
-        _base(context={"upcoming_events": [_event(-1.0, "CPI", status="released")]})
-    )
+    card = build_trade_decision_card(_base(context={"upcoming_events": [_event(-1.0, "CPI", status="released")] }))
     assert card["action"] == "TRADE"
     assert card["blocking_event"] is None
 
 
 def test_unknown_time_high_impact_event_fails_safe_with_event_name():
-    card = build_trade_decision_card(
-        _base(context={"upcoming_events": [{"importance": "high", "title": "Fed Chair Speech"}]})
-    )
+    card = build_trade_decision_card(_base(context={"upcoming_events": [{"importance": "high", "title": "Fed Chair Speech"}]}))
     assert card["action"] == "WAIT"
     assert card["blocking_event"]["name"] == "Fed Chair Speech"
     assert "time unavailable" in card["why"]
@@ -122,9 +114,7 @@ def test_unknown_time_high_impact_event_fails_safe_with_event_name():
 def test_stale_required_data_changes_trade_to_wait():
     base = _base()
     assert build_trade_decision_card(base)["action"] == "TRADE"
-    card = build_trade_decision_card(
-        _base(market_state={"is_open": True, "is_stale": True, "cached": True, "age_minutes": 999})
-    )
+    card = build_trade_decision_card(_base(market_state={"is_open": True, "is_stale": True, "cached": True, "age_minutes": 999}))
     assert card["action"] == "WAIT"
 
 
@@ -173,7 +163,7 @@ def test_buy_usd_shows_higher_prediction():
     assert card["bias"] == "BUY USD / SELL MXN"
 
 
-def test_wait_still_displays_directional_forecast():
+def test_wait_still_displays_directional_forecast_when_numeric_forecast_exists():
     card = build_trade_decision_card(
         _base(
             opportunity_grade="B",
@@ -190,3 +180,36 @@ def test_wait_still_displays_directional_forecast():
     assert card["has_directional_forecast"] is True
     assert card["prediction"] == "USD/MXN LOWER"
     assert card["predicted_4h"] == 17.2942
+
+
+def test_range_bound_wait_uses_neutral_headline_even_with_raw_sell_signal():
+    card = build_trade_decision_card(
+        _base(
+            direction="SELL_USD",
+            opportunity_grade="D",
+            confidence=42.0,
+            topline_forecast={
+                "now": 16.9734,
+                "horizons": [
+                    {"horizon": "1 hour", "expected_rate": None, "bias": "HOLD"},
+                    {"horizon": "2 hours", "expected_rate": None, "bias": "HOLD"},
+                    {"horizon": "4 hours", "expected_rate": None, "bias": "HOLD"},
+                    {"horizon": "End of day", "expected_rate": None, "bias": "HOLD"},
+                    {"horizon": "24 hours", "expected_rate": None, "bias": "HOLD"},
+                ],
+                "long_usd_bailout": 16.9056,
+                "short_usd_bailout": 17.0413,
+            },
+            decision_quality={
+                "should_trade_now": False,
+                "expected_value": {"expected_value_usd": -20.0},
+                "similar_track_record": {"enough_history": False, "similar_avg_pnl": None},
+            },
+        )
+    )
+    assert card["action"] == "WAIT"
+    assert card["bias"] == "NEUTRAL"
+    assert card["prediction"] == "RANGE-BOUND"
+    assert card["has_directional_forecast"] is False
+    assert card["predicted_4h"] is None
+    assert card["predicted_eod"] is None
