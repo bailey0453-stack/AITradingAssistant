@@ -44,6 +44,16 @@ def _research_bounds(db: Session) -> tuple[date | None, date | None]:
     return start, end
 
 
+def _missing_count(db: Session, column_name: str) -> int:
+    column = getattr(ResearchMarketSnapshot, column_name)
+    return int(
+        db.execute(
+            select(func.count(ResearchMarketSnapshot.id)).where(column.is_(None))
+        ).scalar()
+        or 0
+    )
+
+
 def _fill_column(db: Session, column_name: str, observations: dict[date, float]) -> int:
     if not observations:
         return 0
@@ -69,12 +79,21 @@ def _fill_column(db: Session, column_name: str, observations: dict[date, float])
 
 
 def repair_fed_funds(db: Session) -> dict:
+    missing = _missing_count(db, "fed_funds")
+    if missing == 0:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "Fed Funds coverage already complete",
+            "snapshots_missing": 0,
+        }
+
     settings = get_settings()
     if not settings.fred_api_key:
-        return {"ok": False, "reason": "FRED_API_KEY not configured"}
+        return {"ok": False, "reason": "FRED_API_KEY not configured", "snapshots_missing": missing}
     start, end = _research_bounds(db)
     if not start or not end:
-        return {"ok": False, "reason": "no research snapshots"}
+        return {"ok": False, "reason": "no research snapshots", "snapshots_missing": missing}
     params = {
         "series_id": "DFF",
         "api_key": settings.fred_api_key,
@@ -91,7 +110,15 @@ def repair_fed_funds(db: Session) -> dict:
             continue
         observations[date.fromisoformat(item["date"])] = value
     updated = _fill_column(db, "fed_funds", observations)
-    return {"ok": True, "source": "FRED DFF", "observations": len(observations), "snapshots_updated": updated}
+    remaining = _missing_count(db, "fed_funds")
+    return {
+        "ok": True,
+        "source": "FRED DFF",
+        "observations": len(observations),
+        "snapshots_updated": updated,
+        "snapshots_missing_before": missing,
+        "snapshots_missing_after": remaining,
+    }
 
 
 def repair_banxico_rate(db: Session) -> dict:
