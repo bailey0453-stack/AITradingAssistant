@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from app.services.trade_decision_card import build_trade_decision_card
 
@@ -213,3 +214,26 @@ def test_range_bound_wait_uses_neutral_headline_even_with_raw_sell_signal():
     assert card["has_directional_forecast"] is False
     assert card["predicted_4h"] is None
     assert card["predicted_eod"] is None
+
+
+def test_trade_card_surfaces_measured_calibration_without_changing_decision():
+    measured = {
+        "horizon": "4h",
+        "confidence_bucket": "50-70",
+        "current_confidence": 58.0,
+        "samples": 147,
+        "directional_accuracy": 63.3,
+        "target_hit_rate": 41.5,
+        "avg_abs_target_error": 0.0371,
+        "mean_model_confidence": 58.4,
+        "reliable": True,
+        "min_reliable_samples": 20,
+        "status": "measured",
+    }
+    with patch("app.services.current_calibration.calibration_for_confidence", return_value=measured):
+        card = build_trade_decision_card(_base(confidence=58.0, opportunity_grade="C"))
+    assert card["action"] == "WAIT"
+    assert card["calibration"]["samples"] == 147
+    assert card["calibration"]["directional_accuracy"] == 63.3
+    assert "Measured history for 50-70 confidence at 4h" in card["calibration_summary"]
+    assert "target hit 41.5%" in card["why"]

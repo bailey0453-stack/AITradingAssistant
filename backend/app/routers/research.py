@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services import research_lab
+from app.services.current_calibration import calibration_for_confidence, calibration_text
 
 router = APIRouter(prefix="/research", tags=["research"])
 
@@ -25,6 +26,17 @@ def pending(db: Session = Depends(get_db)) -> dict:
 @router.get("/calibration")
 def calibration(db: Session = Depends(get_db)) -> dict:
     return research_lab.calibration(db)
+
+
+@router.get("/current-calibration")
+def current_calibration(
+    confidence: float = Query(..., ge=0.0, le=100.0),
+    horizon: str = Query(default="4h", pattern="^(1h|4h|end_of_day|1d|2d|5d)$"),
+) -> dict:
+    """Measured track record for the current confidence bucket and horizon."""
+    result = calibration_for_confidence(confidence, horizon=horizon)
+    result["summary"] = calibration_text(result)
+    return result
 
 
 @router.get("/drivers")
