@@ -2,7 +2,8 @@
 
 Yahoo Finance's public chart API exposes roughly two years of 1-hour FX bars.
 Those bars are stored as ``USDMXN_1H`` rows in ``historical_market_snapshots``
-and are used to derive 1h/2h/4h momentum plus 4h/24h realized volatility.
+and are used to derive 1h/2h/4h momentum, 4h/24h realized volatility, and
+1h/2h/4h forward returns for short-horizon historical analog forecasts.
 
 The repair is idempotent and safe to run from the hourly scheduler. It does not
 alter recommendation logic when the provider is unavailable; missing intraday
@@ -137,7 +138,7 @@ def _derive_features(db: Session) -> dict:
         if value is not None:
             bars.append((_aware(row.ts), float(value)))
     if len(bars) < 5:
-        return {"snapshots_updated": 0, "feature_days": 0}
+        return {"snapshots_updated": 0, "feature_days": 0, "forward_return_days": 0}
 
     by_day: dict[date, list[int]] = defaultdict(list)
     for idx, (ts, _value) in enumerate(bars):
@@ -153,7 +154,7 @@ def _derive_features(db: Session) -> dict:
         ).scalars().all()
     }
 
-    updated = feature_days = 0
+    updated = feature_days = forward_return_days = 0
     for day, indices in by_day.items():
         snap = snapshots.get(day)
         if snap is None or not indices:
@@ -165,6 +166,10 @@ def _derive_features(db: Session) -> dict:
             j = i - hours
             return bars[j][1] if j >= 0 else None
 
+        def forward(hours: int) -> float | None:
+            j = i + hours
+            return bars[j][1] if j < len(bars) else None
+
         m1 = _pct(back(1), current)
         m2 = _pct(back(2), current)
         m4 = _pct(back(4), current)
@@ -172,6 +177,9 @@ def _derive_features(db: Session) -> dict:
         vals24 = [v for _ts, v in bars[max(0, i - 24): i + 1]]
         v4 = _vol(vals4)
         v24 = _vol(vals24)
+        f1 = _pct(current, forward(1))
+        f2 = _pct(current, forward(2))
+        f4 = _pct(current, forward(4))
 
         values = {
             "momentum_1h": m1,
@@ -179,9 +187,14 @@ def _derive_features(db: Session) -> dict:
             "momentum_4h": m4,
             "intraday_vol_4h": v4,
             "intraday_vol_24h": v24,
+            "ret_next_1h": f1,
+            "ret_next_2h": f2,
+            "ret_next_4h": f4,
         }
-        if any(val is not None for val in values.values()):
+        if any(values[k] is not None for k in ("momentum_1h", "momentum_2h", "momentum_4h", "intraday_vol_4h", "intraday_vol_24h")):
             feature_days += 1
+        if any(values[k] is not None for k in ("ret_next_1h", "ret_next_2h", "ret_next_4h")):
+            forward_return_days += 1
         dirty = False
         for key, value in values.items():
             if value is not None and getattr(snap, key) != value:
@@ -192,7 +205,11 @@ def _derive_features(db: Session) -> dict:
 
     if updated:
         db.commit()
-    return {"snapshots_updated": updated, "feature_days": feature_days}
+    return {
+        "snapshots_updated": updated,
+        "feature_days": feature_days,
+        "forward_return_days": forward_return_days,
+    }
 
 
 def current_intraday_features(db: Session) -> dict:
