@@ -2,11 +2,7 @@
 
 - ``POST/GET /jobs/hourly-usdmxn-analysis`` — generate + store an hourly USD/MXN
   recommendation and evaluate due prior ones. Protected by ``CRON_SECRET``.
-  (Both verbs are accepted so Vercel Cron — which issues GET — can trigger it.)
 - ``GET  /jobs/status`` — read-only scheduler status for the dashboard.
-
-Auth: Vercel Cron sends ``Authorization: Bearer <CRON_SECRET>``. We also accept
-an ``X-Cron-Secret`` header or a ``?secret=`` query param for manual runs.
 """
 
 from __future__ import annotations
@@ -20,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.intraday_repair import repair_intraday_usdmxn
 from app.services.mexico_yield_repair import repair_mexico_yields
 from app.services.rate_repair import repair_policy_rates
 from app.services.scheduled_jobs import job_status, run_hourly_usdmxn_job
@@ -57,26 +54,29 @@ def require_cron_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing cron secret")
 
 
+def _safe_repair(db: Session, label: str, fn) -> dict:
+    try:
+        return fn(db)
+    except Exception as exc:  # noqa: BLE001 - research repair must never block analysis
+        logger.exception("%s repair failed during hourly job", label)
+        db.rollback()
+        return {"ok": False, "reason": str(exc)}
+
+
 @router.api_route(
     "/hourly-usdmxn-analysis",
     methods=["POST", "GET"],
     dependencies=[Depends(require_cron_auth)],
 )
 def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
-    """Run analysis and heal relative-rate history used by similarity matching."""
+    """Refresh research inputs first, then generate the hourly forecast."""
+    repairs = {
+        "policy_rate_repair": _safe_repair(db, "Policy-rate", repair_policy_rates),
+        "mexico_yield_repair": _safe_repair(db, "Mexico-yield", repair_mexico_yields),
+        "intraday_repair": _safe_repair(db, "Intraday USD/MXN", repair_intraday_usdmxn),
+    }
     summary = run_hourly_usdmxn_job(db)
-    try:
-        summary["policy_rate_repair"] = repair_policy_rates(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Policy-rate repair failed during hourly job")
-        db.rollback()
-        summary["policy_rate_repair"] = {"ok": False, "reason": str(exc)}
-    try:
-        summary["mexico_yield_repair"] = repair_mexico_yields(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Mexico-yield repair failed during hourly job")
-        db.rollback()
-        summary["mexico_yield_repair"] = {"ok": False, "reason": str(exc)}
+    summary.update(repairs)
     return summary
 
 

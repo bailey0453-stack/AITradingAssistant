@@ -44,6 +44,13 @@ class ResearchMarketSnapshot(Base):
     gold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     oil: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # Intraday USD/MXN structure derived from hourly bars (% returns / volatility).
+    momentum_1h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    momentum_2h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    momentum_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    intraday_vol_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    intraday_vol_24h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Policy / inflation
     fed_funds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     banxico_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

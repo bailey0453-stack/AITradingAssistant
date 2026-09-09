@@ -132,10 +132,17 @@ def _apply_additive_migrations() -> None:
 
     if insp.has_table("research_market_snapshots"):
         research_cols = {c["name"] for c in insp.get_columns("research_market_snapshots")}
-        if "mx2y" not in research_cols:
-            stmts.append("ALTER TABLE research_market_snapshots ADD COLUMN mx2y FLOAT")
-        if "mx10y" not in research_cols:
-            stmts.append("ALTER TABLE research_market_snapshots ADD COLUMN mx10y FLOAT")
+        for col in (
+            "mx2y",
+            "mx10y",
+            "momentum_1h",
+            "momentum_2h",
+            "momentum_4h",
+            "intraday_vol_4h",
+            "intraday_vol_24h",
+        ):
+            if col not in research_cols:
+                stmts.append(f"ALTER TABLE research_market_snapshots ADD COLUMN {col} FLOAT")
 
     if not insp.has_table("similarity_matches"):
         for sql in stmts:
