@@ -26,8 +26,6 @@ class Settings(BaseSettings):
     banxico_api_token: Optional[str] = None
     banxico_mx2y_series_id: Optional[str] = None
     banxico_mx10y_series_id: Optional[str] = None
-    # Optional institutional/options feed. Endpoint may return either a single
-    # current object or {"observations": [...]} with date + volatility/skew fields.
     fx_options_data_url: Optional[str] = None
     fx_options_api_key: Optional[str] = None
     alpha_vantage_api_key: Optional[str] = None
@@ -43,14 +41,7 @@ class Settings(BaseSettings):
     ai_model: str = "gpt-4o-mini"
     http_timeout_seconds: float = 8.0
     cron_secret: Optional[str] = None
-    border_sso_signing_secret: Optional[str] = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "AI_TRADING_ASSISTANT_SSO_SECRET",
-            "BORDER_SSO_SIGNING_SECRET",
-            "border_sso_signing_secret",
-        ),
-    )
+    border_sso_signing_secret: Optional[str] = Field(default=None, validation_alias=AliasChoices("AI_TRADING_ASSISTANT_SSO_SECRET", "BORDER_SSO_SIGNING_SECRET", "border_sso_signing_secret"))
     aita_session_secret: Optional[str] = None
     aita_session_ttl_seconds: int = 28800
     aita_require_customer_auth: Optional[bool] = None
@@ -82,6 +73,8 @@ class Settings(BaseSettings):
     centroid_md_include_md_update_type: bool = True
     fix_worker_base_url: Optional[str] = None
 
+    # Dedicated GFC/Centroid trading session. This is intentionally separate
+    # from market data because Centroid requires different sequence handling.
     centroid_td_host: Optional[str] = None
     centroid_td_port: Optional[int] = None
     centroid_td_username: Optional[str] = None
@@ -90,11 +83,17 @@ class Settings(BaseSettings):
     centroid_td_target_comp_id: Optional[str] = None
     centroid_td_account: Optional[str] = None
     centroid_td_ssl: bool = False
-    centroid_td_reset_on_logon: bool = True
+    centroid_td_reset_on_logon: bool = False
+    centroid_td_enabled: bool = False
+    centroid_td_conformance_mode: bool = True
 
     @property
     def centroid_md_configured(self) -> bool:
         return bool(self.centroid_md_host and self.centroid_md_port and self.centroid_md_sender_comp_id and self.centroid_md_target_comp_id)
+
+    @property
+    def centroid_td_configured(self) -> bool:
+        return bool(self.centroid_td_host and self.centroid_td_port and self.centroid_td_sender_comp_id and self.centroid_td_target_comp_id and self.centroid_td_account)
 
     @property
     def telegram_configured(self) -> bool:
