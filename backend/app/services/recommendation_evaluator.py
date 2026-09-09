@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # the next FX day close (21:00 UTC) at/after the recommendation.
 HORIZON_SECONDS = {
     "1h": 3600,
+    "2h": 2 * 3600,
     "4h": 4 * 3600,
     "end_of_day": None,
     "1d": 24 * 3600,
@@ -81,7 +82,6 @@ def _price_window(
 def _evaluation_price(
     db: Session, pair: str, due: datetime, now: datetime
 ) -> Optional[tuple[datetime, float]]:
-    """Closest snapshot to the horizon's due time (prefer first at/after due)."""
     after = db.execute(
         select(MarketSnapshot.created_at, MarketSnapshot.usdmxn)
         .where(MarketSnapshot.pair == pair)
@@ -93,18 +93,13 @@ def _evaluation_price(
     ).first()
     if after and after[1] is not None:
         return _aware(after[0]), float(after[1])
-    return None  # no post-horizon observation yet -> evaluate later
+    return None
 
 
 def _first_crossing_hours(
     series: list[tuple[datetime, float]], created: datetime,
     level: Optional[float], above: bool
 ) -> Optional[float]:
-    """Hours from ``created`` to the first time price crosses ``level``.
-
-    ``above=True`` means "price >= level" (target for BUY / stop for SELL);
-    ``above=False`` means "price <= level".
-    """
     if level is None:
         return None
     for ts, px in series:
@@ -120,13 +115,6 @@ def _exit_price(
     time_to_target: Optional[float],
     time_to_stop: Optional[float],
 ) -> float:
-    """First-touch exit price for a paper hedge.
-
-    Exit at the target if it was hit first, at the stop if that was hit first,
-    otherwise at the nearest evaluation (horizon close) price. Ties (both levels
-    first crossed within the same observed snapshot) resolve to the stop, which
-    is the more conservative assumption for a risk-managed hedge.
-    """
     hit_target = time_to_target is not None and target is not None
     hit_stop = time_to_stop is not None and stop is not None
     if hit_target and hit_stop:
@@ -141,7 +129,6 @@ def _exit_price(
 def _score(reco: Recommendation, spot_eval: float,
            series: list[tuple[datetime, float]],
            created: datetime, eval_time: datetime) -> dict:
-    """Compute the outcome + paper-hedge metrics for one horizon."""
     spot0 = reco.spot_price
     ret = round((spot_eval - spot0) / spot0 * 100, 4) if spot0 else None
     prices = [p for _, p in series]
@@ -167,16 +154,13 @@ def _score(reco: Recommendation, spot_eval: float,
         mae = (spot0 - hi) / spot0 * 100 if spot0 else None
         ttt = _first_crossing_hours(series, created, reco.target, above=False)
         tts = _first_crossing_hours(series, created, reco.stop, above=True)
-    else:  # NO_TRADE / HOLD / PASS: "correct" when price stayed essentially flat.
+    else:
         correct = (abs(ret) <= 0.10) if ret is not None else None
         target_hit = stretch_hit = stop_hit = False
         mfe = (hi - spot0) / spot0 * 100 if spot0 else None
         mae = (lo - spot0) / spot0 * 100 if spot0 else None
         ttt = tts = None
 
-    # Paper hedge: actionable directions only, with first-touch exit logic —
-    # exit at the target if it was hit first, at the stop if that was hit first,
-    # otherwise at the nearest evaluation (horizon close) price.
     actionable = direction in _ACTIONABLE
     hedge_ret = gross = net = None
     if actionable and spot0:
@@ -207,10 +191,6 @@ def _score(reco: Recommendation, spot_eval: float,
 def evaluate_due(
     db: Session, now: Optional[datetime] = None, limit: int = 200
 ) -> dict:
-    """Score every due, unscored (recommendation, horizon) pair, bounded by ``limit``.
-
-    Returns ``{"evaluated": n, "recommendations_touched": m, "completed": k}``.
-    """
     now = _aware(now or datetime.now(timezone.utc))
     pending = db.execute(
         select(Recommendation)
@@ -241,10 +221,10 @@ def evaluate_due(
                 continue
             due = horizon_due_time(created, horizon)
             if now < due:
-                continue  # not enough time has passed yet
+                continue
             ev = _evaluation_price(db, reco.pair, due, now)
             if ev is None:
-                continue  # no price observed at/after the horizon yet
+                continue
             eval_time, spot_eval = ev
             series = _price_window(db, reco.pair, created, eval_time)
             metrics = _score(reco, spot_eval, series, created, eval_time)
@@ -271,7 +251,6 @@ def evaluate_due(
             "completed": completed}
 
 
-# --- Performance aggregation (cheap; reads scored outcomes) -----------------
 _CONFIDENCE_BUCKETS = [
     ("0-50", 0.0, 50.0),
     ("50-70", 50.0, 70.0),
@@ -290,7 +269,6 @@ def _bucket(confidence: Optional[float]) -> str:
 
 
 def _agg(rows: list[dict]) -> dict:
-    """Aggregate a list of outcome dicts into summary stats."""
     n = len(rows)
     if not n:
         return {"samples": 0, "win_rate": None, "target_hit_rate": None,
@@ -311,10 +289,6 @@ def _agg(rows: list[dict]) -> dict:
 
 
 def performance_summary(db: Session, max_outcomes: int = 10000) -> dict:
-    """Summarize scored outcomes by confidence bucket, grade, and horizon.
-
-    Bounded by ``max_outcomes`` (most recent) so it stays fast as data grows.
-    """
     total_recs = db.execute(
         select(Recommendation.id)
     ).scalars().all()
