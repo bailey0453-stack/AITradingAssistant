@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     banxico_api_token: Optional[str] = None
     banxico_mx2y_series_id: Optional[str] = None
     banxico_mx10y_series_id: Optional[str] = None
+    # Optional institutional/options feed. Endpoint may return either a single
+    # current object or {"observations": [...]} with date + volatility/skew fields.
+    fx_options_data_url: Optional[str] = None
+    fx_options_api_key: Optional[str] = None
     alpha_vantage_api_key: Optional[str] = None
     macro_cache_seconds: int = 600
     news_api_key: Optional[str] = None
