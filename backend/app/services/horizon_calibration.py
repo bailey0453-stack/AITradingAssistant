@@ -1,16 +1,9 @@
 """Empirical calibration for the displayed USD/MXN forecast horizons.
 
-Each horizon learns from its own already-evaluated paper recommendations.  The
-calibrator is intentionally conservative:
-
-* direction confidence is updated with a beta-style empirical prior using the
-  observed directional hit rate for the same direction/confidence bucket;
-* target magnitude may be *shrunk* to the typical realized move for that
-  horizon, but is never enlarged by calibration;
-* small samples do not change the forecast.
-
-This keeps 1h, 2h, 4h, end-of-day and 24h behavior separate and avoids letting a
-longer-horizon move mechanically leak into the short-horizon targets.
+Each horizon learns from its own already-evaluated paper recommendations. The
+calibrator is conservative: it can shrink an over-extended target and adjust
+confidence from measured accuracy, but it never enlarges the underlying analog
+move and it never changes a forecast on a small sample.
 """
 
 from __future__ import annotations
@@ -35,6 +28,15 @@ HORIZON_KEYS = {
     "24h": "1d",
 }
 
+# Display horizon -> confidence source stored in Recommendation.time_horizons.
+_TIME_HORIZON_LABELS = {
+    "1h": "1-4 hours",
+    "2h": "1-4 hours",
+    "4h": "1-4 hours",
+    "end_of_day": "End of day",
+    "24h": "1-2 days",
+}
+
 _CONFIDENCE_BUCKETS = (
     ("0-50", 0.0, 50.0),
     ("50-70", 50.0, 70.0),
@@ -57,6 +59,22 @@ def _median(values: list[float]) -> Optional[float]:
     return float(median(values)) if values else None
 
 
+def _stored_horizon_confidence(reco: Recommendation, horizon: str) -> Optional[float]:
+    label = _TIME_HORIZON_LABELS.get(horizon)
+    if label:
+        for item in reco.time_horizons or []:
+            if isinstance(item, dict) and item.get("horizon") == label:
+                value = item.get("confidence")
+                try:
+                    return float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+    try:
+        return float(reco.confidence) if reco.confidence is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def calibrate_horizon(
     db: Session,
     *,
@@ -65,17 +83,10 @@ def calibrate_horizon(
     raw_move_pct: Optional[float],
     raw_confidence: Optional[float],
     min_samples: int = 20,
-    max_samples: int = 2000,
+    max_samples: int = 5000,
     confidence_prior_samples: int = 20,
 ) -> dict:
-    """Calibrate one horizon from its own evaluated recommendation history.
-
-    ``raw_move_pct`` is the current evidence-derived move.  When the sample is
-    reliable, its magnitude is capped at the median absolute realized move for
-    this exact evaluation horizon.  This is deliberately one-way shrinkage: the
-    calibration layer can prevent an over-extended target but cannot manufacture
-    a larger one than the underlying historical analog evidence supplied.
-    """
+    """Calibrate one horizon from its own evaluated recommendation history."""
     evaluator_horizon = HORIZON_KEYS.get(horizon, horizon)
     bucket, lo, hi = _bucket(raw_confidence)
     result = {
@@ -101,7 +112,7 @@ def calibrate_horizon(
         result["status"] = "not_actionable"
         return result
 
-    stmt = (
+    rows = db.execute(
         select(RecommendationOutcome, Recommendation)
         .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
         .where(RecommendationOutcome.horizon == evaluator_horizon)
@@ -110,11 +121,19 @@ def calibrate_horizon(
         .where(RecommendationOutcome.direction_correct.is_not(None))
         .order_by(RecommendationOutcome.evaluated_at.desc())
         .limit(max_samples)
-    )
-    if bucket != "unknown":
-        stmt = stmt.where(Recommendation.confidence >= lo).where(Recommendation.confidence < hi)
+    ).all()
 
-    rows = db.execute(stmt).all()
+    # Match on the confidence assigned to this specific horizon, rather than the
+    # recommendation's overall headline confidence. Older rows without a stored
+    # horizon confidence fall back to the overall confidence.
+    if bucket != "unknown":
+        filtered = []
+        for outcome, reco in rows:
+            hist_conf = _stored_horizon_confidence(reco, horizon)
+            if hist_conf is not None and lo <= hist_conf < hi:
+                filtered.append((outcome, reco))
+        rows = filtered
+
     n = len(rows)
     result["samples"] = n
     if not rows:
@@ -142,14 +161,14 @@ def calibrate_horizon(
     if not reliable:
         return result
 
-    # Empirical-Bayes confidence: current model confidence acts as a modest prior,
-    # while this horizon's observed hit rate increasingly dominates as n grows.
     if raw_confidence is not None:
         prior_p = max(0.0, min(1.0, float(raw_confidence) / 100.0))
         posterior = (wins + confidence_prior_samples * prior_p) / (n + confidence_prior_samples)
         result["calibrated_confidence"] = round(100.0 * posterior, 1)
 
-    # Conservative magnitude calibration.  We only shrink and never expand.
+    # One-way magnitude calibration: use the horizon's typical realized move as
+    # a cap. Never expand the analog forecast just because historical volatility
+    # happened to be larger.
     if raw_move_pct is not None and typical_abs is not None and typical_abs > 0:
         raw = float(raw_move_pct)
         raw_mag = abs(raw)
@@ -170,7 +189,6 @@ def calibration_summary(
     raw_moves: dict[str, Optional[float]],
     raw_confidences: dict[str, Optional[float]],
 ) -> dict[str, dict]:
-    """Return independent calibration blocks for all forecast horizons."""
     return {
         horizon: calibrate_horizon(
             db,
