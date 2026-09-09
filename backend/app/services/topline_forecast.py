@@ -1,9 +1,9 @@
 """Evidence-based topline USD/MXN forecast (decision support only).
 
-Numeric forecast levels are derived from measured moves in the nearest historical
-analogs.  There are deliberately no fixed target percentages in this module.
-When the evidence sample is too small or disagrees with the directional signal,
-the numeric target is withheld rather than manufactured.
+Numeric forecast levels come from measured historical analog moves.  A separate
+empirical calibration layer then evaluates each displayed horizon against its own
+paper-recommendation outcomes.  Calibration can shrink an over-extended move and
+adjust confidence, but it never invents a target or expands the analog move.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Optional
 
+from app.database import SessionLocal
 from app.services.fix.provider import get_fix_quote
 from app.services.hedge_pnl import (
     FEE_PER_SIDE_USD as _FEE_PER_SIDE_USD,
@@ -19,10 +20,12 @@ from app.services.hedge_pnl import (
     net_hedge_pnl_usd,
     reanchor_to_fix,
 )
+from app.services.horizon_calibration import calibration_summary
 from app.services.market_hours import get_market_state
 
 _FX_CLOSE_HOUR_UTC = 21
 _MIN_ANALOGS = 5
+_ACTIONABLE = {"BUY_USD", "SELL_USD"}
 
 
 def _move_pct(rate: Optional[float], spot: Optional[float]) -> Optional[float]:
@@ -59,7 +62,6 @@ def _entry(label, rate, bias, confidence, spot, *, grade=None, direction="NO_TRA
 
 
 def _weighted_median(pairs: list[tuple[float, float]]) -> Optional[float]:
-    """Weighted median of (value, weight), robust to large historical outliers."""
     clean = sorted((float(v), max(0.0, float(w))) for v, w in pairs if v is not None)
     if not clean:
         return None
@@ -76,12 +78,6 @@ def _weighted_median(pairs: list[tuple[float, float]]) -> Optional[float]:
 
 
 def _analog_move(payload: dict, window: str, direction: str) -> tuple[Optional[float], dict]:
-    """Return evidence-derived move percent for a horizon.
-
-    The target is published only when at least five comparable observations exist
-    and their weighted median points in the same direction as the current signal.
-    This prevents a directional label from forcing a preset price target.
-    """
     historical = payload.get("historical") or {}
     matches = historical.get("top_matches") or []
     pairs: list[tuple[float, float]] = []
@@ -107,7 +103,7 @@ def _analog_move(payload: dict, window: str, direction: str) -> tuple[Optional[f
         meta["status"] = "unavailable"
         return None, meta
     agrees = (direction == "BUY_USD" and move > 0) or (direction == "SELL_USD" and move < 0)
-    if direction not in ("BUY_USD", "SELL_USD") or not agrees:
+    if direction not in _ACTIONABLE or not agrees:
         meta.update({"status": "evidence_disagrees", "measured_move_pct": round(move, 4)})
         return None, meta
 
@@ -122,11 +118,6 @@ def _rate_from_move(spot: Optional[float], move_pct: Optional[float]) -> Optiona
 
 
 def _two_hour_move(one_h: Optional[float], four_h: Optional[float]) -> tuple[Optional[float], dict]:
-    """Derive 2h only when both measured 1h and 4h evidence agree.
-
-    This is interpolation between two evidence-derived observations, not a fixed
-    percentage assumption.  If either endpoint is unavailable, 2h is withheld.
-    """
     meta = {"method": "interpolated_between_measured_1h_and_4h", "status": "unavailable"}
     if one_h is None or four_h is None or one_h * four_h <= 0:
         return None, meta
@@ -144,7 +135,7 @@ def _evidence_bailouts(payload: dict, spot: Optional[float], direction: str) -> 
         if value is not None:
             adverse.append(abs(float(value)))
     meta = {"method": "median_historical_adverse_excursion", "sample_size": len(adverse)}
-    if not spot or direction not in ("BUY_USD", "SELL_USD") or len(adverse) < _MIN_ANALOGS:
+    if not spot or direction not in _ACTIONABLE or len(adverse) < _MIN_ANALOGS:
         meta["status"] = "insufficient_sample"
         return None, None, meta
     stop_pct = median(adverse)
@@ -166,6 +157,37 @@ def _next_weekly_close(now: datetime) -> datetime:
     return close
 
 
+def _with_calibration(evidence: dict, calibration: dict | None) -> dict:
+    out = dict(evidence or {})
+    if calibration:
+        out["horizon_calibration"] = calibration
+    return out
+
+
+def _calibrated_value(cal: dict | None, key: str, fallback):
+    if not cal:
+        return fallback
+    value = cal.get(key)
+    return fallback if value is None else value
+
+
+def _calibrations(direction: str, moves: dict, confidences: dict) -> dict:
+    if direction not in _ACTIONABLE:
+        return {}
+    db = SessionLocal()
+    try:
+        return calibration_summary(
+            db,
+            direction=direction,
+            raw_moves=moves,
+            raw_confidences=confidences,
+        )
+    except Exception:
+        return {}
+    finally:
+        db.close()
+
+
 def _explanation(direction, spot, long_bailout, short_bailout, *, grade=None, evidence_status=None) -> str:
     grade_bit = f" (Grade {grade})" if grade else ""
     if not spot:
@@ -177,10 +199,10 @@ def _explanation(direction, spot, long_bailout, short_bailout, *, grade=None, ev
         )
     if direction == "BUY_USD":
         inv = f" Evidence-based long bailout {long_bailout:g}." if long_bailout else ""
-        return f"Primary lean BUY_USD{grade_bit}; expected rates use measured similar-market moves, not preset percentages.{inv}"
+        return f"Primary lean BUY_USD{grade_bit}; targets use measured analog moves with separate horizon calibration.{inv}"
     if direction == "SELL_USD":
         inv = f" Evidence-based short bailout {short_bailout:g}." if short_bailout else ""
-        return f"Primary lean SELL_USD{grade_bit}; expected rates use measured similar-market moves, not preset percentages.{inv}"
+        return f"Primary lean SELL_USD{grade_bit}; targets use measured analog moves with separate horizon calibration.{inv}"
     return f"Neutral bias{grade_bit} around spot {spot:g}; numeric directional targets are withheld."
 
 
@@ -204,10 +226,45 @@ def build(payload: dict) -> dict:
     day_move, day_ev = _analog_move(payload, "1d", direction)
     two_move, two_ev = _two_hour_move(one_move, four_move)
 
+    raw_confidences = {
+        "1h": intraday.get("confidence", 0),
+        "2h": intraday.get("confidence", 0),
+        "4h": intraday.get("confidence", 0),
+        "end_of_day": eod_h.get("confidence", 0),
+        "24h": multi.get("confidence", 0),
+    }
+    raw_moves = {
+        "1h": one_move,
+        "2h": two_move,
+        "4h": four_move,
+        "end_of_day": day_move,
+        "24h": day_move,
+    }
+    cal = _calibrations(direction, raw_moves, raw_confidences)
+
+    one_move = _calibrated_value(cal.get("1h"), "calibrated_move_pct", one_move)
+    two_move = _calibrated_value(cal.get("2h"), "calibrated_move_pct", two_move)
+    four_move = _calibrated_value(cal.get("4h"), "calibrated_move_pct", four_move)
+    eod_move = _calibrated_value(cal.get("end_of_day"), "calibrated_move_pct", day_move)
+    day24_move = _calibrated_value(cal.get("24h"), "calibrated_move_pct", day_move)
+
+    one_conf = _calibrated_value(cal.get("1h"), "calibrated_confidence", raw_confidences["1h"])
+    two_conf = _calibrated_value(cal.get("2h"), "calibrated_confidence", raw_confidences["2h"])
+    four_conf = _calibrated_value(cal.get("4h"), "calibrated_confidence", raw_confidences["4h"])
+    eod_conf = _calibrated_value(cal.get("end_of_day"), "calibrated_confidence", raw_confidences["end_of_day"])
+    day24_conf = _calibrated_value(cal.get("24h"), "calibrated_confidence", raw_confidences["24h"])
+
     one_rate = _rate_from_move(spot, one_move)
     two_rate = _rate_from_move(spot, two_move)
     four_rate = _rate_from_move(spot, four_move)
-    day_rate = _rate_from_move(spot, day_move)
+    eod_rate = _rate_from_move(spot, eod_move)
+    day24_rate = _rate_from_move(spot, day24_move)
+
+    one_ev = _with_calibration(one_ev, cal.get("1h"))
+    two_ev = _with_calibration(two_ev, cal.get("2h"))
+    four_ev = _with_calibration(four_ev, cal.get("4h"))
+    eod_ev = _with_calibration(day_ev, cal.get("end_of_day"))
+    day24_ev = _with_calibration(day_ev, cal.get("24h"))
 
     long_bailout, short_bailout, bailout_ev = _evidence_bailouts(payload, spot, direction)
     now = datetime.now(timezone.utc)
@@ -222,20 +279,20 @@ def build(payload: dict) -> dict:
     else:
         horizons = []
         if hours_to_close >= 1:
-            horizons.append(_entry("1 hour", one_rate, intraday.get("bias", "HOLD"), intraday.get("confidence", 0), spot,
+            horizons.append(_entry("1 hour", one_rate, intraday.get("bias", "HOLD"), one_conf, spot,
                                    status="forecast" if one_rate is not None else "evidence_withheld", evidence=one_ev, **kw))
         if hours_to_close >= 2:
-            horizons.append(_entry("2 hours", two_rate, intraday.get("bias", "HOLD"), intraday.get("confidence", 0), spot,
+            horizons.append(_entry("2 hours", two_rate, intraday.get("bias", "HOLD"), two_conf, spot,
                                    status="forecast" if two_rate is not None else "evidence_withheld", evidence=two_ev, **kw))
         if hours_to_close >= 4:
-            horizons.append(_entry("4 hours", four_rate, intraday.get("bias", "HOLD"), intraday.get("confidence", 0), spot,
+            horizons.append(_entry("4 hours", four_rate, intraday.get("bias", "HOLD"), four_conf, spot,
                                    status="forecast" if four_rate is not None else "evidence_withheld", evidence=four_ev, **kw))
         close_label = "End of day" if hours_to_close >= 24 else "Market close"
-        horizons.append(_entry(close_label, day_rate, eod_h.get("bias", "HOLD"), eod_h.get("confidence", 0), spot,
-                               status="forecast" if day_rate is not None else "evidence_withheld", evidence=day_ev, **kw))
+        horizons.append(_entry(close_label, eod_rate, eod_h.get("bias", "HOLD"), eod_conf, spot,
+                               status="forecast" if eod_rate is not None else "evidence_withheld", evidence=eod_ev, **kw))
         if hours_to_close >= 24:
-            horizons.append(_entry("24 hours", day_rate, multi.get("bias", "HOLD"), multi.get("confidence", 0), spot,
-                                   status="forecast" if day_rate is not None else "evidence_withheld", evidence=day_ev, **kw))
+            horizons.append(_entry("24 hours", day24_rate, multi.get("bias", "HOLD"), day24_conf, spot,
+                                   status="forecast" if day24_rate is not None else "evidence_withheld", evidence=day24_ev, **kw))
         else:
             horizons.append(_entry("Next market open", None, "HOLD", 0.0, spot, status="market_closed",
                                    note=f"Weekend closure follows Friday close; next open {state.next_market_open}.", **kw))
@@ -249,6 +306,7 @@ def build(payload: dict) -> dict:
         "now": round(spot, 4) if spot is not None else None,
         "opportunity_grade": overall_grade,
         "horizons": horizons,
+        "horizon_calibration": cal,
         "session": {
             "is_open": state.is_open,
             "market_status": state.market_status,
@@ -256,7 +314,7 @@ def build(payload: dict) -> dict:
             "next_market_open": state.next_market_open,
             "intraday_truncated": bool(state.is_open and hours_to_close < 24),
         },
-        "forecast_method": "historical_analog_weighted_median",
+        "forecast_method": "historical_analog_weighted_median+horizon_empirical_shrinkage_v1",
         "minimum_analog_sample": _MIN_ANALOGS,
         "long_usd_bailout": long_bailout,
         "short_usd_bailout": short_bailout,
@@ -271,7 +329,7 @@ def build(payload: dict) -> dict:
             "fix_spread": fix.get("spread") if fix else None,
             "entry_rate": entry_rate,
             "entry_side": "FIX bid" if direction == "SELL_USD" else "FIX ask" if direction == "BUY_USD" else None,
-            "forecast_basis": "Measured historical analog moves re-anchored to live FIX midpoint",
+            "forecast_basis": "Measured analog moves, separately calibrated by realized outcomes for each horizon",
             "available": entry_rate is not None,
         },
         "explanation": _explanation(direction, spot, long_bailout, short_bailout,
