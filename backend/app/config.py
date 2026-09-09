@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     fx_base_url: Optional[str] = None
     fred_api_key: Optional[str] = None
     banxico_api_token: Optional[str] = None
+    banxico_mx2y_series_id: Optional[str] = None
+    banxico_mx10y_series_id: Optional[str] = None
     alpha_vantage_api_key: Optional[str] = None
     macro_cache_seconds: int = 600
     news_api_key: Optional[str] = None

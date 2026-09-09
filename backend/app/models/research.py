@@ -37,6 +37,8 @@ class ResearchMarketSnapshot(Base):
     dxy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     us2y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     us10y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mx2y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mx10y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     sp500: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     vix: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     gold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

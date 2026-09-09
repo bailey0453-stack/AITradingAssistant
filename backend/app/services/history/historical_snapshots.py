@@ -52,9 +52,16 @@ def snapshot_to_comparable(snap: ResearchMarketSnapshot) -> dict:
     primary = events[0] if events else {}
     event_type = primary.get("type") if isinstance(primary, dict) else "market_environment"
     event_name = primary.get("name") if isinstance(primary, dict) else "Daily market environment"
+
     rate_differential = None
     if snap.banxico_rate is not None and snap.fed_funds is not None:
         rate_differential = float(snap.banxico_rate) - float(snap.fed_funds)
+    spread_2y = None
+    if snap.mx2y is not None and snap.us2y is not None:
+        spread_2y = float(snap.mx2y) - float(snap.us2y)
+    spread_10y = None
+    if snap.mx10y is not None and snap.us10y is not None:
+        spread_10y = float(snap.mx10y) - float(snap.us10y)
 
     release = snap.trade_date.isoformat()
     return {
@@ -81,6 +88,10 @@ def snapshot_to_comparable(snap: ResearchMarketSnapshot) -> dict:
             "dxy": snap.dxy,
             "us2y": snap.us2y,
             "us10y": snap.us10y,
+            "mx2y": snap.mx2y,
+            "mx10y": snap.mx10y,
+            "spread_2y": spread_2y,
+            "spread_10y": spread_10y,
             "oil": snap.oil,
             "gold": snap.gold,
             "vix": snap.vix,

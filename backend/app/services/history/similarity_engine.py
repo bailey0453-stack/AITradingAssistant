@@ -5,14 +5,7 @@ stored historical reaction (which carries its own pre-event context). Scoring is
 a weighted blend of per-feature similarities; weights are configurable so the
 model can be tuned without touching the engine.
 
-Per-feature similarity:
-  - categorical (regime, event_type): 1.0 if equal else 0.0
-  - numeric (dxy, yields, oil, gold, vix, sp, momentum, policy-rate spread): Gaussian
-    ``exp(-(diff/scale)^2)`` with a per-feature scale (typical variation)
-  - news_tags: Jaccard overlap of tag sets
-
-The final score is the weighted average over features that are present on both
-sides (missing features are skipped and the weights renormalized).
+Missing features are skipped and the weights renormalized.
 """
 
 from __future__ import annotations
@@ -36,13 +29,14 @@ from app.services.signal_weights import event_signal_key, news_category
 
 logger = logging.getLogger(__name__)
 
-# Default feature weights (tunable via settings.similarity_weights).
 DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
     "regime": 0.18,
     "event_type": 0.18,
     "vix": 0.12,
     "dxy": 0.12,
     "rate_differential": 0.12,
+    "spread_2y": 0.10,
+    "spread_10y": 0.08,
     "us2y": 0.06,
     "us10y": 0.06,
     "oil": 0.08,
@@ -52,11 +46,12 @@ DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
     "gold": 0.04,
 }
 
-# Per-feature Gaussian scale = "how far apart counts as clearly different".
 _SCALES: dict[str, float] = {
     "vix": 6.0,
     "dxy": 3.0,
     "rate_differential": 1.0,
+    "spread_2y": 1.0,
+    "spread_10y": 1.0,
     "us2y": 0.7,
     "us10y": 0.6,
     "oil": 8.0,
@@ -66,8 +61,8 @@ _SCALES: dict[str, float] = {
 }
 
 _NUMERIC = (
-    "vix", "dxy", "rate_differential", "us2y", "us10y", "oil",
-    "momentum", "sp_futures", "gold",
+    "vix", "dxy", "rate_differential", "spread_2y", "spread_10y",
+    "us2y", "us10y", "oil", "momentum", "sp_futures", "gold",
 )
 
 
@@ -88,7 +83,6 @@ def get_similarity_weights(settings: Settings | None = None) -> dict[str, float]
 
 
 def _dominant_event_type(context: dict) -> str | None:
-    """Pick the most relevant event type from recent/upcoming calendar items."""
     events = (context.get("released_last_24h") or []) + (context.get("upcoming_events") or [])
     for ev in events:
         if ev.get("importance") == "high":
@@ -112,7 +106,6 @@ def _news_tags(context: dict) -> list[str]:
 
 
 def build_feature_vector(context: dict, regime: dict | None = None) -> dict:
-    """Assemble the current-context feature vector used for matching."""
     market = context.get("market") or {}
     momentum = context.get("momentum") or {}
     regime = regime or context.get("market_regime") or {}
@@ -122,6 +115,10 @@ def build_feature_vector(context: dict, regime: dict | None = None) -> dict:
         "dxy": market.get("dxy"),
         "us2y": market.get("us2y"),
         "us10y": market.get("us10y"),
+        "mx2y": market.get("mx2y"),
+        "mx10y": market.get("mx10y"),
+        "spread_2y": market.get("spread_2y"),
+        "spread_10y": market.get("spread_10y"),
         "oil": market.get("oil"),
         "gold": market.get("gold"),
         "vix": market.get("vix"),
@@ -134,22 +131,30 @@ def build_feature_vector(context: dict, regime: dict | None = None) -> dict:
     }
 
 
-def _inject_current_policy_rates(db: Session, query: dict) -> None:
-    """Use the latest researched policy rates when live market context omits them."""
-    if query.get("rate_differential") is not None:
-        return
+def _inject_current_relative_rates(db: Session, query: dict) -> None:
+    """Fill Mexico yields/policy rates from the latest research snapshot."""
     latest = db.execute(
         select(ResearchMarketSnapshot)
-        .where(ResearchMarketSnapshot.fed_funds.isnot(None))
-        .where(ResearchMarketSnapshot.banxico_rate.isnot(None))
         .order_by(ResearchMarketSnapshot.trade_date.desc())
         .limit(1)
     ).scalars().first()
     if latest is None:
         return
-    query["fed_funds"] = float(latest.fed_funds)
-    query["banxico_rate"] = float(latest.banxico_rate)
-    query["rate_differential"] = float(latest.banxico_rate) - float(latest.fed_funds)
+
+    if query.get("rate_differential") is None and latest.fed_funds is not None and latest.banxico_rate is not None:
+        query["fed_funds"] = float(latest.fed_funds)
+        query["banxico_rate"] = float(latest.banxico_rate)
+        query["rate_differential"] = float(latest.banxico_rate) - float(latest.fed_funds)
+
+    if query.get("mx2y") is None and latest.mx2y is not None:
+        query["mx2y"] = float(latest.mx2y)
+    if query.get("mx10y") is None and latest.mx10y is not None:
+        query["mx10y"] = float(latest.mx10y)
+
+    if query.get("spread_2y") is None and query.get("mx2y") is not None and query.get("us2y") is not None:
+        query["spread_2y"] = float(query["mx2y"]) - float(query["us2y"])
+    if query.get("spread_10y") is None and query.get("mx10y") is not None and query.get("us10y") is not None:
+        query["spread_10y"] = float(query["mx10y"]) - float(query["us10y"])
 
 
 def _jaccard(a: list | None, b: list | None) -> float | None:
@@ -163,12 +168,10 @@ def _jaccard(a: list | None, b: list | None) -> float | None:
 
 
 def score_reaction(query: dict, reaction: dict, weights: dict[str, float]) -> float:
-    """Weighted similarity (0..1) between the query vector and one reaction."""
     ctx = reaction.get("context") or {}
     total_w = 0.0
     acc = 0.0
 
-    # Categorical: regime + event_type.
     for key, qval, rval in (
         ("regime", query.get("regime"), ctx.get("regime")),
         ("event_type", query.get("event_type"), reaction.get("event_type")),
@@ -181,7 +184,6 @@ def score_reaction(query: dict, reaction: dict, weights: dict[str, float]) -> fl
         acc += w * (1.0 if str(qval) == str(rval) else 0.0)
         total_w += w
 
-    # Numeric: Gaussian similarity.
     for key in _NUMERIC:
         qv, rv = query.get(key), ctx.get(key)
         if qv is None or rv is None:
@@ -194,7 +196,6 @@ def score_reaction(query: dict, reaction: dict, weights: dict[str, float]) -> fl
         acc += w * sim
         total_w += w
 
-    # News tags: Jaccard.
     j = _jaccard(query.get("news_tags"), ctx.get("news_tags"))
     if j is not None:
         w = weights.get("news_tags", 0.0)
@@ -216,16 +217,10 @@ def find_similar(
     analysis_snapshot_id: int | None = None,
     settings: Settings | None = None,
 ) -> dict:
-    """Nearest-neighbor ranking of historical reactions vs the current context.
-
-    Each match carries a ``similarity_score`` (0..1, higher = closer), a
-    ``distance_score`` (1 - similarity, lower = closer) and an integer ``rank``.
-    ``top_n`` may be up to 25 to expose a broad evidence base.
-    """
     settings = settings or get_settings()
     weights = get_similarity_weights(settings)
     query = build_feature_vector(context, regime=regime)
-    _inject_current_policy_rates(db, query)
+    _inject_current_relative_rates(db, query)
 
     ensure_history_seeded(db)
     use_research = has_research_snapshots(db)
@@ -282,7 +277,6 @@ def persist_matches(
     matches: list[dict],
     analysis_snapshot_id: int | None = None,
 ) -> int:
-    """Persist ranked matches to ``similarity_matches`` (best-effort)."""
     try:
         for rank, m in enumerate(matches, start=1):
             event_id = m.get("event_id")
