@@ -7,7 +7,7 @@ model can be tuned without touching the engine.
 
 Per-feature similarity:
   - categorical (regime, event_type): 1.0 if equal else 0.0
-  - numeric (dxy, yields, oil, gold, vix, sp, momentum): Gaussian
+  - numeric (dxy, yields, oil, gold, vix, sp, momentum, policy-rate spread): Gaussian
     ``exp(-(diff/scale)^2)`` with a per-feature scale (typical variation)
   - news_tags: Jaccard overlap of tag sets
 
@@ -20,10 +20,11 @@ from __future__ import annotations
 import logging
 import math
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import SimilarityMatch
+from app.models import ResearchMarketSnapshot, SimilarityMatch
 from app.services.history.historical_events import ensure_history_seeded, load_reactions
 from app.services.history.historical_snapshots import (
     COMPARABLE_MIN_SIMILARITY,
@@ -41,6 +42,7 @@ DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
     "event_type": 0.18,
     "vix": 0.12,
     "dxy": 0.12,
+    "rate_differential": 0.12,
     "us2y": 0.06,
     "us10y": 0.06,
     "oil": 0.08,
@@ -54,6 +56,7 @@ DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
 _SCALES: dict[str, float] = {
     "vix": 6.0,
     "dxy": 3.0,
+    "rate_differential": 1.0,
     "us2y": 0.7,
     "us10y": 0.6,
     "oil": 8.0,
@@ -62,7 +65,10 @@ _SCALES: dict[str, float] = {
     "gold": 120.0,
 }
 
-_NUMERIC = ("vix", "dxy", "us2y", "us10y", "oil", "momentum", "sp_futures", "gold")
+_NUMERIC = (
+    "vix", "dxy", "rate_differential", "us2y", "us10y", "oil",
+    "momentum", "sp_futures", "gold",
+)
 
 
 def get_similarity_weights(settings: Settings | None = None) -> dict[str, float]:
@@ -121,8 +127,29 @@ def build_feature_vector(context: dict, regime: dict | None = None) -> dict:
         "vix": market.get("vix"),
         "sp_futures": market.get("sp_futures"),
         "momentum": momentum.get("change"),
+        "fed_funds": market.get("fed_funds"),
+        "banxico_rate": market.get("banxico_rate"),
+        "rate_differential": market.get("rate_differential"),
         "news_tags": _news_tags(context),
     }
+
+
+def _inject_current_policy_rates(db: Session, query: dict) -> None:
+    """Use the latest researched policy rates when live market context omits them."""
+    if query.get("rate_differential") is not None:
+        return
+    latest = db.execute(
+        select(ResearchMarketSnapshot)
+        .where(ResearchMarketSnapshot.fed_funds.isnot(None))
+        .where(ResearchMarketSnapshot.banxico_rate.isnot(None))
+        .order_by(ResearchMarketSnapshot.trade_date.desc())
+        .limit(1)
+    ).scalars().first()
+    if latest is None:
+        return
+    query["fed_funds"] = float(latest.fed_funds)
+    query["banxico_rate"] = float(latest.banxico_rate)
+    query["rate_differential"] = float(latest.banxico_rate) - float(latest.fed_funds)
 
 
 def _jaccard(a: list | None, b: list | None) -> float | None:
@@ -198,6 +225,7 @@ def find_similar(
     settings = settings or get_settings()
     weights = get_similarity_weights(settings)
     query = build_feature_vector(context, regime=regime)
+    _inject_current_policy_rates(db, query)
 
     ensure_history_seeded(db)
     use_research = has_research_snapshots(db)
