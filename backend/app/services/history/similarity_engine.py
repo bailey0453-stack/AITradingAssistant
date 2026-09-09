@@ -1,11 +1,9 @@
 """Similarity engine: "find events like this one".
 
 Builds a feature vector from the *current* context and scores it against every
-stored historical reaction (which carries its own pre-event context). Scoring is
-a weighted blend of per-feature similarities; weights are configurable so the
-model can be tuned without touching the engine.
-
-Missing features are skipped and the weights renormalized.
+stored historical reaction. Missing features are skipped and weights are
+renormalized, so optional Mexico/intraday inputs cannot distort a forecast when
+providers are unavailable.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from app.services.history.historical_snapshots import (
     load_research_comparables,
     research_snapshot_bounds,
 )
+from app.services.intraday_repair import current_intraday_features
 from app.services.signal_weights import event_signal_key, news_category
 
 logger = logging.getLogger(__name__)
@@ -40,7 +39,12 @@ DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
     "us2y": 0.06,
     "us10y": 0.06,
     "oil": 0.08,
-    "momentum": 0.10,
+    "momentum": 0.08,
+    "momentum_1h": 0.10,
+    "momentum_2h": 0.10,
+    "momentum_4h": 0.12,
+    "intraday_vol_4h": 0.06,
+    "intraday_vol_24h": 0.06,
     "news_tags": 0.06,
     "sp_futures": 0.04,
     "gold": 0.04,
@@ -56,13 +60,20 @@ _SCALES: dict[str, float] = {
     "us10y": 0.6,
     "oil": 8.0,
     "momentum": 0.06,
+    "momentum_1h": 0.12,
+    "momentum_2h": 0.18,
+    "momentum_4h": 0.28,
+    "intraday_vol_4h": 0.08,
+    "intraday_vol_24h": 0.08,
     "sp_futures": 250.0,
     "gold": 120.0,
 }
 
 _NUMERIC = (
     "vix", "dxy", "rate_differential", "spread_2y", "spread_10y",
-    "us2y", "us10y", "oil", "momentum", "sp_futures", "gold",
+    "us2y", "us10y", "oil", "momentum", "momentum_1h", "momentum_2h",
+    "momentum_4h", "intraday_vol_4h", "intraday_vol_24h",
+    "sp_futures", "gold",
 )
 
 
@@ -124,6 +135,11 @@ def build_feature_vector(context: dict, regime: dict | None = None) -> dict:
         "vix": market.get("vix"),
         "sp_futures": market.get("sp_futures"),
         "momentum": momentum.get("change"),
+        "momentum_1h": market.get("momentum_1h"),
+        "momentum_2h": market.get("momentum_2h"),
+        "momentum_4h": market.get("momentum_4h"),
+        "intraday_vol_4h": market.get("intraday_vol_4h"),
+        "intraday_vol_24h": market.get("intraday_vol_24h"),
         "fed_funds": market.get("fed_funds"),
         "banxico_rate": market.get("banxico_rate"),
         "rate_differential": market.get("rate_differential"),
@@ -155,6 +171,18 @@ def _inject_current_relative_rates(db: Session, query: dict) -> None:
         query["spread_2y"] = float(query["mx2y"]) - float(query["us2y"])
     if query.get("spread_10y") is None and query.get("mx10y") is not None and query.get("us10y") is not None:
         query["spread_10y"] = float(query["mx10y"]) - float(query["us10y"])
+
+
+def _inject_current_intraday(db: Session, query: dict) -> None:
+    """Fill current 1h/2h/4h structure from stored hourly USD/MXN bars."""
+    if all(query.get(k) is not None for k in (
+        "momentum_1h", "momentum_2h", "momentum_4h",
+        "intraday_vol_4h", "intraday_vol_24h",
+    )):
+        return
+    for key, value in current_intraday_features(db).items():
+        if query.get(key) is None:
+            query[key] = value
 
 
 def _jaccard(a: list | None, b: list | None) -> float | None:
@@ -221,6 +249,7 @@ def find_similar(
     weights = get_similarity_weights(settings)
     query = build_feature_vector(context, regime=regime)
     _inject_current_relative_rates(db, query)
+    _inject_current_intraday(db, query)
 
     ensure_history_seeded(db)
     use_research = has_research_snapshots(db)
