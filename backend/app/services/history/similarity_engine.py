@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.models import ResearchMarketSnapshot, SimilarityMatch
+from app.services.cftc_positioning import current_cftc_positioning
 from app.services.fx_options_repair import current_fx_options
 from app.services.history.historical_events import ensure_history_seeded, load_reactions
 from app.services.history.historical_snapshots import (
@@ -31,6 +32,7 @@ DEFAULT_SIMILARITY_WEIGHTS: dict[str, float] = {
     "intraday_vol_4h": 0.06, "intraday_vol_24h": 0.06,
     "iv_1w": 0.10, "iv_1m": 0.10, "rr25_1w": 0.12, "rr25_1m": 0.12,
     "butterfly_25d_1m": 0.06,
+    "cftc_mxn_net_pct_oi": 0.12, "cftc_mxn_open_interest": 0.04,
     "news_tags": 0.06, "sp_futures": 0.04, "gold": 0.04,
 }
 
@@ -42,6 +44,7 @@ _SCALES: dict[str, float] = {
     "intraday_vol_4h": 0.08, "intraday_vol_24h": 0.08,
     "iv_1w": 2.0, "iv_1m": 2.0, "rr25_1w": 1.0, "rr25_1m": 1.0,
     "butterfly_25d_1m": 0.5,
+    "cftc_mxn_net_pct_oi": 12.0, "cftc_mxn_open_interest": 40000.0,
     "sp_futures": 250.0, "gold": 120.0,
 }
 
@@ -94,7 +97,8 @@ def build_feature_vector(context: dict, regime: dict | None = None) -> dict:
         "oil", "gold", "vix", "sp_futures", "momentum_1h", "momentum_2h",
         "momentum_4h", "intraday_vol_4h", "intraday_vol_24h", "fed_funds",
         "banxico_rate", "rate_differential", "iv_1w", "iv_1m", "rr25_1w",
-        "rr25_1m", "butterfly_25d_1m",
+        "rr25_1m", "butterfly_25d_1m", "cftc_mxn_net", "cftc_mxn_net_pct_oi",
+        "cftc_mxn_open_interest",
     )
     out = {key: market.get(key) for key in keys}
     out.update({
@@ -136,6 +140,12 @@ def _inject_current_intraday(db: Session, query: dict) -> None:
 
 def _inject_current_options(db: Session, query: dict) -> None:
     for key, value in current_fx_options(db).items():
+        if query.get(key) is None:
+            query[key] = value
+
+
+def _inject_current_cftc(db: Session, query: dict) -> None:
+    for key, value in current_cftc_positioning(db).items():
         if query.get(key) is None:
             query[key] = value
 
@@ -188,6 +198,7 @@ def find_similar(db: Session, context: dict, regime: dict | None = None, top_n: 
     _inject_current_relative_rates(db, query)
     _inject_current_intraday(db, query)
     _inject_current_options(db, query)
+    _inject_current_cftc(db, query)
     ensure_history_seeded(db)
     use_research = has_research_snapshots(db)
     if use_research:
