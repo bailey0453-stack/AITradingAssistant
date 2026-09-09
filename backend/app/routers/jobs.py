@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.mexico_yield_repair import repair_mexico_yields
 from app.services.rate_repair import repair_policy_rates
 from app.services.scheduled_jobs import job_status, run_hourly_usdmxn_job
 from app.services.research_import_service import (
@@ -33,7 +34,6 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 def _configured_secret() -> str | None:
-    """The expected cron secret (env first — what Vercel injects — then config)."""
     return os.getenv("CRON_SECRET") or get_settings().cron_secret
 
 
@@ -45,11 +45,6 @@ def _provided_secret(request: Request) -> str | None:
 
 
 def require_cron_auth(request: Request) -> None:
-    """Reject requests without the correct ``CRON_SECRET``.
-
-    When no secret is configured we refuse in production (misconfiguration) but
-    allow mock/dev mode so local runs and tests work without a secret.
-    """
     expected = _configured_secret()
     provided = _provided_secret(request)
 
@@ -68,20 +63,25 @@ def require_cron_auth(request: Request) -> None:
     dependencies=[Depends(require_cron_auth)],
 )
 def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
-    """Run hourly analysis and heal policy-rate history used by similarity matching."""
+    """Run analysis and heal relative-rate history used by similarity matching."""
     summary = run_hourly_usdmxn_job(db)
     try:
         summary["policy_rate_repair"] = repair_policy_rates(db)
-    except Exception as exc:  # noqa: BLE001 - rate repair must not block analysis
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Policy-rate repair failed during hourly job")
         db.rollback()
         summary["policy_rate_repair"] = {"ok": False, "reason": str(exc)}
+    try:
+        summary["mexico_yield_repair"] = repair_mexico_yields(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Mexico-yield repair failed during hourly job")
+        db.rollback()
+        summary["mexico_yield_repair"] = {"ok": False, "reason": str(exc)}
     return summary
 
 
 @router.get("/status")
 def jobs_status(db: Session = Depends(get_db)) -> dict:
-    """Scheduler status for the dashboard (no auth; read-only, no secrets)."""
     return job_status(db)
 
 
@@ -91,7 +91,6 @@ def jobs_status(db: Session = Depends(get_db)) -> dict:
     dependencies=[Depends(require_cron_auth)],
 )
 def research_import_continue(db: Session = Depends(get_db)) -> dict:
-    """Advance a running research import or bootstrap if the DB is empty."""
     return cron_research_import_continue(db)
 
 
@@ -101,5 +100,4 @@ def research_import_continue(db: Session = Depends(get_db)) -> dict:
     dependencies=[Depends(require_cron_auth)],
 )
 def daily_research_update(db: Session = Depends(get_db)) -> dict:
-    """Daily incremental research database update (cron-triggered)."""
     return cron_daily_research_update(db)
