@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.cftc_positioning import repair_cftc_positioning
 from app.services.fx_options_repair import repair_fx_options
 from app.services.intraday_repair import repair_intraday_usdmxn
 from app.services.mexico_yield_repair import repair_mexico_yields
@@ -61,6 +62,7 @@ def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
         "mexico_yield_repair": _safe_repair(db, "Mexico-yield", repair_mexico_yields),
         "intraday_repair": _safe_repair(db, "Intraday USD/MXN", repair_intraday_usdmxn),
         "fx_options_repair": _safe_repair(db, "USD/MXN options", repair_fx_options),
+        "cftc_positioning_repair": _safe_repair(db, "CFTC Mexican peso positioning", repair_cftc_positioning),
     }
     summary = run_hourly_usdmxn_job(db)
     summary.update(repairs)

@@ -51,6 +51,11 @@ class ResearchMarketSnapshot(Base):
     rr25_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     butterfly_25d_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # Free CFTC Mexican-peso futures positioning (weekly, forward-filled daily).
+    cftc_mxn_net: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cftc_mxn_net_pct_oi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cftc_mxn_open_interest: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Policy / inflation
     fed_funds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     banxico_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
