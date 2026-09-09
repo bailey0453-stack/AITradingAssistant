@@ -45,7 +45,10 @@ def _display_grade(grade: Optional[str], pnl: Optional[float]) -> Optional[str]:
 def _entry(label, rate, bias, confidence, spot, *, grade=None, direction="NO_TRADE",
            fix=None, status="forecast", note=None, evidence=None) -> dict:
     executable_forecast_mid = reanchor_to_fix(rate, spot, fix)
-    pnl = net_hedge_pnl_usd(direction, executable_forecast_mid, fix)
+    # P/L belongs to the forecast shown on this horizon, not the overall trade lean.
+    # If the horizon is RANGE_BOUND/HOLD there is no directional hedge to score.
+    pnl_direction = bias if bias in _ACTIONABLE else "NO_TRADE"
+    pnl = net_hedge_pnl_usd(pnl_direction, executable_forecast_mid, fix)
     return {
         "horizon": label,
         "expected_rate": round(rate, 4) if rate is not None else None,
@@ -55,6 +58,7 @@ def _entry(label, rate, bias, confidence, spot, *, grade=None, direction="NO_TRA
         "grade": _display_grade(grade, pnl),
         "opportunity_grade": grade,
         "hedge_pnl_usd": pnl,
+        "hedge_pnl_direction": pnl_direction if pnl_direction in _ACTIONABLE else None,
         "hedge_forecast_fix_mid": round(executable_forecast_mid, 4) if executable_forecast_mid is not None else None,
         "status": status,
         "note": note,
