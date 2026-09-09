@@ -72,7 +72,7 @@ def _apply_additive_migrations()->None:
         if "fix_ask" not in cols: stmts.append("ALTER TABLE recommendations ADD COLUMN fix_ask FLOAT")
     if insp.has_table("research_market_snapshots"):
         cols={c["name"] for c in insp.get_columns("research_market_snapshots")}
-        for col in ("mx2y","mx10y","momentum_1h","momentum_2h","momentum_4h","intraday_vol_4h","intraday_vol_24h","iv_1w","iv_1m","rr25_1w","rr25_1m","butterfly_25d_1m"):
+        for col in ("mx2y","mx10y","momentum_1h","momentum_2h","momentum_4h","intraday_vol_4h","intraday_vol_24h","iv_1w","iv_1m","rr25_1w","rr25_1m","butterfly_25d_1m","cftc_mxn_net","cftc_mxn_net_pct_oi","cftc_mxn_open_interest"):
             if col not in cols: stmts.append(f"ALTER TABLE research_market_snapshots ADD COLUMN {col} FLOAT")
     if insp.has_table("similarity_matches"):
         cols={c["name"] for c in insp.get_columns("similarity_matches")}
