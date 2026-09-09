@@ -44,6 +44,12 @@ class ResearchMarketSnapshot(Base):
     intraday_vol_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     intraday_vol_24h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # Short-horizon forward USD/MXN returns from the day's final hourly bar.
+    # These power the 1h/2h/4h topline forecast windows.
+    ret_next_1h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ret_next_2h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ret_next_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # USD/MXN options market: implied vol and 25-delta skew/butterfly.
     iv_1w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     iv_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
