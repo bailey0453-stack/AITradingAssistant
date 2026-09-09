@@ -54,32 +54,29 @@ def require_cron_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing cron secret")
 
 
+def _safe_repair(db: Session, label: str, fn) -> dict:
+    try:
+        return fn(db)
+    except Exception as exc:  # noqa: BLE001 - research repair must never block analysis
+        logger.exception("%s repair failed during hourly job", label)
+        db.rollback()
+        return {"ok": False, "reason": str(exc)}
+
+
 @router.api_route(
     "/hourly-usdmxn-analysis",
     methods=["POST", "GET"],
     dependencies=[Depends(require_cron_auth)],
 )
 def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
-    """Run analysis and heal relative-rate + intraday research inputs."""
+    """Refresh research inputs first, then generate the hourly forecast."""
+    repairs = {
+        "policy_rate_repair": _safe_repair(db, "Policy-rate", repair_policy_rates),
+        "mexico_yield_repair": _safe_repair(db, "Mexico-yield", repair_mexico_yields),
+        "intraday_repair": _safe_repair(db, "Intraday USD/MXN", repair_intraday_usdmxn),
+    }
     summary = run_hourly_usdmxn_job(db)
-    try:
-        summary["policy_rate_repair"] = repair_policy_rates(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Policy-rate repair failed during hourly job")
-        db.rollback()
-        summary["policy_rate_repair"] = {"ok": False, "reason": str(exc)}
-    try:
-        summary["mexico_yield_repair"] = repair_mexico_yields(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Mexico-yield repair failed during hourly job")
-        db.rollback()
-        summary["mexico_yield_repair"] = {"ok": False, "reason": str(exc)}
-    try:
-        summary["intraday_repair"] = repair_intraday_usdmxn(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Intraday USD/MXN repair failed during hourly job")
-        db.rollback()
-        summary["intraday_repair"] = {"ok": False, "reason": str(exc)}
+    summary.update(repairs)
     return summary
 
 
