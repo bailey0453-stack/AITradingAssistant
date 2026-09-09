@@ -1,10 +1,4 @@
-"""Historical Research Database models (Phase 1).
-
-Normalized daily market snapshots power the Historical Evidence panel and
-similarity search. ``ResearchDailyLearning`` is the future self-learning layer
-for storing each day's recommendation and realized outcomes alongside the
-snapshot — populated automatically once the hourly pipeline is extended.
-"""
+"""Historical Research Database models (Phase 1)."""
 
 from __future__ import annotations
 
@@ -29,7 +23,6 @@ class ResearchMarketSnapshot(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-
     trade_date: Mapped[date] = mapped_column(Date, index=True)
 
     # Core FX + cross-asset panel
@@ -50,6 +43,13 @@ class ResearchMarketSnapshot(Base):
     momentum_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     intraday_vol_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     intraday_vol_24h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # USD/MXN options market: implied vol and 25-delta skew/butterfly.
+    iv_1w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    iv_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rr25_1w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rr25_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    butterfly_25d_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # Policy / inflation
     fed_funds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -75,10 +75,7 @@ class ResearchMarketSnapshot(Base):
 
 
 class ResearchDailyLearning(Base):
-    """Future self-learning row: snapshot + recommendation + realized outcomes.
-
-    Not populated in Phase 1; schema supports the proprietary research loop.
-    """
+    """Future self-learning row: snapshot + recommendation + realized outcomes."""
 
     __tablename__ = "research_daily_learning"
     __table_args__ = (UniqueConstraint("trade_date", name="uq_learning_trade_date"),)
@@ -86,23 +83,19 @@ class ResearchDailyLearning(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
-
     trade_date: Mapped[date] = mapped_column(Date, index=True)
     market_snapshot_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("research_market_snapshots.id"), nullable=True, index=True
     )
-
     recommendation_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     direction: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     opportunity_grade: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     supporting_signals: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-
     model_version: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     reasoning_engine_version: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     weighting_profile: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     historical_engine_version: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-
     ret_1h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ret_4h: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ret_eod: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
