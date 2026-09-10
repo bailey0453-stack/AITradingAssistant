@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.config import Settings
 from app.services.fix.codec import field_map
 from app.services.fix.messages import build_sequence_reset_gap_fill
-from app.services.fix.trading_messages import build_new_order_single
+from app.services.fix.trading_messages import build_new_order_single, new_cl_ord_id
 from app.services.fix.trading_session import CentroidTradingSession
 
 
@@ -25,6 +27,11 @@ def _settings(**overrides):
     return Settings(**base)
 
 
+def test_generated_cl_ord_id_uses_only_centroid_documented_characters():
+    cl_ord_id = new_cl_ord_id()
+    assert re.fullmatch(r"[A-Za-z._-]+", cl_ord_id)
+
+
 def test_market_order_builder_contains_required_centroid_fields():
     raw = build_new_order_single(
         seq_num=7,
@@ -36,12 +43,12 @@ def test_market_order_builder_contains_required_centroid_fields():
         quantity=100000,
         ord_type="1",
         time_in_force="3",
-        cl_ord_id="CONF-ORDER-1",
+        cl_ord_id="CONF-ORDER-ONE",
         sending_time="20260909-12:00:00.000",
     )
     msg = field_map(raw)
     assert msg["35"] == "D"
-    assert msg["11"] == "CONF-ORDER-1"
+    assert msg["11"] == "CONF-ORDER-ONE"
     assert msg["1"] == "DEMO"
     assert msg["55"] == "USDMXN.r"
     assert msg["54"] == "1"
@@ -78,7 +85,7 @@ def test_limit_fok_includes_price_and_tif():
         ord_type="2",
         time_in_force="4",
         price=17.25,
-        cl_ord_id="CONF-FOK-1",
+        cl_ord_id="CONF-FOK-ONE",
     )
     msg = field_map(raw)
     assert msg["40"] == "2"
