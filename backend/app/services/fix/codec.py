@@ -105,10 +105,11 @@ def field_map(raw: str) -> dict[str, str]:
 
     # Session-level observability only. Never log the raw FIX payload or
     # credential tags (553/554). This lets us see a Logout/Reject immediately
-    # before a peer closes the trading socket.
+    # before a peer closes the trading socket. Warning is temporary so Railway
+    # surfaces these diagnostics even when INFO application logs are filtered.
     msg_type = out.get("35", "")
     if msg_type in _SESSION_TRACE_TYPES:
-        logger.info(
+        logger.warning(
             "FIX session inbound type=%s seq=%s sender=%s target=%s text=%s ref_seq=%s ref_type=%s reject_reason=%s",
             msg_type or "?",
             _safe_trace_value(out.get("34")),
