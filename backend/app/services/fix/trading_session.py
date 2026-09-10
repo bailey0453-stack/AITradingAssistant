@@ -145,11 +145,14 @@ class CentroidTradingSession:
         raw_sock = socket.create_connection((host, port), timeout=15)
         raw_sock.settimeout(1.0)
         if self.settings.centroid_trading_ssl:
-            ctx = ssl.create_default_context()
-            # Centroid's demo endpoint currently presents a legacy certificate
-            # that OpenSSL 3 rejects at the default security level. Lower the
-            # cipher security level only for this dedicated trading socket while
-            # keeping CA validation and hostname verification enabled.
+            # The GFC/Centroid demo trading endpoint currently uses a weak,
+            # self-signed certificate. Keep TLS encryption and SNI for the
+            # configured demo hostname, but disable certificate-chain and
+            # hostname verification only on this dedicated demo trading socket.
+            # No global SSL defaults or market-data TLS settings are changed.
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
             self._sock = ctx.wrap_socket(raw_sock, server_hostname=host)
         else:
