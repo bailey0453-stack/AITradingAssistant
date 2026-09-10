@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import ssl
 import threading
@@ -10,6 +11,9 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import text
+
+from app.database import engine
 from app.services.fix.codec import field_map, split_messages
 from app.services.fix.messages import build_heartbeat, build_logon, build_logout
 from app.services.fix.trading_messages import build_new_order_single, build_order_cancel_request, build_order_status_request
@@ -21,6 +25,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _HEARTBEAT_INTERVAL = 30
 _RECV_BUFFER = 65536
+_SEQUENCE_KEY = "centroid_td"
+_LOW_SEQ_RE = re.compile(r"MsgSeqNum too low, expecting\s+(\d+)\s+but received\s+(\d+)", re.IGNORECASE)
 
 
 class CentroidTradingSession:
@@ -32,8 +38,10 @@ class CentroidTradingSession:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._send_lock = threading.Lock()
+        self._seq_lock = threading.Lock()
         self._out_seq = 1
         self._in_seq = 1
+        self._sequence_persistent = False
         self._buffer = ""
         self._state: dict[str, Any] = {
             "status": "disconnected",
@@ -48,11 +56,112 @@ class CentroidTradingSession:
             "last_session_reject": None,
             "last_order_request": None,
         }
+        self._load_sequence_state()
 
-    def _scrub(self, text: str | None) -> str | None:
-        if text is None:
+    def _scrub(self, text_value: str | None) -> str | None:
+        if text_value is None:
             return None
-        return scrub(text, getattr(self.settings, "centroid_trading_password", None), getattr(self.settings, "centroid_trading_username", None))
+        return scrub(text_value, getattr(self.settings, "centroid_trading_password", None), getattr(self.settings, "centroid_trading_username", None))
+
+    def _ensure_sequence_table(self) -> None:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS fix_session_state (
+                        session_key VARCHAR(64) PRIMARY KEY,
+                        next_out_seq INTEGER NOT NULL,
+                        next_in_seq INTEGER NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
+    def _load_sequence_state(self) -> None:
+        try:
+            self._ensure_sequence_table()
+            with engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT next_out_seq, next_in_seq FROM fix_session_state "
+                        "WHERE session_key = :session_key"
+                    ),
+                    {"session_key": _SEQUENCE_KEY},
+                ).mappings().first()
+                if row:
+                    self._out_seq = max(1, int(row["next_out_seq"]))
+                    self._in_seq = max(1, int(row["next_in_seq"]))
+                else:
+                    conn.execute(
+                        text(
+                            "INSERT INTO fix_session_state "
+                            "(session_key, next_out_seq, next_in_seq, updated_at) "
+                            "VALUES (:session_key, :next_out_seq, :next_in_seq, CURRENT_TIMESTAMP)"
+                        ),
+                        {
+                            "session_key": _SEQUENCE_KEY,
+                            "next_out_seq": self._out_seq,
+                            "next_in_seq": self._in_seq,
+                        },
+                    )
+            self._sequence_persistent = True
+            logger.info(
+                "Loaded Centroid trading FIX sequence state: outbound=%s inbound=%s",
+                self._out_seq,
+                self._in_seq,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._sequence_persistent = False
+            logger.warning("Centroid trading FIX sequence persistence unavailable: %s", self._scrub(str(exc)))
+
+    def _persist_sequence_state(self) -> None:
+        try:
+            self._ensure_sequence_table()
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO fix_session_state
+                            (session_key, next_out_seq, next_in_seq, updated_at)
+                        VALUES
+                            (:session_key, :next_out_seq, :next_in_seq, CURRENT_TIMESTAMP)
+                        ON CONFLICT(session_key) DO UPDATE SET
+                            next_out_seq = excluded.next_out_seq,
+                            next_in_seq = excluded.next_in_seq,
+                            updated_at = CURRENT_TIMESTAMP
+                        """
+                    ),
+                    {
+                        "session_key": _SEQUENCE_KEY,
+                        "next_out_seq": self._out_seq,
+                        "next_in_seq": self._in_seq,
+                    },
+                )
+            self._sequence_persistent = True
+        except Exception as exc:  # noqa: BLE001
+            self._sequence_persistent = False
+            logger.warning("Could not persist Centroid trading FIX sequence state: %s", self._scrub(str(exc)))
+
+    def _reconcile_expected_out_seq(self, reason: str) -> bool:
+        match = _LOW_SEQ_RE.search(reason)
+        if not match:
+            return False
+        expected = int(match.group(1))
+        received = int(match.group(2))
+        if expected < 1:
+            return False
+        with self._seq_lock:
+            old = self._out_seq
+            self._out_seq = expected
+            self._persist_sequence_state()
+        logger.warning(
+            "Reconciled Centroid trading FIX outbound sequence from %s to %s after peer rejected %s",
+            old,
+            expected,
+            received,
+        )
+        return True
 
     @property
     def configured(self) -> bool:
@@ -73,6 +182,7 @@ class CentroidTradingSession:
                 "conformance_mode": bool(self.settings.centroid_trading_conformance_mode),
                 "outbound_seq": self._out_seq,
                 "inbound_seq": self._in_seq,
+                "sequence_persistent": self._sequence_persistent,
                 "host": self.settings.centroid_trading_host,
                 "port": self.settings.centroid_trading_port,
                 "sender_comp_id": self.settings.centroid_trading_sender_comp_id,
@@ -132,7 +242,9 @@ class CentroidTradingSession:
             try:
                 self._connect_and_run()
             except Exception as exc:
-                self._state.update(status="error", tcp_connected=False, fix_logged_on=False, last_error=self._scrub(str(exc)))
+                error_text = self._scrub(str(exc)) or "unknown error"
+                self._reconcile_expected_out_seq(error_text)
+                self._state.update(status="error", tcp_connected=False, fix_logged_on=False, last_error=error_text)
                 logger.warning("Centroid trading FIX session error: %s", self._state["last_error"])
             self._close_socket()
             if not self._stop.is_set():
@@ -183,7 +295,9 @@ class CentroidTradingSession:
             try:
                 seq = int(fmap.get("34", "0"))
                 if seq >= self._in_seq:
-                    self._in_seq = seq + 1
+                    with self._seq_lock:
+                        self._in_seq = seq + 1
+                        self._persist_sequence_state()
             except ValueError:
                 pass
             if msg_type == "0":
@@ -202,7 +316,9 @@ class CentroidTradingSession:
             elif msg_type == "3":
                 self._state["last_session_reject"] = self._safe_map(fmap, ["45", "371", "372", "373", "58"])
             elif msg_type == "5":
-                raise ConnectionError(self._scrub(fmap.get("58") or "logout") or "logout")
+                reason = self._scrub(fmap.get("58") or "logout") or "logout"
+                self._reconcile_expected_out_seq(reason)
+                raise ConnectionError(reason)
 
     def _execution_report(self, fmap: dict[str, str]) -> dict[str, Any]:
         return self._safe_map(fmap, ["11", "17", "150", "55", "54", "38", "40", "32", "59", "37", "39", "41", "31", "151", "14", "6", "44", "58", "60"])
@@ -211,9 +327,11 @@ class CentroidTradingSession:
         return {tag: self._scrub(fmap[tag]) for tag in tags if tag in fmap}
 
     def _next_out_seq(self) -> int:
-        seq = self._out_seq
-        self._out_seq += 1
-        return seq
+        with self._seq_lock:
+            seq = self._out_seq
+            self._out_seq += 1
+            self._persist_sequence_state()
+            return seq
 
     def _send(self, message: str) -> None:
         if not self._sock:
