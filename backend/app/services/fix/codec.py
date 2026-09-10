@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 SOH = "\x01"
 FIX_VERSION = "FIX.4.4"
+logger = logging.getLogger(__name__)
+_SESSION_TRACE_TYPES = {"A", "0", "1", "2", "3", "4", "5", "j"}
 
 
 def utc_sending_time(dt: datetime | None = None) -> str:
@@ -86,11 +89,36 @@ def parse_fields(raw: str) -> list[tuple[str, str]]:
     return out
 
 
+def _safe_trace_value(value: str | None, limit: int = 180) -> str:
+    """Keep diagnostic values single-line, bounded, and free of FIX delimiters."""
+    if not value:
+        return "-"
+    cleaned = value.replace(SOH, " ").replace("\r", " ").replace("\n", " ")
+    return cleaned[:limit]
+
+
 def field_map(raw: str) -> dict[str, str]:
     """First occurrence wins (non-repeating tags)."""
     out: dict[str, str] = {}
     for tag, val in parse_fields(raw):
         out.setdefault(tag, val)
+
+    # Session-level observability only. Never log the raw FIX payload or
+    # credential tags (553/554). This lets us see a Logout/Reject immediately
+    # before a peer closes the trading socket.
+    msg_type = out.get("35", "")
+    if msg_type in _SESSION_TRACE_TYPES:
+        logger.info(
+            "FIX session inbound type=%s seq=%s sender=%s target=%s text=%s ref_seq=%s ref_type=%s reject_reason=%s",
+            msg_type or "?",
+            _safe_trace_value(out.get("34")),
+            _safe_trace_value(out.get("49")),
+            _safe_trace_value(out.get("56")),
+            _safe_trace_value(out.get("58")),
+            _safe_trace_value(out.get("45")),
+            _safe_trace_value(out.get("372")),
+            _safe_trace_value(out.get("373") or out.get("380")),
+        )
     return out
 
 
