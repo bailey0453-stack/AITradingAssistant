@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 SOH = "\x01"
 FIX_VERSION = "FIX.4.4"
 logger = logging.getLogger(__name__)
-_SESSION_TRACE_TYPES = {"A", "0", "1", "2", "3", "4", "5", "j"}
+_SESSION_TRACE_WARNING_TYPES = {"2", "3", "4", "5", "j"}
+_SESSION_TRACE_INFO_TYPES = {"A", "0", "1"}
 
 
 def utc_sending_time(dt: datetime | None = None) -> str:
@@ -104,12 +105,16 @@ def field_map(raw: str) -> dict[str, str]:
         out.setdefault(tag, val)
 
     # Session-level observability only. Never log the raw FIX payload or
-    # credential tags (553/554). This lets us see a Logout/Reject immediately
-    # before a peer closes the trading socket. Warning is temporary so Railway
-    # surfaces these diagnostics even when INFO application logs are filtered.
+    # credential tags (553/554). Keep actionable recovery/reject traffic at
+    # warning level while routine Logon/Heartbeat/TestRequest traffic is INFO.
     msg_type = out.get("35", "")
-    if msg_type in _SESSION_TRACE_TYPES:
-        logger.warning(
+    log_fn = None
+    if msg_type in _SESSION_TRACE_WARNING_TYPES:
+        log_fn = logger.warning
+    elif msg_type in _SESSION_TRACE_INFO_TYPES:
+        log_fn = logger.info
+    if log_fn is not None:
+        log_fn(
             "FIX session inbound type=%s seq=%s sender=%s target=%s text=%s ref_seq=%s ref_type=%s reject_reason=%s",
             msg_type or "?",
             _safe_trace_value(out.get("34")),
