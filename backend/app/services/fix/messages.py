@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from app.services.fix.codec import encode_message
+from app.services.fix.codec import encode_message, utc_sending_time
 
 
 def build_logon(*, seq_num: int, sender_comp_id: str, target_comp_id: str, username: str | None = None, password: str | None = None, heart_bt_int: int = 30, reset_seq_num: bool = False, sending_time: str | None = None) -> str:
@@ -35,13 +35,14 @@ def build_sequence_reset_gap_fill(*, seq_num: int, new_seq_no: int, sender_comp_
         raise ValueError("seq_num must be positive")
     if new_seq_no <= seq_num:
         raise ValueError("new_seq_no must be greater than seq_num")
+    ts = sending_time or utc_sending_time()
     return encode_message(
         "4",
-        [("43", "Y"), ("123", "Y"), ("36", str(new_seq_no))],
+        [("43", "Y"), ("122", ts), ("123", "Y"), ("36", str(new_seq_no))],
         seq_num=seq_num,
         sender_comp_id=sender_comp_id,
         target_comp_id=target_comp_id,
-        sending_time=sending_time,
+        sending_time=ts,
     )
 
 
