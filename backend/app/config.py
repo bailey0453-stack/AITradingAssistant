@@ -87,6 +87,28 @@ class Settings(BaseSettings):
     centroid_td_enabled: bool = False
     centroid_td_conformance_mode: bool = True
 
+    # Compatibility aliases used by the isolated trading-session service.
+    @property
+    def centroid_trading_host(self): return self.centroid_td_host
+    @property
+    def centroid_trading_port(self): return self.centroid_td_port
+    @property
+    def centroid_trading_username(self): return self.centroid_td_username
+    @property
+    def centroid_trading_password(self): return self.centroid_td_password
+    @property
+    def centroid_trading_sender_comp_id(self): return self.centroid_td_sender_comp_id
+    @property
+    def centroid_trading_target_comp_id(self): return self.centroid_td_target_comp_id
+    @property
+    def centroid_trading_account(self): return self.centroid_td_account
+    @property
+    def centroid_trading_ssl(self): return self.centroid_td_ssl
+    @property
+    def centroid_trading_enabled(self): return self.centroid_td_enabled
+    @property
+    def centroid_trading_conformance_mode(self): return self.centroid_td_conformance_mode
+
     @property
     def centroid_md_configured(self) -> bool:
         return bool(self.centroid_md_host and self.centroid_md_port and self.centroid_md_sender_comp_id and self.centroid_md_target_comp_id)
