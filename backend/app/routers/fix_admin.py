@@ -7,8 +7,12 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.services.admin_auth import require_admin_auth
-from app.services.fix.provider import get_fix_diagnostics, request_fix_security_discovery
-from app.services.fix.trading_session import get_centroid_trading_session
+from app.services.fix.provider import (
+    get_fix_diagnostics,
+    get_trading_diagnostics,
+    request_fix_security_discovery,
+    send_trading_conformance_order,
+)
 
 router = APIRouter(prefix="/admin/research/snapshots", tags=["admin-fix"])
 
@@ -40,9 +44,11 @@ def fix_discover_symbols() -> dict:
 
 @router.get("/trading-status", dependencies=[Depends(require_admin_auth)])
 def trading_status() -> dict:
-    """Return scrubbed GFC trading-session diagnostics."""
-    settings = get_settings()
-    return get_centroid_trading_session(settings).diagnostics()
+    """Return scrubbed diagnostics from the persistent GFC trading session."""
+    try:
+        return get_trading_diagnostics()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/trading-conformance/order", dependencies=[Depends(require_admin_auth)])
@@ -57,17 +63,7 @@ def trading_conformance_order(body: ConformanceOrderRequest) -> dict:
         raise HTTPException(status_code=409, detail="GFC trading session is not fully configured")
     if body.ord_type == "2" and body.price is None:
         raise HTTPException(status_code=422, detail="Limit orders require price")
-    session = get_centroid_trading_session(settings)
     try:
-        order = session.send_conformance_order(
-            symbol=body.symbol,
-            side=body.side,
-            quantity=body.quantity,
-            ord_type=body.ord_type,
-            time_in_force=body.time_in_force,
-            price=body.price,
-            ttl_ms=body.ttl_ms,
-        )
-        return {"sent": True, "mode": "conformance", "order": order, "session": session.diagnostics()}
-    except (ConnectionError, PermissionError, ValueError) as exc:
+        return send_trading_conformance_order(body.model_dump())
+    except (ConnectionError, PermissionError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
