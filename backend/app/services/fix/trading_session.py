@@ -192,6 +192,7 @@ class CentroidTradingSession:
                 self._send_heartbeat(test_req_id=fmap.get("112") or None)
             elif msg_type == "A":
                 self._state.update(status="connected", fix_logged_on=True, last_logon_at=datetime.now(timezone.utc).isoformat())
+                logger.info("Centroid trading FIX logon accepted")
             elif msg_type == "8":
                 self._state["last_execution_report"] = self._execution_report(fmap)
             elif msg_type == "9":
