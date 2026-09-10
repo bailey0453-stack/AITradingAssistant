@@ -29,6 +29,22 @@ def build_test_request(*, seq_num: int, sender_comp_id: str, target_comp_id: str
     return encode_message("1", [("112", test_req_id)], seq_num=seq_num, sender_comp_id=sender_comp_id, target_comp_id=target_comp_id, sending_time=sending_time)
 
 
+def build_sequence_reset_gap_fill(*, seq_num: int, new_seq_no: int, sender_comp_id: str, target_comp_id: str, sending_time: str | None = None) -> str:
+    """SequenceReset-GapFill (35=4) used when requested historical messages cannot be replayed."""
+    if seq_num < 1:
+        raise ValueError("seq_num must be positive")
+    if new_seq_no <= seq_num:
+        raise ValueError("new_seq_no must be greater than seq_num")
+    return encode_message(
+        "4",
+        [("43", "Y"), ("123", "Y"), ("36", str(new_seq_no))],
+        seq_num=seq_num,
+        sender_comp_id=sender_comp_id,
+        target_comp_id=target_comp_id,
+        sending_time=sending_time,
+    )
+
+
 def build_logout(*, seq_num: int, sender_comp_id: str, target_comp_id: str, text: str | None = None, sending_time: str | None = None) -> str:
     fields: list[tuple[str, str]] = []
     if text:
