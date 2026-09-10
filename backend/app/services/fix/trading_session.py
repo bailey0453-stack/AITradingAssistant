@@ -251,6 +251,10 @@ class CentroidTradingSession:
                 time.sleep(5)
 
     def _connect_and_run(self) -> None:
+        # Always reload the durable session state immediately before a new
+        # connection/logon attempt. This guarantees a reconnect uses any
+        # sequence number learned and persisted from the prior rejection.
+        self._load_sequence_state()
         host = self.settings.centroid_trading_host or ""
         port = int(self.settings.centroid_trading_port or 0)
         self._state.update(status="connecting", tcp_connected=False, fix_logged_on=False, last_error=None)
@@ -340,9 +344,11 @@ class CentroidTradingSession:
             self._sock.sendall(message.encode("ascii"))
 
     def _send_logon(self) -> None:
+        seq_num = self._next_out_seq()
+        logger.info("Sending Centroid trading FIX logon with MsgSeqNum=%s", seq_num)
         self._send(
             build_logon(
-                seq_num=self._next_out_seq(),
+                seq_num=seq_num,
                 sender_comp_id=self.settings.centroid_trading_sender_comp_id or "",
                 target_comp_id=self.settings.centroid_trading_target_comp_id or "",
                 username=self.settings.centroid_trading_username,
