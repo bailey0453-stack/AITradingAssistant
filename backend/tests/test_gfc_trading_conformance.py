@@ -4,6 +4,7 @@ import pytest
 
 from app.config import Settings
 from app.services.fix.codec import field_map
+from app.services.fix.messages import build_sequence_reset_gap_fill
 from app.services.fix.trading_messages import build_new_order_single
 from app.services.fix.trading_session import CentroidTradingSession
 
@@ -83,6 +84,33 @@ def test_limit_fok_includes_price_and_tif():
     assert msg["40"] == "2"
     assert msg["59"] == "4"
     assert msg["44"] == "17.25"
+
+
+def test_sequence_reset_gap_fill_contains_required_fix_fields():
+    raw = build_sequence_reset_gap_fill(
+        seq_num=100,
+        new_seq_no=125,
+        sender_comp_id="CLIENT",
+        target_comp_id="GFC",
+        sending_time="20260910-16:00:00.000",
+    )
+    msg = field_map(raw)
+    assert msg["35"] == "4"
+    assert msg["34"] == "100"
+    assert msg["43"] == "Y"
+    assert msg["122"] == "20260910-16:00:00.000"
+    assert msg["123"] == "Y"
+    assert msg["36"] == "125"
+
+
+def test_sequence_reset_gap_fill_must_advance_sequence():
+    with pytest.raises(ValueError, match="greater than seq_num"):
+        build_sequence_reset_gap_fill(
+            seq_num=100,
+            new_seq_no=100,
+            sender_comp_id="CLIENT",
+            target_comp_id="GFC",
+        )
 
 
 def test_trading_session_is_disabled_by_default():

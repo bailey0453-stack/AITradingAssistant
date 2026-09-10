@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from app.database import engine
 from app.services.fix.codec import field_map, split_messages
-from app.services.fix.messages import build_heartbeat, build_logon, build_logout
+from app.services.fix.messages import build_heartbeat, build_logon, build_logout, build_sequence_reset_gap_fill
 from app.services.fix.trading_messages import build_new_order_single, build_order_cancel_request, build_order_status_request
 from app.services.secrets import scrub
 
@@ -54,6 +54,8 @@ class CentroidTradingSession:
             "last_cancel_reject": None,
             "last_business_reject": None,
             "last_session_reject": None,
+            "last_resend_request": None,
+            "last_gap_fill": None,
             "last_order_request": None,
         }
         self._load_sequence_state()
@@ -308,6 +310,10 @@ class CentroidTradingSession:
                 self._state["last_heartbeat_at"] = datetime.now(timezone.utc).isoformat()
             elif msg_type == "1":
                 self._send_heartbeat(test_req_id=fmap.get("112") or None)
+            elif msg_type == "2":
+                self._handle_resend_request(fmap)
+            elif msg_type == "4":
+                self._handle_sequence_reset(fmap)
             elif msg_type == "A":
                 self._state.update(status="connected", fix_logged_on=True, last_logon_at=datetime.now(timezone.utc).isoformat())
                 logger.info("Centroid trading FIX logon accepted")
@@ -323,6 +329,62 @@ class CentroidTradingSession:
                 reason = self._scrub(fmap.get("58") or "logout") or "logout"
                 self._reconcile_expected_out_seq(reason)
                 raise ConnectionError(reason)
+
+    def _handle_resend_request(self, fmap: dict[str, str]) -> None:
+        """Answer ResendRequest with a gap fill when historical outbound messages are unavailable."""
+        try:
+            begin = int(fmap.get("7", "0"))
+            end = int(fmap.get("16", "0"))
+        except ValueError as exc:
+            raise ConnectionError("Invalid FIX ResendRequest sequence range") from exc
+        if begin < 1 or end < 0:
+            raise ConnectionError("Invalid FIX ResendRequest sequence range")
+
+        with self._seq_lock:
+            current_next = max(1, self._out_seq)
+            requested_next = current_next if end == 0 else min(current_next, end + 1)
+            new_seq_no = max(begin + 1, requested_next)
+            if new_seq_no > self._out_seq:
+                self._out_seq = new_seq_no
+                self._persist_sequence_state()
+
+        self._state["last_resend_request"] = {"begin_seq_no": begin, "end_seq_no": end}
+        self._state["last_gap_fill"] = {"msg_seq_num": begin, "new_seq_no": new_seq_no}
+        logger.warning(
+            "Centroid trading FIX ResendRequest begin=%s end=%s; sending gap fill to NewSeqNo=%s",
+            begin,
+            end,
+            new_seq_no,
+        )
+        self._send(
+            build_sequence_reset_gap_fill(
+                seq_num=begin,
+                new_seq_no=new_seq_no,
+                sender_comp_id=self.settings.centroid_trading_sender_comp_id or "",
+                target_comp_id=self.settings.centroid_trading_target_comp_id or "",
+            )
+        )
+
+    def _handle_sequence_reset(self, fmap: dict[str, str]) -> None:
+        try:
+            new_seq_no = int(fmap.get("36", "0"))
+        except ValueError as exc:
+            raise ConnectionError("Invalid FIX SequenceReset NewSeqNo") from exc
+        if new_seq_no < 1:
+            raise ConnectionError("Invalid FIX SequenceReset NewSeqNo")
+        with self._seq_lock:
+            # Gap fills must move forward. A non-gap SequenceReset may reset the
+            # session explicitly, so accept the venue-provided NewSeqNo.
+            if fmap.get("123") == "Y":
+                self._in_seq = max(self._in_seq, new_seq_no)
+            else:
+                self._in_seq = new_seq_no
+            self._persist_sequence_state()
+        logger.warning(
+            "Applied Centroid trading FIX SequenceReset NewSeqNo=%s gap_fill=%s",
+            new_seq_no,
+            fmap.get("123") == "Y",
+        )
 
     def _execution_report(self, fmap: dict[str, str]) -> dict[str, Any]:
         return self._safe_map(fmap, ["11", "17", "150", "55", "54", "38", "40", "32", "59", "37", "39", "41", "31", "151", "14", "6", "44", "58", "60"])
