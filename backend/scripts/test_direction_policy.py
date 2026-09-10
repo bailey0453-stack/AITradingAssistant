@@ -53,24 +53,40 @@ def test_strong_signal_is_actionable_buy():
     assert scored["is_actionable"]
 
 
-def test_critical_event_forces_stand_aside_on_hold():
-    scored = score_signals(_flat_market())
-    assert scored["direction"] == "HOLD"
+def test_event_inside_one_hour_freezes_even_directional_signal():
+    scored = score_signals(_bullish_market())
     signal, reason = apply_stand_aside(
         scored,
-        upcoming_events=[{"event": "US CPI", "importance": "high", "hours_away": 6.0}],
+        upcoming_events=[{"event": "US CPI", "importance": "high", "hours_away": 0.5}],
     )
     assert signal["direction"] == "NO_TRADE", signal["direction"]
-    assert reason and "CPI" in reason
+    assert signal["is_actionable"] is False
+    assert signal["confidence"] <= 25.0
+    assert signal["risk_level"] == "high"
+    assert reason and "CPI" in reason and "recomputed" in reason
 
 
-def test_critical_event_keeps_directional_bias():
+def test_event_one_to_four_hours_keeps_lean_but_suspends_actionability():
+    scored = score_signals(_bullish_market())
+    signal, reason = apply_stand_aside(
+        scored,
+        upcoming_events=[{"event": "US PPI", "importance": "high", "hours_away": 2.0}],
+    )
+    assert signal["direction"] == "BUY_USD"
+    assert signal["is_actionable"] is False
+    assert signal["confidence"] <= 45.0
+    assert signal["risk_level"] == "high"
+    assert reason and "PPI" in reason
+
+
+def test_event_beyond_four_hours_does_not_override_direction():
     scored = score_signals(_bullish_market())
     signal, reason = apply_stand_aside(
         scored,
         upcoming_events=[{"event": "FOMC", "importance": "high", "hours_away": 12.0}],
     )
     assert signal["direction"] == "BUY_USD"
+    assert signal["is_actionable"] is True
     assert reason is None
 
 
@@ -96,8 +112,9 @@ def main() -> int:
     tests = [
         test_flat_market_is_hold_not_no_trade,
         test_strong_signal_is_actionable_buy,
-        test_critical_event_forces_stand_aside_on_hold,
-        test_critical_event_keeps_directional_bias,
+        test_event_inside_one_hour_freezes_even_directional_signal,
+        test_event_one_to_four_hours_keeps_lean_but_suspends_actionability,
+        test_event_beyond_four_hours_does_not_override_direction,
         test_direction_reasoning_includes_support_and_oppose,
         test_conviction_tiers,
     ]
