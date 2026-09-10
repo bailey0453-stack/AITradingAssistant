@@ -5,7 +5,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
 from app.services.admin_auth import require_admin_auth
 from app.services.fix.provider import (
     get_fix_diagnostics,
@@ -53,14 +52,12 @@ def trading_status() -> dict:
 
 @router.post("/trading-conformance/order", dependencies=[Depends(require_admin_auth)])
 def trading_conformance_order(body: ConformanceOrderRequest) -> dict:
-    """Send one explicitly requested demo/conformance order only."""
-    settings = get_settings()
-    if not settings.centroid_td_conformance_mode:
-        raise HTTPException(status_code=403, detail="GFC trading conformance mode is disabled")
-    if not settings.centroid_td_enabled:
-        raise HTTPException(status_code=409, detail="GFC trading session is disabled")
-    if not settings.centroid_td_configured:
-        raise HTTPException(status_code=409, detail="GFC trading session is not fully configured")
+    """Send one explicitly requested demo/conformance order only.
+
+    Vercel proxies this call to the Railway FIX worker; GFC trading credentials
+    therefore stay on the persistent worker and do not need to be duplicated in
+    the serverless application.
+    """
     if body.ord_type == "2" and body.price is None:
         raise HTTPException(status_code=422, detail="Limit orders require price")
     try:
