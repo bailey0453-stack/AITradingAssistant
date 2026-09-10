@@ -3,7 +3,7 @@
 Always express a directional bias (BUY_USD, SELL_USD, or HOLD) from weighted
 evidence. Reserve ``NO_TRADE`` for exceptional stand-aside cases only:
 
-- Imminent high-impact macro event with a neutral HOLD bias (two-way risk).
+- A high-impact macro release inside the immediate event-freeze window.
 - Market-data unavailable (handled in the analysis router, not here).
 
 Direction (best estimate) and confidence (conviction) stay separate; ``NO_TRADE``
@@ -15,8 +15,13 @@ from __future__ import annotations
 
 from app.services.signal_weights import DIRECTION_EPSILON, TRADE_THRESHOLD
 
-# Hours before a high-impact release that can force stand-aside when bias is HOLD.
-_CRITICAL_EVENT_HOURS = 24.0
+# Event-aware guardrails. Inside one hour of a high-impact release, the system
+# must not publish an actionable directional plan because the release can create
+# a discontinuous price move that recent technical/momentum inputs cannot predict.
+_EVENT_FREEZE_HOURS = 1.0
+# From one to four hours ahead we still allow a directional lean, but suppress
+# actionability and sharply reduce confidence/target authority.
+_EVENT_CAUTION_HOURS = 4.0
 
 
 def conviction_tier(net_score: float) -> str:
@@ -39,8 +44,9 @@ def _critical_events_within_hours(
         if str(ev.get("importance", "")).lower() != "high":
             continue
         h = ev.get("hours_away")
-        if h is not None and float(h) <= hours:
+        if h is not None and 0.0 <= float(h) <= hours:
             out.append(ev)
+    out.sort(key=lambda ev: float(ev.get("hours_away") or 0.0))
     return out
 
 
@@ -49,25 +55,47 @@ def apply_stand_aside(
     *,
     upcoming_events: list[dict] | None = None,
 ) -> tuple[dict, str | None]:
-    """Override to ``NO_TRADE`` only when stand-aside is compelled.
+    """Apply event-risk guardrails to a directional signal.
+
+    High-impact scheduled releases are treated as discontinuity risk rather than
+    ordinary volatility. Within one hour, any directional recommendation is
+    frozen to ``NO_TRADE`` until the release clears. Between one and four hours,
+    the directional lean may remain visible, but it is explicitly non-actionable
+    and confidence is capped.
 
     Returns ``(signal, stand_aside_reason)`` — reason is ``None`` when the
-    directional bias stands.
+    directional bias stands without an event override.
     """
-    sb = signal.get("signal_breakdown") or {}
-    direction = signal.get("direction")
+    critical_now = _critical_events_within_hours(upcoming_events, _EVENT_FREEZE_HOURS)
+    if critical_now:
+        event = critical_now[0]
+        name = event.get("event") or "major macro release"
+        hours = event.get("hours_away")
+        when = f"in ~{hours:.1f}h" if hours is not None else "imminently"
+        reason = (
+            f"High-impact event freeze ({name}, {when}) — scheduled release risk "
+            "can overwhelm the current technical/momentum signal. Stand aside until "
+            "the actual release is available and the forecast is recomputed."
+        )
+        return _as_no_trade(signal, reason), reason
 
-    if direction == "HOLD":
-        critical = _critical_events_within_hours(upcoming_events, _CRITICAL_EVENT_HOURS)
-        if critical:
-            name = critical[0].get("event") or "major macro release"
-            hours = critical[0].get("hours_away")
-            when = f"in ~{hours:.0f}h" if hours is not None else "imminently"
-            reason = (
-                f"Imminent high-impact event ({name}, {when}) with neutral bias — "
-                f"stand aside until the release clears two-way risk."
-            )
-            return _as_no_trade(signal, reason), reason
+    caution = _critical_events_within_hours(upcoming_events, _EVENT_CAUTION_HOURS)
+    if caution:
+        event = caution[0]
+        name = event.get("event") or "major macro release"
+        hours = event.get("hours_away")
+        when = f"in ~{hours:.1f}h" if hours is not None else "soon"
+        reason = (
+            f"High-impact event caution ({name}, {when}) — directional lean retained, "
+            "but actionability is suspended and confidence is reduced until the event clears."
+        )
+        out = dict(signal)
+        out["is_actionable"] = False
+        out["stand_aside"] = False
+        out["stand_aside_reason"] = reason
+        out["confidence"] = round(min(float(out.get("confidence") or 0.0), 45.0), 1)
+        out["risk_level"] = "high"
+        return out, reason
 
     return signal, None
 
@@ -80,12 +108,13 @@ def _as_no_trade(signal: dict, reason: str) -> dict:
     out["is_actionable"] = False
     out["stand_aside"] = True
     out["stand_aside_reason"] = reason
+    out["risk_level"] = "high"
     # No trade plan without a committed bias.
     for key in ("target", "stretch_target", "stop", "invalidation_level"):
         out[key] = None
-    out["expected_move"] = "flat / range-bound"
+    out["expected_move"] = "event-risk / two-way"
     conf = float(out.get("confidence") or 0.0)
-    out["confidence"] = round(min(conf, 35.0), 1)
+    out["confidence"] = round(min(conf, 25.0), 1)
     return out
 
 
@@ -144,6 +173,8 @@ def build_direction_reasoning(
         summary_parts.append(
             f"Bias only — net score {net:+.2g} is below the {TRADE_THRESHOLD:g} action threshold."
         )
+    elif direction in {"BUY_USD", "SELL_USD"} and stand_aside_reason:
+        summary_parts.append("Directional lean only — scheduled-event risk suspends actionability.")
     if stand_aside_reason:
         summary_parts.append(stand_aside_reason)
 
