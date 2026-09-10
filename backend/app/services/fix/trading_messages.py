@@ -13,7 +13,13 @@ def _utc_timestamp() -> str:
 
 
 def new_cl_ord_id(prefix: str = "CONF") -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+    """Return a Centroid-safe ClOrdID using only documented characters.
+
+    Centroid v0.16.9 documents A-Z, a-z, '.', '-', '_' for tag 11. UUID hex
+    normally contains digits, so translate 0-9 to letters before truncating.
+    """
+    token = uuid.uuid4().hex.translate(str.maketrans("0123456789", "ghijklmnop"))[:12]
+    return f"{prefix}-{token}"
 
 
 def build_new_order_single(
