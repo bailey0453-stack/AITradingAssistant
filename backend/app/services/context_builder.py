@@ -24,6 +24,8 @@ from app.services.market_data import MarketData
 
 logger = logging.getLogger(__name__)
 
+_MOMENTUM_WINDOWS_MINUTES = (5, 15, 30, 60)
+
 
 def _safe(db_call, default):
     try:
@@ -84,6 +86,7 @@ def recent_market_rows(db: Session, limit: int = 2) -> list[MarketSnapshot]:
     return _safe(
         lambda: db.execute(
             select(MarketSnapshot)
+            .where(MarketSnapshot.pair == "USDMXN")
             .order_by(MarketSnapshot.created_at.desc())
             .limit(limit)
         ).scalars().all(),
@@ -128,11 +131,33 @@ def build_context(
     }
 
 
-def _compute_momentum(db: Session) -> dict | None:
-    """USD/MXN change between the two most recent stored snapshots.
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-    Returns None until at least two snapshots exist, so momentum never fires on
-    a synthetic baseline — only on real consecutive observations.
+
+def _snapshot_at_or_before(db: Session, cutoff: datetime) -> MarketSnapshot | None:
+    return _safe(
+        lambda: db.execute(
+            select(MarketSnapshot)
+            .where(MarketSnapshot.pair == "USDMXN")
+            .where(MarketSnapshot.usdmxn.is_not(None))
+            .where(MarketSnapshot.created_at <= cutoff)
+            .order_by(MarketSnapshot.created_at.desc())
+            .limit(1)
+        ).scalars().first(),
+        None,
+    )
+
+
+def _compute_momentum(db: Session) -> dict | None:
+    """Build real 5m/15m/30m/60m USD/MXN momentum from stored snapshots.
+
+    The legacy consecutive-snapshot change is kept for compatibility, while the
+    ``windows`` block gives the tactical engine fixed-horizon changes. A window
+    is omitted when the nearest historical snapshot is too old to represent that
+    horizon, preventing a stale quote from masquerading as fresh momentum.
     """
     snaps = recent_market_rows(db, limit=2)
     if len(snaps) < 2:
@@ -140,10 +165,49 @@ def _compute_momentum(db: Session) -> dict | None:
     latest, prev = snaps[0], snaps[1]
     if latest.usdmxn is None or prev.usdmxn is None:
         return None
+
+    latest_at = _aware(latest.created_at) or datetime.now(timezone.utc)
+    windows: dict[str, dict] = {}
+    for minutes in _MOMENTUM_WINDOWS_MINUTES:
+        baseline = _snapshot_at_or_before(db, latest_at - timedelta(minutes=minutes))
+        if baseline is None or baseline.usdmxn is None:
+            continue
+        baseline_at = _aware(baseline.created_at)
+        if baseline_at is None:
+            continue
+        actual_minutes = max(0.0, (latest_at - baseline_at).total_seconds() / 60.0)
+        # Fixed-horizon signal should not silently use a many-hours-old baseline.
+        if actual_minutes > minutes * 2.25:
+            continue
+        change = float(latest.usdmxn) - float(baseline.usdmxn)
+        pct = (change / float(baseline.usdmxn) * 100.0) if baseline.usdmxn else None
+        windows[f"{minutes}m"] = {
+            "change": round(change, 4),
+            "change_pct": round(pct, 4) if pct is not None else None,
+            "from": float(baseline.usdmxn),
+            "to": float(latest.usdmxn),
+            "minutes": round(actual_minutes, 1),
+            "from_at": baseline_at.isoformat(),
+            "to_at": latest_at.isoformat(),
+        }
+
+    acceleration = None
+    w5 = windows.get("5m")
+    w15 = windows.get("15m")
+    if w5 and w15 and w5.get("minutes") and w15.get("minutes"):
+        rate5 = float(w5["change"]) / float(w5["minutes"])
+        rate15 = float(w15["change"]) / float(w15["minutes"])
+        acceleration = round(rate5 - rate15, 6)
+
     return {
-        "change": round(latest.usdmxn - prev.usdmxn, 4),
-        "from": prev.usdmxn,
-        "to": latest.usdmxn,
+        "change": round(float(latest.usdmxn) - float(prev.usdmxn), 4),
+        "from": float(prev.usdmxn),
+        "to": float(latest.usdmxn),
+        "from_at": (_aware(prev.created_at) or latest_at).isoformat(),
+        "to_at": latest_at.isoformat(),
+        "windows": windows,
+        "acceleration_per_minute": acceleration,
+        "source": "stored_market_snapshots",
     }
 
 
@@ -280,5 +344,5 @@ def build_timeline(db: Session, context: dict) -> list[dict]:
 
 
 def _signal_verb(old: str, new: str) -> str:
-    rank = {"SELL_USD": -1, "NO_TRADE": 0, "BUY_USD": 1}
+    rank = {"SELL_USD": -1, "NO_TRADE": 0, "HOLD": 0, "BUY_USD": 1}
     return "upgraded" if rank.get(new, 0) > rank.get(old, 0) else "downgraded"
