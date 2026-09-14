@@ -11,8 +11,8 @@ from app import __version__
 
 # Overall app/model release (mirrors app.__version__).
 MODEL_VERSION = __version__
-# Explainable reasoning engine (Phase 3.5 lineage).
-REASONING_ENGINE_VERSION = "3.5"
+# Explainable reasoning engine (Phase 3.5 lineage plus tactical 2-4h layer).
+REASONING_ENGINE_VERSION = "3.6"
 # Named signal-weighting profile (see services/signal_weights.py).
 WEIGHTING_PROFILE = "default-v1"
 # Historical / evidence engine (Phase 5 lineage).
