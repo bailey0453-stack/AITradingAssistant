@@ -1,19 +1,15 @@
-"""Scheduled (cron) jobs.
+"""Scheduled USD/MXN analysis jobs.
 
-The hourly USD/MXN job lets the system generate and store paper recommendations
-on its own — even when nobody opens the dashboard — and score any prior
-recommendations that have come due.
+The fast intraday job records market snapshots and paper recommendations every
+five minutes while FX is open so 5m/15m/30m/60m tactical momentum can be
+measured. The legacy hourly endpoint remains for compatibility and heavier
+research-repair work.
 
-Quota / safety rules baked in here:
-
-- **Market-hours aware.** When the FX market is closed (weekend / holiday) we
-  never request a live quote (no API quota burned) and we do not generate a new
-  recommendation. We *do* still evaluate due recommendations (read-only).
-- **No duplicates.** At most one job-generated recommendation per clock hour for
-  a given pair + model version.
-- **No fabricated data.** When live data is unavailable and there is no fresh
-  cached real quote, we skip generation (stale-fallback safety is enforced by
-  the analysis pipeline itself).
+Safety rules:
+- never fetch gated market data while FX is closed;
+- de-duplicate recommendations inside the requested cadence bucket;
+- never turn unavailable/fabricated data into an actionable recommendation;
+- always evaluate due paper outcomes, even when generation is skipped.
 """
 
 from __future__ import annotations
@@ -35,16 +31,20 @@ from app.versions import MODEL_VERSION
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "hourly-usdmxn-analysis"
+INTRADAY_JOB_NAME = "intraday-usdmxn-analysis"
 PAIR = "USDMXN"
-SCHEDULE_CRON = "0 * * * *"  # top of every hour (UTC), see vercel.json
+SCHEDULE_CRON = "0 * * * *"
+INTRADAY_SCHEDULE_CRON = "*/5 * * * *"
 
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _hour_bucket(dt: datetime) -> datetime:
-    return _aware(dt).replace(minute=0, second=0, microsecond=0)
+def _bucket(dt: datetime, minutes: int) -> datetime:
+    dt = _aware(dt)
+    minute = (dt.minute // minutes) * minutes
+    return dt.replace(minute=minute, second=0, microsecond=0)
 
 
 def _latest_reco(db: Session, pair: str) -> Optional[Recommendation]:
@@ -56,29 +56,25 @@ def _latest_reco(db: Session, pair: str) -> Optional[Recommendation]:
     ).scalars().first()
 
 
-def _existing_this_hour(
-    db: Session, pair: str, model_version: str, now: datetime
+def _existing_in_bucket(
+    db: Session, pair: str, model_version: str, now: datetime, bucket_minutes: int
 ) -> Optional[int]:
-    """Return the id of any recommendation already stored this clock hour.
-
-    Robust against SQLite's tz handling by comparing hour buckets in Python.
-    """
-    bucket = _hour_bucket(now)
+    """Return a recommendation already stored in the cadence bucket."""
+    target = _bucket(now, bucket_minutes)
     rows = db.execute(
         select(Recommendation)
         .where(Recommendation.pair == pair)
         .where(Recommendation.model_version == model_version)
         .order_by(Recommendation.created_at.desc())
-        .limit(24)
+        .limit(max(24, int(180 / bucket_minutes)))
     ).scalars().all()
     for reco in rows:
-        if reco.created_at and _hour_bucket(reco.created_at) == bucket:
+        if reco.created_at and _bucket(reco.created_at, bucket_minutes) == target:
             return reco.id
     return None
 
 
 def _latest_snapshot_source(db: Session) -> Optional[str]:
-    # Lazy import avoids a router<->service import cycle at module load.
     from app.routers.market import _latest_snapshot
 
     latest = _latest_snapshot(db)
@@ -97,20 +93,22 @@ def _record_run(db: Session, summary: dict) -> None:
             skipped_reason=summary.get("skipped_reason"),
         ))
         db.commit()
-    except Exception:  # noqa: BLE001 - logging the run must never fail the job
+    except Exception:  # noqa: BLE001
         logger.exception("Failed to persist JobRun")
         db.rollback()
 
 
-def run_hourly_usdmxn_job(
-    db: Session, settings: Optional[Settings] = None, *, now: Optional[datetime] = None
+def _run_usdmxn_job(
+    db: Session,
+    settings: Settings,
+    *,
+    now: datetime,
+    job_name: str,
+    bucket_minutes: int,
 ) -> dict:
-    """Run the hourly USD/MXN analysis job and return a job summary."""
-    settings = settings or get_settings()
-    now = _aware(now or datetime.now(timezone.utc))
-
     summary: dict = {
-        "job": JOB_NAME,
+        "job": job_name,
+        "cadence_minutes": bucket_minutes,
         "ran_at": now.isoformat(),
         "created_recommendation": False,
         "recommendation_id": None,
@@ -120,7 +118,6 @@ def run_hourly_usdmxn_job(
         "skipped_reason": None,
     }
 
-    # Market state WITHOUT any provider fetch — pure, so it never burns quota.
     from app.routers.market import _market_calendar
 
     refresh_secs = cache_manager.get_refresh_seconds("usdmxn", settings)
@@ -129,15 +126,13 @@ def run_hourly_usdmxn_job(
     )
     summary["market_status"] = state.market_status
 
-    # Always score due prior recommendations first (read-only; no quota).
     try:
         ev = evaluate_due(db, now=now)
         summary["evaluated_outcomes_count"] = int(ev.get("evaluated", 0))
     except Exception:  # noqa: BLE001
-        logger.exception("evaluate_due failed during hourly job")
+        logger.exception("evaluate_due failed during %s", job_name)
         db.rollback()
 
-    # Market closed (weekend/holiday): never fetch live; never generate.
     if not state.is_open:
         summary["market_source"] = _latest_snapshot_source(db) or "none"
         summary["skipped_reason"] = (
@@ -146,24 +141,20 @@ def run_hourly_usdmxn_job(
         _record_run(db, summary)
         return summary
 
-    # De-dupe: at most one job recommendation per clock hour / pair / model.
-    if _existing_this_hour(db, PAIR, MODEL_VERSION, now) is not None:
+    if _existing_in_bucket(db, PAIR, MODEL_VERSION, now, bucket_minutes) is not None:
         summary["market_source"] = _latest_snapshot_source(db) or "cached"
-        summary["skipped_reason"] = "duplicate_this_hour"
+        summary["skipped_reason"] = "duplicate_cadence_bucket"
         _record_run(db, summary)
         return summary
 
-    # Generate via the same pipeline as /analysis/usdmxn (one fetch at most,
-    # respecting refresh limits; stores a paper recommendation when tradeable
-    # data exists).
     from app.routers.analysis import analyze_usdmxn
 
-    before_id = (_latest_reco(db, PAIR) or None)
-    before_id = before_id.id if before_id else 0
+    before = _latest_reco(db, PAIR)
+    before_id = before.id if before else 0
     try:
         payload = analyze_usdmxn(db)
     except Exception:  # noqa: BLE001
-        logger.exception("hourly analysis failed")
+        logger.exception("%s analysis failed", job_name)
         db.rollback()
         summary["skipped_reason"] = "analysis_error"
         _record_run(db, summary)
@@ -171,7 +162,6 @@ def run_hourly_usdmxn_job(
 
     market = payload.get("market") or {}
     summary["market_source"] = market.get("source")
-
     if payload.get("market_data_unavailable"):
         summary["market_source"] = market.get("source") or "unavailable"
         summary["skipped_reason"] = "market_data_unavailable"
@@ -185,8 +175,43 @@ def run_hourly_usdmxn_job(
     else:
         summary["skipped_reason"] = "no_recommendation_stored"
 
+    momentum = ((payload.get("signal_breakdown") or {}).get("intraday_momentum") or {})
+    summary["momentum_windows"] = momentum.get("windows") or {}
+    summary["tactical_momentum_score"] = momentum.get("tactical_score")
     _record_run(db, summary)
     return summary
+
+
+def run_intraday_usdmxn_job(
+    db: Session, settings: Optional[Settings] = None, *, now: Optional[datetime] = None
+) -> dict:
+    """Generate tactical snapshots/recommendations every five minutes."""
+    settings = settings or get_settings()
+    return _run_usdmxn_job(
+        db,
+        settings,
+        now=_aware(now or datetime.now(timezone.utc)),
+        job_name=INTRADAY_JOB_NAME,
+        bucket_minutes=5,
+    )
+
+
+def run_hourly_usdmxn_job(
+    db: Session, settings: Optional[Settings] = None, *, now: Optional[datetime] = None
+) -> dict:
+    """Compatibility hourly generation path.
+
+    The five-minute job normally creates a row at the top of the hour first, so
+    this call safely de-duplicates against the same hourly bucket.
+    """
+    settings = settings or get_settings()
+    return _run_usdmxn_job(
+        db,
+        settings,
+        now=_aware(now or datetime.now(timezone.utc)),
+        job_name=JOB_NAME,
+        bucket_minutes=60,
+    )
 
 
 def _serialize_run(run: Optional[JobRun]) -> Optional[dict]:
@@ -213,15 +238,16 @@ def job_status(db: Session, now: Optional[datetime] = None) -> dict:
     last_reco = db.execute(
         select(Recommendation).order_by(Recommendation.created_at.desc()).limit(1)
     ).scalars().first()
-    next_run = _hour_bucket(now) + timedelta(hours=1)
+    next_fast = _bucket(now, 5) + timedelta(minutes=5)
     return {
-        "job": JOB_NAME,
-        "schedule": "hourly",
-        "schedule_cron": SCHEDULE_CRON,
+        "job": INTRADAY_JOB_NAME,
+        "schedule": "every 5 minutes",
+        "schedule_cron": INTRADAY_SCHEDULE_CRON,
+        "hourly_compatibility_cron": SCHEDULE_CRON,
         "last_scheduled_run": _serialize_run(last_run),
         "last_recommendation_at": (
             last_reco.created_at.isoformat()
             if last_reco and last_reco.created_at else None
         ),
-        "next_expected_run": next_run.isoformat(),
+        "next_expected_run": next_fast.isoformat(),
     }

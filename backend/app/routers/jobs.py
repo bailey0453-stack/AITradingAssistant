@@ -16,7 +16,11 @@ from app.services.fx_options_repair import repair_fx_options
 from app.services.intraday_repair import repair_intraday_usdmxn
 from app.services.mexico_yield_repair import repair_mexico_yields
 from app.services.rate_repair import repair_policy_rates
-from app.services.scheduled_jobs import job_status, run_hourly_usdmxn_job
+from app.services.scheduled_jobs import (
+    job_status,
+    run_hourly_usdmxn_job,
+    run_intraday_usdmxn_job,
+)
 from app.services.research_import_service import cron_daily_research_update, cron_research_import_continue
 
 logger = logging.getLogger(__name__)
@@ -54,9 +58,15 @@ def _safe_repair(db: Session, label: str, fn) -> dict:
         return {"ok": False, "reason": str(exc)}
 
 
+@router.api_route("/intraday-usdmxn-analysis", methods=["POST", "GET"], dependencies=[Depends(require_cron_auth)])
+def intraday_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
+    """Generate a fresh tactical USD/MXN snapshot/recommendation every five minutes."""
+    return run_intraday_usdmxn_job(db)
+
+
 @router.api_route("/hourly-usdmxn-analysis", methods=["POST", "GET"], dependencies=[Depends(require_cron_auth)])
 def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
-    """Refresh research inputs first, then generate the hourly forecast."""
+    """Refresh heavier research inputs, then run the compatibility hourly job."""
     repairs = {
         "policy_rate_repair": _safe_repair(db, "Policy-rate", repair_policy_rates),
         "mexico_yield_repair": _safe_repair(db, "Mexico-yield", repair_mexico_yields),

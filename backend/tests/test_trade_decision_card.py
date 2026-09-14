@@ -19,6 +19,7 @@ def _base(**overrides):
         "topline_forecast": {
             "now": 17.3375,
             "horizons": [
+                {"horizon": "2 hours", "expected_rate": 17.3150, "bias": "SELL_USD"},
                 {"horizon": "4 hours", "expected_rate": 17.2942, "bias": "SELL_USD"},
                 {"horizon": "End of day", "expected_rate": 17.2681, "bias": "SELL_USD"},
             ],
@@ -38,6 +39,10 @@ def _base(**overrides):
         },
         "context": {"upcoming_events": []},
         "provenance": {},
+        "weighted_contributions": [
+            {"label": "DXY", "direction": "MXN", "detail": "DXY momentum fading"},
+            {"label": "USD/MXN Momentum", "direction": "MXN", "detail": "intraday rejection"},
+        ],
     }
     payload.update(overrides)
     return payload
@@ -82,6 +87,45 @@ def test_grade_a_positive_ev_no_event_returns_trade():
     assert card["prediction"] == "USD/MXN LOWER"
 
 
+def test_tactical_layer_surfaces_two_to_four_hour_mxn_buy_setup():
+    card = build_trade_decision_card(_base())
+    assert card["predicted_2h"] == 17.315
+    assert card["predicted_4h"] == 17.2942
+    assert card["tactical_bias"] == "BUY MXN / SELL USD"
+    assert card["tactical_status"] == "STRONG BUY MXN"
+    assert card["expected_move_cents"] > 3.0
+    assert card["tactical_target_2c"] == 17.3175
+    assert card["tactical_target_3c"] == 17.3075
+    assert card["tactical_invalidation"] == 17.3575
+    assert "Tactical 2-4h: STRONG BUY MXN" in card["why"]
+    assert "DXY" in card["why"]
+
+
+def test_tactical_layer_calls_no_edge_when_move_is_under_two_cents():
+    card = build_trade_decision_card(
+        _base(
+            topline_forecast={
+                "now": 17.3375,
+                "horizons": [
+                    {"horizon": "2 hours", "expected_rate": 17.3300, "bias": "SELL_USD"},
+                    {"horizon": "4 hours", "expected_rate": 17.3250, "bias": "SELL_USD"},
+                ],
+                "long_usd_bailout": 17.2681,
+                "short_usd_bailout": 17.4068,
+            },
+        )
+    )
+    assert card["tactical_status"] == "NO EDGE"
+    assert card["expected_move_cents"] == 1.25
+
+
+def test_tactical_layer_flags_event_risk_without_hiding_direction():
+    card = build_trade_decision_card(_base(context={"upcoming_events": [_event(1.5)]}))
+    assert card["action"] == "WAIT"
+    assert card["tactical_status"] == "HIGH RISK / EVENT"
+    assert card["tactical_bias"] == "BUY MXN / SELL USD"
+
+
 def test_high_impact_event_inside_four_hours_changes_trade_to_wait():
     base = _base()
     assert build_trade_decision_card(base)["action"] == "TRADE"
@@ -117,6 +161,7 @@ def test_stale_required_data_changes_trade_to_wait():
     assert build_trade_decision_card(base)["action"] == "TRADE"
     card = build_trade_decision_card(_base(market_state={"is_open": True, "is_stale": True, "cached": True, "age_minutes": 999}))
     assert card["action"] == "WAIT"
+    assert card["tactical_status"] == "HIGH RISK / STALE DATA"
 
 
 def test_invalidation_level_returns_exit():
@@ -162,6 +207,7 @@ def test_buy_usd_shows_higher_prediction():
     )
     assert card["prediction"] == "USD/MXN HIGHER"
     assert card["bias"] == "BUY USD / SELL MXN"
+    assert card["tactical_bias"] == "SELL MXN / BUY USD"
 
 
 def test_wait_still_displays_directional_forecast_when_numeric_forecast_exists():
@@ -181,6 +227,7 @@ def test_wait_still_displays_directional_forecast_when_numeric_forecast_exists()
     assert card["has_directional_forecast"] is True
     assert card["prediction"] == "USD/MXN LOWER"
     assert card["predicted_4h"] == 17.2942
+    assert card["tactical_bias"] == "BUY MXN / SELL USD"
 
 
 def test_range_bound_wait_uses_neutral_headline_even_with_raw_sell_signal():
@@ -214,6 +261,7 @@ def test_range_bound_wait_uses_neutral_headline_even_with_raw_sell_signal():
     assert card["has_directional_forecast"] is False
     assert card["predicted_4h"] is None
     assert card["predicted_eod"] is None
+    assert card["tactical_status"] == "NO EDGE"
 
 
 def test_trade_card_surfaces_measured_calibration_without_changing_decision():

@@ -12,11 +12,13 @@ Convention: USD/MXN is "pesos per 1 USD" i.e. higher number = stronger USD.
 
 from __future__ import annotations
 
+from app.services.intraday_momentum import aggregate as aggregate_intraday_momentum
 from app.services.market_data import MarketData
 from app.services.signal_weights import score_signals
 
 # Move sizing as a fraction of current price (trade construction, not signal
-# weighting — kept here intentionally).
+# weighting — kept here intentionally). The separate tactical card handles the
+# user's 0.02/0.03 MXN intraday objectives without changing legacy trade levels.
 _TARGET_PCT = 0.005
 _STRETCH_PCT = 0.011
 _STOP_PCT = 0.004
@@ -47,11 +49,12 @@ def compute_signal(
     weights: dict | None = None,
 ) -> dict:
     """Score the market via the weighting engine and attach trade levels."""
+    tactical_momentum = aggregate_intraday_momentum(momentum)
     scored = score_signals(
         market,
         news=news,
         released_events=released_events,
-        momentum=momentum,
+        momentum=tactical_momentum,
         weights=weights,
     )
     direction = scored["direction"]
@@ -84,6 +87,7 @@ def compute_signal(
         "stop": stop,
         "invalidation_level": stop,
         "expected_move": _expected_move(price, target, direction),
+        "intraday_momentum": tactical_momentum,
         # Weighted-engine breakdown (for debugging / dashboard).
         "weighted_contributions": scored["weighted_contributions"],
         "conflicting_signals": scored["conflicting_signals"],
@@ -97,5 +101,6 @@ def compute_signal(
             "direction_epsilon": scored.get("direction_epsilon"),
             "weights_version": scored["weights_version"],
             "weights": scored["weights"],
+            "intraday_momentum": tactical_momentum,
         },
     }
