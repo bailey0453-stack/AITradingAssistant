@@ -1,7 +1,9 @@
 """Top-of-dashboard trade decision card (decision support only).
 
-Computes TRADE / WAIT / EXIT·INVALIDATED from explicit evidence gates.
-Does **not** copy ``should_trade_now`` from decision_quality.
+Computes TRADE / WAIT / EXIT·INVALIDATED from explicit evidence gates and adds a
+separate 2-4 hour tactical assessment for users looking for small USD/MXN moves.
+The tactical layer is additive: it never places trades and it does not bypass the
+existing grade / EV / event-risk guardrails.
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ _ACTIONABLE = {"BUY_USD", "SELL_USD"}
 _TRADE_GRADES = {"A", "A+"}
 _MIN_CONFIDENCE = 70.0
 _EVENT_BLOCK_WINDOW_HOURS = 4.0
+_TACTICAL_MIN_MOVE = 0.02
+_TACTICAL_STRONG_MOVE = 0.03
 
 
 def _f(v: Any) -> Optional[float]:
@@ -157,9 +161,125 @@ def _current_calibration(confidence: float) -> tuple[dict | None, str | None]:
         cal = current_calibration.calibration_for_confidence(confidence, horizon="4h")
         return cal, current_calibration.calibration_text(cal)
     except Exception:
-        # Calibration is explanatory only. A research DB hiccup must never alter
-        # or prevent the trading decision itself.
         return None, None
+
+
+def _driver_summary(payload: dict) -> list[str]:
+    """Return concise strongest current drivers with provenance already in payload."""
+    ranked = payload.get("weighted_contributions") or []
+    drivers: list[str] = []
+    for item in ranked[:4]:
+        label = item.get("label") or item.get("key")
+        direction = item.get("direction")
+        detail = item.get("detail")
+        if not label:
+            continue
+        bit = str(label)
+        if direction in {"USD", "MXN"}:
+            bit += f" -> {direction}"
+        if detail:
+            bit += f" ({detail})"
+        drivers.append(bit)
+    if drivers:
+        return drivers
+    for item in (payload.get("key_drivers") or [])[:4]:
+        if item:
+            drivers.append(str(item))
+    return drivers
+
+
+def _tactical_assessment(
+    *,
+    direction: Optional[str],
+    spot: Optional[float],
+    rate_2h: Optional[float],
+    rate_4h: Optional[float],
+    fresh_ok: bool,
+    blocking_event: Optional[dict],
+    confidence: float,
+    drivers: list[str],
+) -> dict:
+    """Assess whether the 2-4h path contains a usable 2-3 cent move.
+
+    This is intentionally separate from the main TRADE gate. It answers the
+    user's tactical question even when grade/EV/history rules still say WAIT.
+    """
+    predicted = rate_4h if rate_4h is not None else rate_2h
+    if spot is None or predicted is None:
+        return {
+            "status": "NO EDGE",
+            "bias": "NEUTRAL",
+            "prediction": "No numeric 2-4h forecast",
+            "expected_move": None,
+            "expected_move_cents": None,
+            "target_2c": None,
+            "target_3c": None,
+            "invalidation": None,
+            "confidence": round(confidence, 1),
+            "drivers": drivers,
+            "reason": "No numeric 2-4 hour forecast is available yet.",
+        }
+
+    move = predicted - spot
+    move_abs = abs(move)
+    forecast_direction = "BUY_USD" if move > 0 else "SELL_USD" if move < 0 else None
+    direction_agrees = direction == forecast_direction if direction in _ACTIONABLE else True
+
+    if blocking_event:
+        status = "HIGH RISK / EVENT"
+    elif not fresh_ok:
+        status = "HIGH RISK / STALE DATA"
+    elif move_abs < _TACTICAL_MIN_MOVE:
+        status = "NO EDGE"
+    elif not direction_agrees:
+        status = "SETUP DEVELOPING"
+    elif move_abs >= _TACTICAL_STRONG_MOVE and confidence >= 60.0:
+        status = "STRONG BUY MXN" if move < 0 else "STRONG SELL MXN"
+    else:
+        status = "BUY MXN" if move < 0 else "SELL MXN"
+
+    if move < 0:
+        bias = "BUY MXN / SELL USD"
+        prediction = "USD/MXN LOWER"
+        target_2c = round(spot - _TACTICAL_MIN_MOVE, 4)
+        target_3c = round(spot - _TACTICAL_STRONG_MOVE, 4)
+        invalidation = round(spot + _TACTICAL_MIN_MOVE, 4)
+    elif move > 0:
+        bias = "SELL MXN / BUY USD"
+        prediction = "USD/MXN HIGHER"
+        target_2c = round(spot + _TACTICAL_MIN_MOVE, 4)
+        target_3c = round(spot + _TACTICAL_STRONG_MOVE, 4)
+        invalidation = round(spot - _TACTICAL_MIN_MOVE, 4)
+    else:
+        bias = "NEUTRAL"
+        prediction = "RANGE-BOUND"
+        target_2c = target_3c = invalidation = None
+
+    if move_abs < _TACTICAL_MIN_MOVE:
+        reason = f"Forecast move is only {move_abs:.4f} MXN; below the 0.02 tactical threshold."
+    elif not direction_agrees:
+        reason = (
+            f"2-4h forecast implies {move:+.4f} MXN, but the broader signal points the other way; "
+            "treat as a developing setup, not a clean entry."
+        )
+    else:
+        reason = f"2-4h forecast implies {move:+.4f} MXN ({move_abs * 100:.1f} cents) from spot."
+
+    return {
+        "status": status,
+        "bias": bias,
+        "prediction": prediction,
+        "forecast_direction": forecast_direction,
+        "direction_agrees": direction_agrees,
+        "expected_move": round(move, 4),
+        "expected_move_cents": round(move_abs * 100.0, 2),
+        "target_2c": target_2c,
+        "target_3c": target_3c,
+        "invalidation": invalidation,
+        "confidence": round(confidence, 1),
+        "drivers": drivers,
+        "reason": reason,
+    }
 
 
 def build_trade_decision_card(payload: dict) -> dict:
@@ -172,18 +292,23 @@ def build_trade_decision_card(payload: dict) -> dict:
     mp = payload.get("model_performance")
     tl = payload.get("topline_forecast") or {}
 
+    rate_2h = None
     rate_4h = None
     rate_eod = None
     rate_close = None
     for entry in tl.get("path") or tl.get("horizons") or []:
         h = (entry.get("horizon") or "").lower()
         val = _f(entry.get("expected_rate"))
+        if h in ("2 hours", "2h") and rate_2h is None:
+            rate_2h = val
         if h in ("4 hours", "4h", "1-4 hours") and rate_4h is None:
             rate_4h = val
         if h in ("end of day", "eod") and rate_eod is None:
             rate_eod = val
         if h in ("market close", "session close", "friday close") and rate_close is None:
             rate_close = val
+    if rate_2h is None:
+        rate_2h = _f((tl.get("two_hours") or {}).get("expected_rate") if isinstance(tl.get("two_hours"), dict) else tl.get("two_hours"))
     if rate_4h is None:
         rate_4h = _f((tl.get("four_hours") or {}).get("expected_rate") if isinstance(tl.get("four_hours"), dict) else tl.get("four_hours"))
     if rate_eod is None:
@@ -260,10 +385,29 @@ def build_trade_decision_card(payload: dict) -> dict:
         visual = "yellow"
         why = _why_wait(wait_reasons)
 
+    drivers = _driver_summary(payload)
+    tactical = _tactical_assessment(
+        direction=direction,
+        spot=spot,
+        rate_2h=rate_2h,
+        rate_4h=rate_4h,
+        fresh_ok=fresh_ok,
+        blocking_event=blocking_event,
+        confidence=confidence,
+        drivers=drivers,
+    )
+
+    tactical_text = f"Tactical 2-4h: {tactical['status']} — {tactical['reason']}"
+    if tactical.get("target_2c") is not None and tactical.get("target_3c") is not None:
+        tactical_text += (
+            f" 2c target {tactical['target_2c']:.4f}; 3c target {tactical['target_3c']:.4f}; "
+            f"tactical invalidation {tactical['invalidation']:.4f}."
+        )
+    if drivers:
+        tactical_text += " Drivers: " + "; ".join(drivers[:3]) + "."
+    why = f"{tactical_text} {why}"
+
     calibration, calibration_summary = _current_calibration(confidence)
-    # Existing dashboard renders ``why`` prominently on the top card, so the
-    # measured calibration is visible immediately without requiring users to
-    # open the Research Lab. Structured fields are also returned for richer UI.
     if calibration_summary:
         why = f"{why} {calibration_summary}"
 
@@ -275,12 +419,20 @@ def build_trade_decision_card(payload: dict) -> dict:
         "prediction": labels["prediction"],
         "has_directional_forecast": labels["has_directional_forecast"],
         "spot": round(spot, 4) if spot is not None else None,
+        "predicted_2h": round(rate_2h, 4) if rate_2h is not None else None,
         "predicted_4h": round(rate_4h, 4) if rate_4h is not None else None,
         "predicted_market_close": round(rate_close, 4) if rate_close is not None else None,
         "predicted_eod": round(rate_eod, 4) if rate_eod is not None else None,
         "invalidation_label": invalidation_label,
         "invalidation_level": round(invalidation_level, 4) if invalidation_level is not None else None,
         "why": why,
+        "tactical": tactical,
+        "tactical_status": tactical["status"],
+        "tactical_bias": tactical["bias"],
+        "expected_move_cents": tactical["expected_move_cents"],
+        "tactical_target_2c": tactical["target_2c"],
+        "tactical_target_3c": tactical["target_3c"],
+        "tactical_invalidation": tactical["invalidation"],
         "calibration": calibration,
         "calibration_summary": calibration_summary,
         "wait_reasons": wait_reasons,
