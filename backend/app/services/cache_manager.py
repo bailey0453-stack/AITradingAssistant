@@ -28,8 +28,13 @@ from typing import Callable, Optional
 # refreshed while the FX market is open. USD/MXN is now supplied by the
 # persistent Centroid FIX worker, so each analysis request should ask for the
 # freshest executable quote instead of reusing the old hourly spot snapshot.
+#
+# Keep a one-second floor instead of zero.  ``market._build_meta`` compares
+# snapshot age against this interval to label freshness; a zero-second interval
+# makes every newly-created live snapshot immediately satisfy ``age >= 0`` and
+# therefore appear stale even though the Centroid quote was just fetched.
 DEFAULT_REFRESH_POLICIES: dict[str, int] = {
-    "usdmxn": 0,         # live Centroid FIX; refresh on every analysis request
+    "usdmxn": 1,         # live Centroid FIX; effectively refresh every request
     "news": 5 * 60,      # 5 min
     "calendar": 30 * 60,  # 30 min
     "treasury": 15 * 60,  # 15 min (US 2Y / 10Y)
@@ -54,9 +59,11 @@ def get_refresh_seconds(key: str, settings=None) -> int:
         except (TypeError, ValueError):
             pass
     # Centroid FIX is the authoritative USD/MXN source. Do not allow a legacy
-    # REFRESH_POLICIES override to reintroduce hourly caching for spot.
+    # REFRESH_POLICIES override to reintroduce hourly caching for spot.  A
+    # one-second floor preserves effectively per-request refreshes while keeping
+    # freshly-fetched snapshots distinguishable from stale cached snapshots.
     if key == "usdmxn":
-        seconds = 0
+        seconds = 1
     return max(0, seconds)
 
 
