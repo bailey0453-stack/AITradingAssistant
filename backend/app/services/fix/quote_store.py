@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 MdSubscriptionStatus = Literal["none", "pending", "accepted", "rejected"]
+_INBOUND_HISTORY_LIMIT = 100
 
 FIX_MSG_TYPE_LABELS: dict[str, str] = {
     "0": "Heartbeat", "1": "TestRequest", "3": "Reject", "5": "Logout", "A": "Logon",
@@ -52,7 +53,7 @@ class FixSessionHealth:
 class FixQuoteStore:
     _instance:"FixQuoteStore|None"=None; _lock=threading.Lock()
     def __init__(self)->None:
-        self._quotes:dict[str,FixQuote]={}; self._health=FixSessionHealth(); self._last_md_request=FixLastMdRequest(); self._last_inbound=FixLastInbound()
+        self._quotes:dict[str,FixQuote]={}; self._health=FixSessionHealth(); self._last_md_request=FixLastMdRequest(); self._last_inbound=FixLastInbound(); self._inbound_history:list[dict[str,Any]]=[]
         self._security_discovery={"status":"not_requested","security_req_id":None,"request_result":None,"symbols":[],"usdmxn_candidates":[],"requested_at":None,"received_at":None,"error":None}; self._data_lock=threading.Lock()
     @classmethod
     def get(cls):
@@ -91,7 +92,8 @@ class FixQuoteStore:
         with self._data_lock:return {**self._security_discovery,"symbols":list(self._security_discovery.get("symbols") or []),"usdmxn_candidates":list(self._security_discovery.get("usdmxn_candidates") or [])}
     def record_inbound(self,*,msg_type:str,fmap:dict[str,str],raw_summary:str|None=None)->None:
         inbound=FixLastInbound(msg_type=msg_type,msg_type_label=FIX_MSG_TYPE_LABELS.get(msg_type,msg_type),text=fmap.get("58"),business_reject_reason=fmap.get("380") if msg_type=="j" else None,session_reject_reason=fmap.get("373") if msg_type=="3" else None,md_req_reject_reason=fmap.get("58") if msg_type=="Y" else None,raw_reject_text=raw_summary or fmap.get("58"),md_req_id=fmap.get("262"),symbol=fmap.get("55"),test_req_id=fmap.get("112"),received_at=_utcnow())
-        with self._data_lock:self._last_inbound=inbound
+        with self._data_lock:
+            self._last_inbound=inbound; self._inbound_history.append(inbound.to_dict()); self._inbound_history=self._inbound_history[-_INBOUND_HISTORY_LIMIT:]
     def last_md_request(self)->FixLastMdRequest:
         with self._data_lock:return self._last_md_request
     def last_inbound(self)->FixLastInbound:
@@ -100,4 +102,4 @@ class FixQuoteStore:
         with self._data_lock:
             health=self._health.to_dict(); quote=self._quotes.get(primary_symbol).to_dict() if primary_symbol and primary_symbol in self._quotes else (next(iter(self._quotes.values())).to_dict() if self._quotes else None)
             discovery={**self._security_discovery,"symbols":list(self._security_discovery.get("symbols") or []),"usdmxn_candidates":list(self._security_discovery.get("usdmxn_candidates") or [])}
-            return {"session":health,"quote":quote,"quote_count":len(self._quotes),"last_md_request":self._last_md_request.to_dict(),"last_inbound":self._last_inbound.to_dict(),"security_discovery":discovery}
+            return {"session":health,"quote":quote,"quote_count":len(self._quotes),"last_md_request":self._last_md_request.to_dict(),"last_inbound":self._last_inbound.to_dict(),"inbound_history":[dict(x) for x in self._inbound_history],"security_discovery":discovery}
