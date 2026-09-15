@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _HEARTBEAT_INTERVAL = 30
 _RECV_BUFFER = 65536
 _SEQUENCE_KEY = "centroid_td"
+_EXECUTION_REPORT_HISTORY_LIMIT = 100
 _LOW_SEQ_RE = re.compile(r"MsgSeqNum too low, expecting\s+(\d+)\s+but received\s+(\d+)", re.IGNORECASE)
 
 
@@ -51,6 +52,7 @@ class CentroidTradingSession:
             "last_heartbeat_at": None,
             "last_error": None,
             "last_execution_report": None,
+            "execution_reports": [],
             "last_cancel_reject": None,
             "last_business_reject": None,
             "last_session_reject": None,
@@ -177,6 +179,7 @@ class CentroidTradingSession:
 
     def diagnostics(self) -> dict[str, Any]:
         out = dict(self._state)
+        out["execution_reports"] = [dict(report) for report in self._state.get("execution_reports", [])]
         out.update(
             {
                 "configured": self.configured,
@@ -235,7 +238,18 @@ class CentroidTradingSession:
             price=price,
             ttl_ms=ttl_ms,
         )
-        self._state["last_order_request"] = {"symbol": symbol, "side": str(side), "quantity": quantity, "ord_type": str(ord_type), "time_in_force": str(time_in_force), "price": price, "ttl_ms": ttl_ms}
+        cl_ord_id = field_map(msg).get("11")
+        self._state["last_order_request"] = {
+            "cl_ord_id": cl_ord_id,
+            "symbol": symbol,
+            "side": str(side),
+            "quantity": quantity,
+            "ord_type": str(ord_type),
+            "time_in_force": str(time_in_force),
+            "price": price,
+            "ttl_ms": ttl_ms,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
         self._send(msg)
         return dict(self._state["last_order_request"])
 
@@ -318,7 +332,21 @@ class CentroidTradingSession:
                 self._state.update(status="connected", fix_logged_on=True, last_logon_at=datetime.now(timezone.utc).isoformat())
                 logger.info("Centroid trading FIX logon accepted")
             elif msg_type == "8":
-                self._state["last_execution_report"] = self._execution_report(fmap)
+                report = self._execution_report(fmap)
+                report["received_at"] = datetime.now(timezone.utc).isoformat()
+                self._state["last_execution_report"] = report
+                history = self._state.setdefault("execution_reports", [])
+                history.append(report)
+                if len(history) > _EXECUTION_REPORT_HISTORY_LIMIT:
+                    del history[:-_EXECUTION_REPORT_HISTORY_LIMIT]
+                logger.info(
+                    "Centroid execution report cl_ord_id=%s order_id=%s exec_type=%s ord_status=%s text=%s",
+                    report.get("11"),
+                    report.get("37"),
+                    report.get("150"),
+                    report.get("39"),
+                    report.get("58"),
+                )
             elif msg_type == "9":
                 self._state["last_cancel_reject"] = self._safe_map(fmap, ["11", "37", "39", "41", "102", "434", "58"])
             elif msg_type == "j":
@@ -387,7 +415,7 @@ class CentroidTradingSession:
         )
 
     def _execution_report(self, fmap: dict[str, str]) -> dict[str, Any]:
-        return self._safe_map(fmap, ["11", "17", "150", "55", "54", "38", "40", "32", "59", "37", "39", "41", "31", "151", "14", "6", "44", "58", "60"])
+        return self._safe_map(fmap, ["11", "17", "150", "55", "54", "38", "40", "32", "59", "37", "39", "41", "31", "151", "14", "6", "44", "58", "60", "34"])
 
     def _safe_map(self, fmap: dict[str, str], tags: list[str]) -> dict[str, Any]:
         return {tag: self._scrub(fmap[tag]) for tag in tags if tag in fmap}
