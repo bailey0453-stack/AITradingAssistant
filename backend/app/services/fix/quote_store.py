@@ -37,9 +37,10 @@ class FixLastInbound:
     msg_type: str | None = None; msg_type_label: str | None = None; text: str | None = None
     business_reject_reason: str | None = None; session_reject_reason: str | None = None; md_req_reject_reason: str | None = None
     raw_reject_text: str | None = None; md_req_id: str | None = None; symbol: str | None = None; test_req_id: str | None = None
+    md_entry_count: int | None = None; md_entries: list[dict[str, str | None]] = field(default_factory=list)
     received_at: datetime | None = None
     def to_dict(self) -> dict[str, Any]:
-        return {"msg_type":self.msg_type,"msg_type_label":self.msg_type_label,"text":self.text,"business_reject_reason":self.business_reject_reason,"session_reject_reason":self.session_reject_reason,"md_req_reject_reason":self.md_req_reject_reason,"raw_reject_text":self.raw_reject_text,"md_req_id":self.md_req_id,"symbol":self.symbol,"test_req_id":self.test_req_id,"received_at":self.received_at.isoformat() if self.received_at else None}
+        return {"msg_type":self.msg_type,"msg_type_label":self.msg_type_label,"text":self.text,"business_reject_reason":self.business_reject_reason,"session_reject_reason":self.session_reject_reason,"md_req_reject_reason":self.md_req_reject_reason,"raw_reject_text":self.raw_reject_text,"md_req_id":self.md_req_id,"symbol":self.symbol,"test_req_id":self.test_req_id,"md_entry_count":self.md_entry_count,"md_entries":[dict(x) for x in self.md_entries],"received_at":self.received_at.isoformat() if self.received_at else None}
 
 @dataclass
 class FixSessionHealth:
@@ -90,8 +91,8 @@ class FixQuoteStore:
         with self._data_lock:self._security_discovery.update(status="rejected",error=error,received_at=_utcnow().isoformat())
     def security_discovery(self)->dict[str,Any]:
         with self._data_lock:return {**self._security_discovery,"symbols":list(self._security_discovery.get("symbols") or []),"usdmxn_candidates":list(self._security_discovery.get("usdmxn_candidates") or [])}
-    def record_inbound(self,*,msg_type:str,fmap:dict[str,str],raw_summary:str|None=None)->None:
-        inbound=FixLastInbound(msg_type=msg_type,msg_type_label=FIX_MSG_TYPE_LABELS.get(msg_type,msg_type),text=fmap.get("58"),business_reject_reason=fmap.get("380") if msg_type=="j" else None,session_reject_reason=fmap.get("373") if msg_type=="3" else None,md_req_reject_reason=fmap.get("58") if msg_type=="Y" else None,raw_reject_text=raw_summary or fmap.get("58"),md_req_id=fmap.get("262"),symbol=fmap.get("55"),test_req_id=fmap.get("112"),received_at=_utcnow())
+    def record_inbound(self,*,msg_type:str,fmap:dict[str,str],raw_summary:str|None=None,md_entry_count:int|None=None,md_entries:list[dict[str,str|None]]|None=None)->None:
+        inbound=FixLastInbound(msg_type=msg_type,msg_type_label=FIX_MSG_TYPE_LABELS.get(msg_type,msg_type),text=fmap.get("58"),business_reject_reason=fmap.get("380") if msg_type=="j" else None,session_reject_reason=fmap.get("373") if msg_type=="3" else None,md_req_reject_reason=fmap.get("58") if msg_type=="Y" else None,raw_reject_text=raw_summary or fmap.get("58"),md_req_id=fmap.get("262"),symbol=fmap.get("55"),test_req_id=fmap.get("112"),md_entry_count=md_entry_count,md_entries=list(md_entries or []),received_at=_utcnow())
         with self._data_lock:
             self._last_inbound=inbound; self._inbound_history.append(inbound.to_dict()); self._inbound_history=self._inbound_history[-_INBOUND_HISTORY_LIMIT:]
     def last_md_request(self)->FixLastMdRequest:
