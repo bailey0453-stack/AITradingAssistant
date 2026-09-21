@@ -55,10 +55,35 @@ class CentroidMarketDataSession:
 
     def _safe_raw_summary(self, fmap: dict[str, str], msg_type: str) -> str:
         parts = [f"35={msg_type}"]
-        for tag in ("34", "49", "56", "262", "320", "322", "560", "55", "58", "372", "373", "380", "381"):
+        for tag in ("34", "49", "56", "262", "320", "322", "560", "55", "58", "372", "373", "380", "381", "268"):
             if tag in fmap:
                 parts.append(f"{tag}={self._scrub(fmap[tag])}")
         return " ".join(parts)
+
+    def _market_depth_entries(self, raw: str) -> tuple[int | None, list[dict[str, str | None]]]:
+        fields = parse_fields(raw)
+        count = None
+        entries: list[dict[str, str | None]] = []
+        current: dict[str, str | None] | None = None
+        for tag, value in fields:
+            if tag == "268":
+                try:
+                    count = int(value)
+                except ValueError:
+                    count = None
+            elif tag == "269":
+                if current:
+                    entries.append(current)
+                current = {"entry_type": value, "price": None, "size": None, "position_no": None}
+            elif current is not None and tag == "270":
+                current["price"] = value
+            elif current is not None and tag == "271":
+                current["size"] = value
+            elif current is not None and tag == "290":
+                current["position_no"] = value
+        if current:
+            entries.append(current)
+        return count, entries
 
     def start_background(self) -> None:
         if not self.configured:
@@ -164,7 +189,17 @@ class CentroidMarketDataSession:
         except ValueError:
             pass
         if msg_type in _REJECT_MSG_TYPES or msg_type in FIX_MSG_TYPE_LABELS:
-            self.store.record_inbound(msg_type=msg_type, fmap=fmap, raw_summary=self._safe_raw_summary(fmap, msg_type))
+            md_entry_count = None
+            md_entries = None
+            if msg_type in {"W", "X"}:
+                md_entry_count, md_entries = self._market_depth_entries(raw)
+            self.store.record_inbound(
+                msg_type=msg_type,
+                fmap=fmap,
+                raw_summary=self._safe_raw_summary(fmap, msg_type),
+                md_entry_count=md_entry_count,
+                md_entries=md_entries,
+            )
         if msg_type == "0":
             self.store.set_health(last_heartbeat_at=datetime.now(timezone.utc), inbound_seq=self._in_seq)
         elif msg_type == "1":
