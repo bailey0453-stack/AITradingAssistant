@@ -265,6 +265,13 @@ DASHBOARD_HTML = """<!doctype html>
     .aita-gate-card { max-width:460px; background:#111a2e; border:1px solid #1d2740; border-radius:12px; padding:28px 24px; text-align:center; }
     .aita-user { font-size:12px; color:#8aa0c6; margin-right:10px; }
     .aita-logout { background:#1a365d; }
+    .aita-header-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .aita-language { background:#111a2e; color:#e6edf3; border:1px solid #34406a; border-radius:8px; padding:8px 10px; font-weight:600; cursor:pointer; }
+    @media (max-width:760px){
+      header { align-items:flex-start; gap:12px; flex-wrap:wrap; }
+      .aita-header-actions { justify-content:flex-start; }
+      .sources { width:100%; }
+    }
   </style>
 </head>
 <body>
@@ -276,7 +283,12 @@ DASHBOARD_HTML = """<!doctype html>
   </div>
   <header>
     <h1>AI Trading Assistant — USD/MXN <span class="muted">(Phase 5 · evidence-based forecasting)</span></h1>
-    <div>
+    <div class="aita-header-actions">
+      <label for="aita_language" class="muted">Language</label>
+      <select id="aita_language" class="aita-language" aria-label="Language" onchange="aitaSetLanguage(this.value)">
+        <option value="en">English</option>
+        <option value="es">Español</option>
+      </select>
       <span id="aita_user" class="aita-user" hidden></span>
       <button id="aita_logout" class="aita-logout" type="button" hidden onclick="aitaLogout()">Logout</button>
       <span id="src" class="src">—</span> <span id="newssrc" class="src">—</span> <button onclick="refresh()">Refresh</button>
@@ -959,6 +971,174 @@ DASHBOARD_HTML = """<!doctype html>
   </main>
   <script>
     const $ = id => document.getElementById(id);
+    const AITA_LOCALE_KEY = 'aita_language';
+    let aitaLocale = (localStorage.getItem(AITA_LOCALE_KEY) === 'es') ? 'es' : 'en';
+    let aitaApplyingLocale = false;
+    const aitaOriginalText = new WeakMap();
+    const aitaOriginalAttrs = new WeakMap();
+    const AITA_ES = {
+      'Language':'Idioma', 'English':'English', 'Logout':'Cerrar sesión', 'Refresh':'Actualizar',
+      '(Phase 5 · evidence-based forecasting)':'(Fase 5 · pronóstico basado en evidencia)',
+      'Sign in through the Border Currency portal to use market intelligence.':'Inicie sesión mediante el portal de Border Currency para usar la inteligencia de mercado.',
+      'You have been signed out. Return to Border Currency to open AI Trading Assistant.':'Su sesión se cerró. Regrese a Border Currency para abrir AI Trading Assistant.',
+      'Sign-in link is invalid or expired. Return to Border Currency to open AI Trading Assistant.':'El enlace de acceso no es válido o venció. Regrese a Border Currency para abrir AI Trading Assistant.',
+      'Sign in through the Border Currency portal to use AI Trading Assistant.':'Inicie sesión mediante el portal de Border Currency para usar AI Trading Assistant.',
+      'Data sources:':'Fuentes de datos:', 'Market':'Mercado', 'News':'Noticias', 'Calendar':'Calendario', 'Historical':'Histórico',
+      'Dashboard load error.':'Error al cargar el panel.',
+      'A section failed while loading. Other sections may still be available.':'Una sección no se pudo cargar. Las demás secciones podrían seguir disponibles.',
+      'Market data unavailable.':'Datos de mercado no disponibles.',
+      'Live market data unavailable and no recent cached real quote exists.':'No hay datos de mercado en vivo ni una cotización real reciente en caché.',
+      'No actionable trade recommendation is shown.':'No se muestra ninguna recomendación de operación ejecutable.',
+      'Trade Decision':'Decisión de operación', '(decision support only)':'(solo apoyo para decisiones)',
+      'Now':'Ahora', '4 Hours':'4 horas', 'End of Day':'Fin del día', 'Invalidation':'Invalidación',
+      'View decision details':'Ver detalles de la decisión',
+      'Scrolls to the detailed analysis below (gates, expected value, historical support). Does not duplicate the full dashboard.':'Lleva al análisis detallado inferior (criterios, valor esperado y respaldo histórico). No duplica todo el panel.',
+      'Jump to detailed analysis →':'Ir al análisis detallado →',
+      'Decision support only — not an order. TRADE requires A/A+, confidence ≥70, positive EV, historical support, fresh data, forecast agreement, and no high-impact event risk.':'Solo apoyo para decisiones; no es una orden. OPERAR requiere A/A+, confianza ≥70, valor esperado positivo, respaldo histórico, datos recientes, coincidencia del pronóstico y ausencia de riesgo por eventos de alto impacto.',
+      'Topline Rate Forecast':'Pronóstico principal del tipo de cambio', 'ESTIMATED':'ESTIMADO',
+      'Decision support only — expected USD/MXN path and thesis-invalidation (bailout) levels. Not a trade instruction or executable quote.':'Solo apoyo para decisiones: trayectoria esperada del USD/MXN y niveles de invalidación de la tesis. No es una instrucción de operación ni una cotización ejecutable.',
+      'Long USD bailout':'Salida de USD largo', 'Short USD bailout':'Salida de USD corto',
+      'BUY_USD thesis invalidated below this rate':'La tesis COMPRAR USD se invalida por debajo de este nivel',
+      'SELL_USD thesis invalidated above this rate':'La tesis VENDER USD se invalida por encima de este nivel',
+      'Inverse':'Inverso', 'Oil':'Petróleo', 'Gold':'Oro',
+      'Centroid FIX Market Data':'Datos de mercado FIX de Centroid',
+      'Phase 1 — executable bid/ask from GFC/Centroid FIX (read-only; no orders sent).':'Fase 1: precios bid/ask ejecutables de GFC/Centroid FIX (solo lectura; no se envían órdenes).',
+      'Connection':'Conexión', 'MD subscription':'Suscripción MD', 'Requested symbol':'Símbolo solicitado',
+      'Bid':'Compra', 'Ask':'Venta', 'Spread':'Diferencial', 'Last quote':'Última cotización', 'Quote count':'Cantidad de cotizaciones',
+      'Last FIX msg in':'Último mensaje FIX recibido', 'Last reject':'Último rechazo', 'FIX Diagnostics (admin)':'Diagnóstico FIX (administrador)',
+      'Raw scrubbed FIX messages for MarketDataRequest (35=V) and inbound W/X/Y/3.':'Mensajes FIX depurados de MarketDataRequest (35=V) y mensajes entrantes W/X/Y/3.',
+      'Refresh FIX Log':'Actualizar registro FIX', 'Set Admin Key to view raw FIX diagnostics.':'Configure la clave de administrador para ver el diagnóstico FIX sin procesar.',
+      'Market status':'Estado del mercado', 'Last live update':'Última actualización en vivo', 'Data age':'Antigüedad de datos',
+      'Next refresh':'Próxima actualización', 'Next market open':'Próxima apertura del mercado', 'Provider':'Proveedor', 'Source':'Fuente',
+      'Provider health':'Estado de proveedores', 'Database:':'Base de datos:', 'Scheduler':'Programador',
+      'Recommendations are generated automatically every hour (UTC) — even when nobody opens this page.':'Las recomendaciones se generan automáticamente cada hora (UTC), incluso si nadie abre esta página.',
+      'Last scheduled run':'Última ejecución programada', 'Last recommendation':'Última recomendación', 'Next expected run':'Próxima ejecución esperada',
+      'Research Database Status':'Estado de la base de investigación', 'Historical Research Database':'Base de datos de investigación histórica',
+      'Market Data Coverage':'Cobertura de datos de mercado', 'Economic Events':'Eventos económicos', 'Research Statistics':'Estadísticas de investigación',
+      'AI Learning':'Aprendizaje de IA', 'Data Freshness':'Actualidad de datos', 'System Health':'Estado del sistema', 'Historical Database':'Base de datos histórica',
+      'Populate and update the research database from this panel — no shell commands required. Daily incremental updates also run automatically via cron.':'Complete y actualice la base de investigación desde este panel; no se requieren comandos. Las actualizaciones incrementales diarias también se ejecutan automáticamente.',
+      'Import Historical Data':'Importar datos históricos', 'Daily Incremental Update':'Actualización incremental diaria',
+      'Rebuild Research Snapshots':'Reconstruir registros de investigación', 'Set Admin Key':'Configurar clave de administrador', 'No import running.':'No hay ninguna importación en curso.',
+      'Evidence summary':'Resumen de evidencia', 'provenance':'procedencia',
+      "How much of today's analysis is backed by evidence vs inference. Every badge below explains itself on hover.":'Cuánto del análisis de hoy está respaldado por evidencia frente a inferencias. Cada etiqueta se explica al colocar el cursor encima.',
+      'Live':'En vivo', 'Cached':'En caché', 'Measured':'Medido', 'Estimated':'Estimado', 'Sample':'Muestra',
+      'Evidence-backed':'Respaldado por evidencia', 'Estimated share':'Porción estimada', 'Sample share':'Porción de muestra',
+      'Level':'Nivel', 'Metrics':'Métricas', 'Fields':'Campos', 'Decision quality':'Calidad de la decisión', 'trade vs wait':'operar frente a esperar',
+      'Decision support only — not trading execution. Helps judge whether a setup is worth taking now vs waiting; paper figures are simulated.':'Solo apoyo para decisiones; no ejecuta operaciones. Ayuda a evaluar si conviene tomar una oportunidad ahora o esperar; las cifras teóricas son simuladas.',
+      'Trade quality score':'Puntuación de calidad', 'Quality label':'Nivel de calidad', 'Should trade now?':'¿Operar ahora?',
+      'Reward / risk':'Recompensa / riesgo', 'Min win rate':'Tasa mínima de acierto', 'Expected value':'Valor esperado',
+      'Recommendation':'Recomendación', 'Better entry conditions':'Mejores condiciones de entrada', 'What to watch next':'Qué observar a continuación',
+      'Quality components (weighted)':'Componentes de calidad (ponderados)', 'Component':'Componente', 'Score':'Puntuación',
+      'Similar recommendation track record':'Historial de recomendaciones similares', 'Similar count':'Cantidad similar', 'Win rate':'Tasa de acierto',
+      'Avg P/L':'Gan./pérd. prom.', 'Target hit':'Objetivo alcanzado', 'Stop hit':'Stop alcanzado', 'Selective trading analysis':'Análisis de operaciones selectivas',
+      'SIMULATED':'SIMULADO', 'Filter':'Filtro', 'Trades':'Operaciones', 'Net P/L':'Gan./pérd. neta', 'Max DD':'Caída máx.', 'Ret/notional':'Rend./nocional',
+      'Model performance':'Rendimiento del modelo', '(paper recommendations)':'(recomendaciones teóricas)', 'Recommendations':'Recomendaciones',
+      'Evaluated':'Evaluadas', 'Avg return':'Rendimiento prom.', 'By confidence':'Por confianza', 'Bucket':'Grupo', 'Avg ret':'Rend. prom.',
+      'Opportunity grade':'Calificación de oportunidad', 'Trade readiness':'Preparación para operar', 'Why this grade':'Motivo de la calificación',
+      'Market regime':'Régimen de mercado', 'Primary':'Principal', 'Secondary':'Secundario', 'Confidence':'Confianza', 'Read':'Lectura',
+      'Signal':'Señal', 'Trade Score':'Puntuación de operación', 'Momentum':'Impulso', 'Risk':'Riesgo',
+      'Primary Trade Plan':'Plan principal de operación', 'Entry':'Entrada', 'Target':'Objetivo', 'Stretch':'Objetivo extendido', 'Stop':'Stop',
+      'Time Horizon Outlook':'Perspectiva por horizonte', 'Horizon':'Horizonte', 'Bias':'Sesgo', 'Expected Move':'Movimiento esperado', 'Rationale':'Fundamento',
+      'Independent lean per timeframe. The Primary Trade Plan above is the single actionable recommendation; when it is NO_TRADE/PASS these horizons may still show a directional lean.':'Sesgo independiente por plazo. El plan principal anterior es la única recomendación ejecutable; cuando indica NO OPERAR/PASAR, los horizontes aún pueden mostrar una inclinación direccional.',
+      'Summary':'Resumen', 'Key drivers':'Factores principales', 'Market drivers':'Factores del mercado', 'Indicator':'Indicador', 'Value':'Valor', 'Lean':'Inclinación', 'Why it matters':'Por qué importa',
+      'Bullish factors (USD)':'Factores alcistas (USD)', 'Bearish factors (MXN)':'Factores bajistas (MXN)', 'Key risks (upcoming)':'Riesgos próximos',
+      'What would change my mind':'Qué cambiaría la conclusión', 'Historical evidence':'Evidencia histórica', 'Historical similarity':'Similitud histórica',
+      'Comparable events':'Eventos comparables', 'Avg move':'Movimiento prom.', 'Median move':'Movimiento mediano', 'Best move':'Mejor movimiento', 'Worst move':'Peor movimiento',
+      'Max drawdown':'Caída máxima', 'Reversal prob':'Prob. de reversión', 'Setup percentile':'Percentil de la oportunidad', 'Expected holding':'Duración esperada',
+      'Typical MFE':'MFE típico', 'Typical MAE':'MAE típico', 'Expected range':'Rango esperado', 'Top historical analog':'Principal caso histórico comparable',
+      'Probability distribution (evidence-based, 95% CI)':'Distribución de probabilidad (basada en evidencia, IC del 95%)', 'Outcome':'Resultado', 'Probability':'Probabilidad', '95% CI':'IC del 95%',
+      'Confidence breakdown':'Desglose de confianza', 'How these numbers are calculated':'Cómo se calculan estas cifras', 'Signal weighting (debug)':'Ponderación de señales (depuración)',
+      'USD score':'Puntuación USD', 'MXN score':'Puntuación MXN', 'Net':'Neto', 'Threshold':'Umbral', 'Weights':'Ponderaciones',
+      'Dir':'Dirección', 'Weight':'Peso', 'Strength':'Fuerza', 'Contribution':'Contribución', 'Detail':'Detalle', 'Conflicting signals':'Señales contradictorias',
+      'Event timeline':'Cronología de eventos', 'Latest news':'Últimas noticias', 'Upcoming events':'Próximos eventos', 'Recent releases (24h)':'Publicaciones recientes (24 h)',
+      'Signed in':'Sesión iniciada', 'Current':'Actual', 'Updating':'Actualizando', 'Not configured':'No configurado', 'Missing':'Faltante',
+      'No forecast available.':'No hay pronóstico disponible.', 'current spot':'precio spot actual', 'range-bound':'en rango',
+      'YES':'SÍ', 'WAIT':'ESPERAR', 'TRADE':'OPERAR', 'HOLD':'MANTENER', 'NO_TRADE':'NO OPERAR', 'PASS':'PASAR',
+      'BUY_USD':'COMPRAR USD', 'SELL_USD':'VENDER USD', 'Excellent':'Excelente', 'Good':'Buena', 'Marginal':'Marginal', 'Poor':'Deficiente',
+      'Signal strength':'Fuerza de la señal', 'Historical evidence':'Evidencia histórica', 'Event risk':'Riesgo de eventos', 'Volatility fit':'Compatibilidad con volatilidad',
+      'Model track record':'Historial del modelo', 'Paper hedge (similar)':'Cobertura teórica (similar)', 'All actionable':'Todas las ejecutables',
+      'Top 10%':'10% superior', 'Top 20%':'20% superior', 'Top 30%':'30% superior', 'Grade A or better':'Calificación A o mejor',
+      'Grade B or better':'Calificación B o mejor', 'Confidence > 70':'Confianza > 70', 'Confidence > 80':'Confianza > 80'
+    };
+    const AITA_ES_PHRASES = [
+      [/^BIAS:\\s*/,'SESGO: '], [/^PREDICTION:\\s*/,'PRONÓSTICO: '], [/^WHY:\\s*/,'POR QUÉ: '], [/^Gates:\\s*/,'Criterios: '],
+      [/^Period:\\s*/,'Período: '], [/^Eligible:\\s*/,'Elegibles: '], [/\\s·\\sExcluded:\\s*/,' · Excluidas: '], [/\\s·\\sCompared:\\s*/,' · Comparadas: '], [/\\s·\\sVerdict:\\s*/,' · Veredicto: '],
+      [/^No sufficiently strong setup$/,'No hay una oportunidad suficientemente sólida'], [/^No recommendations stored yet/,'Todavía no hay recomendaciones guardadas'],
+      [/^No scored actionable trades yet/,'Todavía no hay operaciones ejecutables calificadas'], [/^Primary analysis failed:\\s*/,'Falló el análisis principal: '],
+      [/^Database:\\s*/,'Base de datos: '], [/^Updated\\s*/,'Actualizado '], [/^Last updated\\s*/,'Última actualización '],
+      [/^Bias favors USD strength vs MXN\\.\\s*/,'El sesgo favorece la fortaleza del USD frente al MXN. '],
+      [/^Bias favors MXN strength \\(USD\\/MXN lower\\)\\.\\s*/,'El sesgo favorece la fortaleza del MXN (USD/MXN a la baja). '],
+      [/^Neutral HOLD bias\\.\\s*/,'Sesgo neutral de MANTENER. '], [/^Stand aside \\(NO_TRADE\\)\\.\\s*/,'Mantenerse al margen (NO OPERAR). '],
+      [/\\bSpot\\s*~/g,'Spot ~'], [/\\bLook to accumulate USD toward\\s*/g,'Buscar acumular USD hacia '], [/\\bLook to fade USD toward\\s*/g,'Buscar vender USD hacia '],
+      [/\\bstretch\\s*/g,'objetivo extendido '], [/\\bConfirming:\\s*/g,'Confirman: '], [/\\bPushing back:\\s*/g,'Contradicen: '],
+      [/\\bTrade score\\s*/g,'Puntuación de operación '], [/\\bconfidence\\s*/g,'confianza '],
+      [/^Do not initiate until data or event risk clears\\.$/,'No iniciar una operación hasta que se aclare el riesgo de datos o eventos.'],
+      [/^Higher yields tend to support USD$/,'Los rendimientos más altos tienden a respaldar al USD'],
+      [/^Front-end rates \\/ Fed expectations$/,'Tasas de corto plazo / expectativas de la Fed'],
+      [/^Higher oil supports MXN \\(Mexico is an exporter\\)$/,'El petróleo más alto respalda al MXN (México es exportador)'],
+      [/^Higher volatility = risk-off = USD haven bid$/,'Mayor volatilidad = aversión al riesgo = demanda de USD como refugio'],
+      [/^Risk-on equities support EM \\/ MXN$/,'Las acciones con apetito por riesgo respaldan a mercados emergentes / MXN'],
+      [/^US dollar index vs recent baseline$/,'Índice del dólar estadounidense frente a su referencia reciente'],
+      [/^Risk level:\\s*/,'Nivel de riesgo: '], [/^Invalidate at stop\\s*/,'Invalidar en el stop '],
+      [/^Could trigger volatility \\/ invalidate the view$/,'Podría generar volatilidad o invalidar la perspectiva'],
+      [/^Secondary catalyst to watch$/,'Catalizador secundario a observar'],
+      [/\\bminutes?\\b/gi,'minutos'], [/\\bhours?\\b/gi,'horas'], [/\\bdays?\\b/gi,'días'], [/\\bago\\b/gi,'atrás'],
+      [/\\bunknown\\b/gi,'desconocido'], [/\\bunavailable\\b/gi,'no disponible'], [/\\bhealthy\\b/gi,'correcto'], [/\\bwarning\\b/gi,'advertencia'],
+      [/\\bBUY_USD\\b/g,'COMPRAR USD'], [/\\bSELL_USD\\b/g,'VENDER USD'], [/\\bNO_TRADE\\b/g,'NO OPERAR']
+    ];
+    function aitaTranslateString(value){
+      if(aitaLocale !== 'es' || value == null) return value;
+      const raw=String(value); const match=raw.match(/^(\\s*)([\\s\\S]*?)(\\s*)$/); const core=match ? match[2] : raw;
+      let translated=AITA_ES[core];
+      if(translated == null){
+        translated=core;
+        AITA_ES_PHRASES.forEach(function(pair){ translated=translated.replace(pair[0], pair[1]); });
+      }
+      return (match ? match[1] : '') + translated + (match ? match[3] : '');
+    }
+    function aitaTranslateTextNode(node){
+      if(!node || node.nodeType!==Node.TEXT_NODE || !node.nodeValue || !node.nodeValue.trim()) return;
+      if(!aitaOriginalText.has(node)) aitaOriginalText.set(node,node.nodeValue);
+      const original=aitaOriginalText.get(node);
+      const desired=aitaLocale==='es' ? aitaTranslateString(original) : original;
+      if(node.nodeValue!==desired) node.nodeValue=desired;
+    }
+    function aitaTranslateElement(el){
+      if(!el || el.nodeType!==Node.ELEMENT_NODE) return;
+      let attrs=aitaOriginalAttrs.get(el);
+      if(!attrs){ attrs={}; aitaOriginalAttrs.set(el,attrs); }
+      ['title','placeholder','aria-label'].forEach(function(name){
+        if(el.hasAttribute(name) && attrs[name]==null) attrs[name]=el.getAttribute(name);
+        if(attrs[name]!=null) el.setAttribute(name, aitaLocale==='es' ? aitaTranslateString(attrs[name]) : attrs[name]);
+      });
+    }
+    function aitaApplyLanguage(root){
+      aitaApplyingLocale=true;
+      const start=root||document.body;
+      if(start.nodeType===Node.TEXT_NODE) aitaTranslateTextNode(start);
+      else if(start.nodeType===Node.ELEMENT_NODE){
+        aitaTranslateElement(start);
+        const walker=document.createTreeWalker(start,NodeFilter.SHOW_ELEMENT|NodeFilter.SHOW_TEXT);
+        let node; while((node=walker.nextNode())){ if(node.nodeType===Node.TEXT_NODE) aitaTranslateTextNode(node); else aitaTranslateElement(node); }
+      }
+      document.documentElement.lang=aitaLocale;
+      document.title=aitaLocale==='es'?'Asistente de Trading con IA — USD/MXN':'AI Trading Assistant — USD/MXN';
+      const select=$('aita_language'); if(select) select.value=aitaLocale;
+      aitaApplyingLocale=false;
+    }
+    function aitaSetLanguage(locale){
+      aitaLocale=locale==='es'?'es':'en';
+      localStorage.setItem(AITA_LOCALE_KEY,aitaLocale);
+      aitaApplyLanguage(document.body);
+      document.dispatchEvent(new CustomEvent('aita-language-change',{detail:{locale:aitaLocale}}));
+    }
+    const aitaLocaleObserver=new MutationObserver(function(mutations){
+      if(aitaApplyingLocale) return;
+      mutations.forEach(function(m){
+        if(m.type==='characterData') aitaTranslateTextNode(m.target);
+        (m.addedNodes||[]).forEach(function(n){ aitaApplyLanguage(n); });
+      });
+    });
     let aitaSession = null;
     function aitaShowGate(msg){
       const gate=$('aita_auth_gate');
@@ -1020,10 +1200,17 @@ DASHBOARD_HTML = """<!doctype html>
       aitaShowGate('Sign in through the Border Currency portal to use AI Trading Assistant.');
       return false;
     }
-    function setText(id, v){ const el=$(id); if(!el) return false; el.textContent = v; return true; }
+    function setText(id, v){
+      const el=$(id); if(!el) return false;
+      const original=(v==null?'':String(v)); el.textContent=original;
+      if(el.firstChild && el.firstChild.nodeType===Node.TEXT_NODE){ aitaOriginalText.set(el.firstChild,original); aitaTranslateTextNode(el.firstChild); }
+      return true;
+    }
     function fill(id, v, suffix){
       const el=$(id); if(!el) return;
-      el.textContent = (v ?? v === 0) ? (v + (suffix||'')) : '—';
+      const original=(v ?? v === 0) ? (v + (suffix||'')) : '—';
+      el.textContent=original;
+      if(el.firstChild && el.firstChild.nodeType===Node.TEXT_NODE){ aitaOriginalText.set(el.firstChild,String(original)); aitaTranslateTextNode(el.firstChild); }
     }
     function showSectionError(id, msg){
       const el=$(id); if(!el) return;
@@ -1043,7 +1230,7 @@ DASHBOARD_HTML = """<!doctype html>
       }
       return body;
     }
-    function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(); }catch(e){ return iso; } }
+    function fmtTime(iso){ if(!iso) return '—'; try{ const d=new Date(iso); return isNaN(d)?iso:d.toLocaleString(aitaLocale==='es'?'es-MX':'en-US'); }catch(e){ return iso; } }
     function tlRate4(v){ return (v==null)?'—':Number(v).toFixed(4); }
     function tlMovePct(v){ return (v==null)?'':((v>0?'+':'')+v+'%'); }
     function tlBiasPill(bias){ const b=bias||'NO_TRADE'; return '<span class="tag '+b+'" style="font-size:11px;padding:2px 8px">'+b+'</span>'; }
@@ -1162,7 +1349,7 @@ DASHBOARD_HTML = """<!doctype html>
     }
     function fmtDate(v){
       if(!v) return '—';
-      try { return new Date(v.length===10? v+'T12:00:00Z' : v).toLocaleDateString(); }
+      try { return new Date(v.length===10? v+'T12:00:00Z' : v).toLocaleDateString(aitaLocale==='es'?'es-MX':'en-US'); }
       catch(e){ return v; }
     }
     function rdsIcon(st){
@@ -2338,6 +2525,8 @@ DASHBOARD_HTML = """<!doctype html>
       $('dq_empty').textContent = (s.all_trades && s.all_trades.trades) ? '' :
         'No scored actionable trades yet — selective analysis populates as recommendations are evaluated.';
     }
+    aitaApplyLanguage(document.body);
+    aitaLocaleObserver.observe(document.body,{subtree:true,childList:true,characterData:true});
     aitaBootstrap().then(function(ok){ if(ok) refresh(); });
   </script>
 </body>
