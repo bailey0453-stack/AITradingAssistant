@@ -107,6 +107,26 @@ def test_decision_card_above_topline_and_null_safe_helpers():
     assert "SIMULATED PAPER PERFORMANCE" in html or "simulated" in html.lower()
 
 
+def test_english_spanish_language_selector_and_persistence():
+    html = DASHBOARD_HTML
+    js = _dashboard_js()
+    assert 'id="aita_language"' in html
+    assert '<option value="en">English</option>' in html
+    assert '<option value="es">Español</option>' in html
+    assert "localStorage.setItem(AITA_LOCALE_KEY,aitaLocale)" in js
+    assert "document.documentElement.lang=aitaLocale" in js
+
+
+def test_spanish_localizes_static_and_dynamic_analysis_text():
+    js = _dashboard_js()
+    assert "'Trade Decision':'Decisión de operación'" in js
+    assert "'Market drivers':'Factores del mercado'" in js
+    assert "'BUY_USD':'COMPRAR USD'" in js
+    assert "function aitaTranslateString(value)" in js
+    assert "MutationObserver" in js
+    assert "toLocaleString(aitaLocale==='es'?'es-MX':'en-US')" in js
+
+
 def test_node_harness_all_settled_keeps_core_values():
     """Executable proof that one rejected fetch does not wipe core card fields."""
     harness = r"""
