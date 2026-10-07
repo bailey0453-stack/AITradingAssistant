@@ -669,7 +669,7 @@ def analyze_usdmxn(db: Session = Depends(get_db)) -> dict:
         measured_available = bool(progress.get("recommendations_evaluated"))
         measured_accuracy = None
         if measured_available:
-            measured_accuracy = research_lab.research_summary(db).get("overall_accuracy")
+            measured_accuracy = research_lab.overall_accuracy(db)
         similar = (payload.get("decision_quality") or {}).get("similar_track_record") or {}
         prov = provenance.build(
             payload, market_meta,

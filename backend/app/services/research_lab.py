@@ -14,8 +14,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Callable, Optional
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session, load_only
 
 from app.models import Recommendation, RecommendationOutcome
 from app.services import cache_manager
@@ -38,6 +38,23 @@ def _pairs(db: Session, horizon: Optional[str] = None, limit: int = 50000):
     q = (
         select(RecommendationOutcome, Recommendation)
         .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
+        .options(
+            load_only(
+                RecommendationOutcome.horizon, RecommendationOutcome.direction_correct,
+                RecommendationOutcome.target_hit, RecommendationOutcome.stop_hit,
+                RecommendationOutcome.return_pct, RecommendationOutcome.net_pnl_usd,
+                RecommendationOutcome.gross_pnl_usd, RecommendationOutcome.actionable,
+                raiseload=True,
+            ),
+            load_only(
+                Recommendation.created_at, Recommendation.confidence,
+                Recommendation.opportunity_grade, Recommendation.regime,
+                Recommendation.news_category, Recommendation.historical_similarity,
+                Recommendation.volatility, Recommendation.model_version,
+                Recommendation.key_drivers, Recommendation.bullish_factors,
+                Recommendation.bearish_factors, raiseload=True,
+            ),
+        )
         .order_by(RecommendationOutcome.evaluated_at.desc())
         .limit(limit)
     )
@@ -45,6 +62,28 @@ def _pairs(db: Session, horizon: Optional[str] = None, limit: int = 50000):
     if horizon:
         rows = [(o, r) for (o, r) in rows if o.horizon == horizon]
     return rows
+
+
+def overall_accuracy(db: Session, limit: int = 50000) -> Optional[float]:
+    """Read one aggregate for analysis, without downloading the research report.
+
+    Keep the report's existing window: the newest outcomes across all horizons
+    are bounded first, then the primary horizon and non-null scores are used.
+    """
+    recent = (
+        select(RecommendationOutcome.horizon, RecommendationOutcome.direction_correct)
+        .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
+        .order_by(RecommendationOutcome.evaluated_at.desc())
+        .limit(limit)
+        .subquery()
+    )
+    wins, scored = db.execute(
+        select(
+            func.sum(case((recent.c.direction_correct.is_(True), 1), else_=0)),
+            func.count(recent.c.direction_correct),
+        ).where(recent.c.horizon == PRIMARY_HORIZON)
+    ).one()
+    return round(100 * (wins or 0) / scored, 1) if scored else None
 
 
 # --- small stats helpers ----------------------------------------------------
@@ -134,8 +173,9 @@ def evaluation_progress(db: Session) -> dict:
 
 # --- accuracy / research summary -------------------------------------------
 def research_summary(db: Session) -> dict:
-    pairs = _pairs(db, horizon=PRIMARY_HORIZON)
-    all_pairs = _pairs(db)  # every horizon, for by-horizon view
+    # Reuse this request's rows; never cache across requests or database writes.
+    all_pairs = _pairs(db)
+    pairs = [(o, r) for o, r in all_pairs if o.horizon == PRIMARY_HORIZON]
 
     overall = _accuracy_block(pairs)
     by_conf = _group(pairs, lambda o, r: _bucket(r.confidence, _CONFIDENCE_BUCKETS))
@@ -147,7 +187,8 @@ def research_summary(db: Session) -> dict:
     by_horizon = _group(all_pairs, lambda o, r: o.horizon)
     by_model = _group(pairs, lambda o, r: r.model_version or "unknown")
 
-    drivers = driver_stats(db)
+    drivers = driver_stats(db, pairs=pairs)
+    cal = calibration(db, pairs=pairs)
     return {
         "primary_horizon": PRIMARY_HORIZON,
         "evaluation_progress": evaluation_progress(db),
@@ -161,19 +202,20 @@ def research_summary(db: Session) -> dict:
         "accuracy_by_volatility": by_vol,
         "accuracy_by_time_horizon": by_horizon,
         "accuracy_by_model_version": by_model,
-        "confidence_calibration": calibration(db)["buckets"],
+        "confidence_calibration": cal["buckets"],
         "signal_stability": signal_stability(db),
         "top_drivers": drivers["top"],
         "weakest_drivers": drivers["weakest"],
         "historical_similarity_accuracy": by_sim,
         "provider_reliability": cache_manager.health_snapshot(),
-        "self_assessment": self_assessment(db),
+        "self_assessment": self_assessment(db, pairs=pairs, cal=cal, drivers=drivers),
     }
 
 
-def calibration(db: Session) -> dict:
+def calibration(db: Session, *, pairs=None) -> dict:
     """Predicted confidence vs actual accuracy, per confidence bucket."""
-    pairs = _pairs(db, horizon=PRIMARY_HORIZON)
+    if pairs is None:
+        pairs = _pairs(db, horizon=PRIMARY_HORIZON)
     buckets = {}
     for name, lo, hi in _CONFIDENCE_BUCKETS:
         sub = [(o, r) for o, r in pairs if r.confidence is not None and lo <= r.confidence < hi]
@@ -202,8 +244,9 @@ def _driver_labels(reco: Recommendation) -> list[str]:
     return out
 
 
-def driver_stats(db: Session, min_samples: int = 3) -> dict:
-    pairs = _pairs(db, horizon=PRIMARY_HORIZON)
+def driver_stats(db: Session, min_samples: int = 3, *, pairs=None) -> dict:
+    if pairs is None:
+        pairs = _pairs(db, horizon=PRIMARY_HORIZON)
     by_driver = defaultdict(list)
     for o, r in pairs:
         for label in set(_driver_labels(r)):
@@ -281,7 +324,8 @@ def _month_key(dt) -> str:
 
 
 def monthly_performance(db: Session) -> dict:
-    pairs = _pairs(db, horizon=PRIMARY_HORIZON)
+    all_pairs = _pairs(db)
+    pairs = [(o, r) for o, r in all_pairs if o.horizon == PRIMARY_HORIZON]
     # Total recs per month (independent of evaluation).
     rec_rows = db.execute(select(Recommendation.created_at, Recommendation.direction)).all()
     total_by_month = defaultdict(int)
@@ -317,7 +361,7 @@ def monthly_performance(db: Session) -> dict:
             "by_regime": _group(sub, lambda o, r: r.regime or "unknown"),
             "by_model_version": _group(sub, lambda o, r: r.model_version or "unknown"),
             "by_time_horizon": _group(
-                [(o, r) for o, r in _pairs(db) if _month_key(r.created_at) == month],
+                [(o, r) for o, r in all_pairs if _month_key(r.created_at) == month],
                 lambda o, r: o.horizon,
             ),
         }
@@ -325,15 +369,20 @@ def monthly_performance(db: Session) -> dict:
 
 
 # --- self assessment (observations only) ------------------------------------
-def self_assessment(db: Session) -> list[str]:
+def self_assessment(db: Session, *, pairs=None, cal=None, drivers=None) -> list[str]:
     obs: list[str] = []
-    cal = calibration(db)["buckets"]
-    high = cal.get("85-100", {})
+    if pairs is None:
+        pairs = _pairs(db, horizon=PRIMARY_HORIZON)
+    if cal is None:
+        cal = calibration(db, pairs=pairs)
+    if drivers is None:
+        drivers = driver_stats(db, pairs=pairs)
+    high = cal["buckets"].get("85-100", {})
     if high.get("samples", 0) >= 10 and high.get("gap") is not None and high["gap"] >= 10:
         obs.append("Confidence appears too optimistic: at 85-100% confidence the "
                    f"model was correct only {high['actual_accuracy']}% of the time.")
 
-    summary_pairs = _pairs(db, horizon=PRIMARY_HORIZON)
+    summary_pairs = pairs
     overall_acc = _rate([o.direction_correct for o, _ in summary_pairs])
 
     by_grade = _group(summary_pairs, lambda o, r: r.opportunity_grade or "n/a")
@@ -349,9 +398,9 @@ def self_assessment(db: Session) -> list[str]:
         obs.append(f"Historical similarity >= 0.8 performs best "
                    f"({hi_sim['accuracy']}% vs {overall_acc}% overall).")
 
-    drivers = driver_stats(db)["weakest"]
-    if drivers and overall_acc is not None:
-        worst = drivers[0]
+    weakest = drivers["weakest"]
+    if weakest and overall_acc is not None:
+        worst = weakest[0]
         if (worst["accuracy"] or 0) + 10 < overall_acc:
             obs.append(f"'{worst['driver']}' signals underperform "
                        f"({worst['accuracy']}% vs {overall_acc}% overall).")

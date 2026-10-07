@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
 
@@ -194,6 +194,12 @@ def evaluate_due(
     now = _aware(now or datetime.now(timezone.utc))
     pending = db.execute(
         select(Recommendation)
+        .options(load_only(
+            Recommendation.created_at, Recommendation.pair, Recommendation.spot_price,
+            Recommendation.direction, Recommendation.target, Recommendation.stretch_target,
+            Recommendation.stop, Recommendation.evaluation_status,
+            Recommendation.last_evaluated_at, raiseload=True,
+        ))
         .where(Recommendation.evaluation_status != "complete")
         .order_by(Recommendation.created_at.asc())
     ).scalars().all()
@@ -205,13 +211,13 @@ def evaluate_due(
     for reco in pending:
         if evaluated >= limit:
             break
-        existing = {
-            o.horizon for o in db.execute(
-                select(RecommendationOutcome).where(
+        existing = set(
+            db.execute(
+                select(RecommendationOutcome.horizon).where(
                     RecommendationOutcome.recommendation_id == reco.id
                 )
             ).scalars().all()
-        }
+        )
         created = _aware(reco.created_at)
         touched_this = False
         for horizon in HORIZONS:

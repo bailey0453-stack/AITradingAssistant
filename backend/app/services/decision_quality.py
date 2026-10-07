@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
 from app.services.recommendation_evaluator import (
@@ -162,6 +162,18 @@ def _primary_pairs(db: Session, limit: int = 50000):
     rows = db.execute(
         select(RecommendationOutcome, Recommendation)
         .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
+        .options(
+            load_only(
+                RecommendationOutcome.actionable, RecommendationOutcome.direction_correct,
+                RecommendationOutcome.net_pnl_usd, RecommendationOutcome.target_hit,
+                RecommendationOutcome.stop_hit, raiseload=True,
+            ),
+            load_only(
+                Recommendation.created_at, Recommendation.direction,
+                Recommendation.opportunity_grade, Recommendation.trade_score,
+                Recommendation.confidence, raiseload=True,
+            ),
+        )
         .where(RecommendationOutcome.horizon == PRIMARY_HORIZON)
         .order_by(Recommendation.created_at.asc())
         .limit(limit)

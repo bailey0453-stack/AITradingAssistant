@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.orm import load_only
 
 from app.database import SessionLocal
 from app.models import Recommendation, RecommendationOutcome
@@ -78,6 +79,12 @@ def calibration_for_confidence(
         rows = db.execute(
             select(RecommendationOutcome, Recommendation)
             .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
+            .options(
+                load_only(RecommendationOutcome.direction_correct,
+                          RecommendationOutcome.target_hit,
+                          RecommendationOutcome.spot_at_evaluation, raiseload=True),
+                load_only(Recommendation.confidence, Recommendation.target, raiseload=True),
+            )
             .where(RecommendationOutcome.horizon == horizon)
             .where(Recommendation.confidence.is_not(None))
             .where(Recommendation.confidence >= lo)

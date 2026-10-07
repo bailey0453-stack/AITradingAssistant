@@ -12,7 +12,7 @@ from statistics import median
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models import Recommendation, RecommendationOutcome
 
@@ -115,6 +115,11 @@ def calibrate_horizon(
     rows = db.execute(
         select(RecommendationOutcome, Recommendation)
         .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
+        .options(
+            load_only(RecommendationOutcome.return_pct,
+                      RecommendationOutcome.direction_correct, raiseload=True),
+            load_only(Recommendation.confidence, Recommendation.time_horizons, raiseload=True),
+        )
         .where(RecommendationOutcome.horizon == evaluator_horizon)
         .where(Recommendation.direction == direction)
         .where(RecommendationOutcome.return_pct.is_not(None))
