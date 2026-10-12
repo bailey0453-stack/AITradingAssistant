@@ -8,7 +8,7 @@ live inputs. Missing production fields are ``None``. Verified real macro cache
 values may be reused with explicit ``cached`` / ``stale_cache`` source labels.
 """
 from __future__ import annotations
-import logging, random
+import logging, random, os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -47,6 +47,10 @@ class LiveMarketDataProvider(MarketDataProvider):
     source="live"; DEFAULT_BASE_URL="https://openexchangerates.org/api/latest.json"
     def __init__(self,s): self.settings=s; self.base_url=s.fx_base_url or self.DEFAULT_BASE_URL; self.timeout=s.http_timeout_seconds
     def _fetch_usdmxn(self):
+        if os.environ.get('FX_SHARED_URL'):
+            from app.services.shared_fx import fetch_shared_usdmxn
+            rate, self.quote_timestamp = fetch_shared_usdmxn(self.timeout)
+            return rate
         if not self.settings.fx_api_key: raise RuntimeError("FX_API_KEY is not configured.")
         try:
             r=httpx.get(self.base_url,params={"symbols":"MXN"},headers={"Authorization":f"Token {self.settings.fx_api_key}"},timeout=self.timeout); r.raise_for_status(); d=r.json()
@@ -75,9 +79,17 @@ def get_market_data(settings=None):
     fix=_fresh_fix_midpoint()
     if fix:
         spot,ts=fix; d.usdmxn=round(spot,5); d.inverse_usdmxn=_inverse(spot); d.provider="centroid_fix"; d.source="live"; d.timestamp=ts; fs["usdmxn"]="live"; fm["usdmxn"]={"status":"live","provider":"centroid_fix","age_seconds":0.0}
-    elif s.fx_api_key:
+    elif s.fx_api_key or os.environ.get('FX_SHARED_URL'):
         try:
-            spot=round(LiveMarketDataProvider(s)._fetch_usdmxn(),4); d.usdmxn=spot; d.inverse_usdmxn=_inverse(spot); d.provider=s.fx_provider or "live"; d.source="live"; fs["usdmxn"]="live"; fm["usdmxn"]={"status":"live","provider":d.provider,"age_seconds":0.0}
+            provider = LiveMarketDataProvider(s)
+            spot = round(provider._fetch_usdmxn(), 4)
+            d.usdmxn = spot; d.inverse_usdmxn = _inverse(spot)
+            if getattr(provider, 'quote_timestamp', None):
+                d.provider = 'shared_open_exchange_rates'; d.source = 'cached'; d.timestamp = provider.quote_timestamp
+                age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(d.timestamp)).total_seconds())
+            else:
+                d.provider = s.fx_provider or 'live'; d.source = 'live'; age = 0.0
+            fs['usdmxn'] = d.source; fm['usdmxn'] = {'status': d.source, 'provider': d.provider, 'age_seconds': age}
         except Exception as e: logger.warning("Live FX fetch failed (%s); USD/MXN unavailable.",_scrub(str(e),s.fx_api_key)); fs["usdmxn"]="unavailable"; fm["usdmxn"]={"status":"unavailable","provider":None,"age_seconds":None}
     else: fs["usdmxn"]="unavailable"; fm["usdmxn"]={"status":"unavailable","provider":None,"age_seconds":None}
     lm={}; mm={}
@@ -94,5 +106,5 @@ def get_market_data(settings=None):
     d.treasury_yield=lm.get("treasury_yield") if lm.get("treasury_yield") is not None else d.us10y
     m={"dxy":d.dxy,"us2y":d.us2y,"us10y":d.us10y,"treasury_yield":d.treasury_yield,"oil":d.oil,"gold":d.gold,"sp_futures":d.sp_futures,"vix":d.vix}
     d.drivers=MockMarketDataProvider._drivers(d.usdmxn,m); d.field_sources=fs; d.field_meta=fm
-    if not fix:d.timestamp=_utcnow_iso()
+    if not fix and d.provider != 'shared_open_exchange_rates':d.timestamp=_utcnow_iso()
     return d
