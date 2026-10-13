@@ -1,6 +1,7 @@
 """Real-database regressions for bounded, narrow recommendation-history reads."""
 
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -101,6 +102,75 @@ def test_summary_remains_fresh_after_new_outcome(history_engine):
         after = rl.research_summary(db)
         assert after["overall"]["samples"] == before["overall"]["samples"] + 1
         assert after["overall_accuracy"] == rl.overall_accuracy(db)
+
+
+@pytest.mark.parametrize("limit", [0, 1, 2, 17, 10000])
+def test_performance_aggregates_preserve_report_and_global_window(history_engine, limit):
+    with Session(history_engine) as db:
+        # Independent reference using the original row-based calculations.
+        pairs = db.execute(
+            select(RecommendationOutcome, Recommendation).join(Recommendation)
+            .order_by(RecommendationOutcome.evaluated_at.desc()).limit(limit)
+        ).all()
+        flat = []
+        by_conf, by_grade, by_horizon = (defaultdict(list) for _ in range(3))
+        for outcome, reco in pairs:
+            row = {name: getattr(outcome, name) for name in (
+                "return_pct", "direction_correct", "target_hit", "stop_hit",
+            )}
+            flat.append(row)
+            by_conf[evaluator._bucket(reco.confidence)].append(row)
+            by_grade[reco.opportunity_grade or "n/a"].append(row)
+            by_horizon[outcome.horizon].append(row)
+        overall = evaluator._agg(flat)
+        expected = {
+            "total_recommendations": 40, "evaluated_outcomes": len(flat),
+            "overall": overall,
+            **{name: overall[name] for name in (
+                "win_rate", "target_hit_rate", "stop_hit_rate", "avg_return_pct",
+            )},
+            "by_confidence": {k: evaluator._agg(v) for k, v in sorted(by_conf.items())},
+            "by_grade": {k: evaluator._agg(v) for k, v in sorted(by_grade.items())},
+            "by_horizon": {h: evaluator._agg(by_horizon[h]) for h in evaluator.HORIZONS},
+        }
+    statements = _statements(history_engine)
+    with Session(history_engine) as db:
+        assert evaluator.performance_summary(db, limit) == expected
+    assert len(statements) == 2
+    assert "count(" in statements[0].lower()
+    assert "UNION ALL" in statements[1]
+    assert not any("recommendations.strategist" in sql or
+                   "recommendations.primary_trade_plan" in sql for sql in statements)
+
+
+def test_performance_empty_buckets_nulls_and_fresh_writes():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        empty = evaluator.performance_summary(db)
+        assert empty["total_recommendations"] == empty["evaluated_outcomes"] == 0
+        assert empty["overall"] == evaluator._agg([])
+        assert empty["by_confidence"] == empty["by_grade"] == {}
+        for i, confidence in enumerate((None, -1, 0, 50, 70, 85, 100, 100.01)):
+            reco = Recommendation(direction="WAIT", confidence=confidence,
+                                  opportunity_grade="" if i % 2 else None)
+            db.add(reco)
+            db.flush()
+            db.add(RecommendationOutcome(
+                recommendation_id=reco.id, horizon="1h", return_pct=None,
+                direction_correct=None, target_hit=None, stop_hit=None,
+            ))
+        db.commit()
+        report = evaluator.performance_summary(db)
+        assert report["total_recommendations"] == report["evaluated_outcomes"] == 8
+        assert {k: v["samples"] for k, v in report["by_confidence"].items()} == {
+            "unknown": 3, "0-50": 1, "50-70": 1, "70-85": 1, "85-100": 2,
+        }
+        assert report["by_grade"]["n/a"]["samples"] == 8
+        assert report["win_rate"] is None
+        assert report["avg_return_pct"] is None
+        assert report["by_horizon"]["5d"] == evaluator._agg([])
+    engine.dispose()
 
 
 def test_empty_summary_does_not_reload_empty_pairs():

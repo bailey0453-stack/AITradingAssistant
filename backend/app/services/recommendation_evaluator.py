@@ -13,11 +13,10 @@ which is cheap, so the dashboard stays fast.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import case, func, literal, select, union_all
 from sqlalchemy.orm import Session, load_only
 
 from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
@@ -295,45 +294,78 @@ def _agg(rows: list[dict]) -> dict:
 
 
 def performance_summary(db: Session, max_outcomes: int = 10000) -> dict:
-    total_recs = db.execute(
-        select(Recommendation.id)
-    ).scalars().all()
-    total = len(total_recs)
+    total = db.scalar(select(func.count()).select_from(Recommendation))
 
-    pairs = db.execute(
-        select(RecommendationOutcome, Recommendation)
+    # Preserve the global newest-outcomes window before grouping. Return only
+    # aggregate rows, never the large recommendation JSON reports or history.
+    window = (
+        select(
+            RecommendationOutcome.return_pct,
+            RecommendationOutcome.direction_correct,
+            RecommendationOutcome.target_hit,
+            RecommendationOutcome.stop_hit,
+            RecommendationOutcome.horizon,
+            Recommendation.confidence,
+            Recommendation.opportunity_grade,
+        )
         .join(Recommendation, RecommendationOutcome.recommendation_id == Recommendation.id)
         .order_by(RecommendationOutcome.evaluated_at.desc())
         .limit(max_outcomes)
-    ).all()
+        .cte("performance_window")
+    )
+    columns = window.c
+    confidence_bucket = case(
+        *[((columns.confidence >= lo) & (columns.confidence < hi), name)
+          for name, lo, hi in _CONFIDENCE_BUCKETS],
+        else_="unknown",
+    )
+    grade = case(
+        (columns.opportunity_grade.is_(None), "n/a"),
+        (columns.opportunity_grade == "", "n/a"),
+        else_=columns.opportunity_grade,
+    )
 
-    flat: list[dict] = []
-    by_conf: dict[str, list[dict]] = defaultdict(list)
-    by_grade: dict[str, list[dict]] = defaultdict(list)
-    by_horizon: dict[str, list[dict]] = defaultdict(list)
+    def aggregate(dimension, key, grouped=True):
+        metrics = [func.count().label("samples")]
+        for name in ("direction_correct", "target_hit", "stop_hit"):
+            column = columns[name]
+            metrics.extend([
+                func.count(column).label(name + "_scored"),
+                func.sum(case((column.is_(True), 1), else_=0)).label(name + "_hits"),
+            ])
+        metrics.append(func.avg(columns.return_pct).label("avg_return_pct"))
+        query = select(literal(dimension).label("dimension"), key.label("key"), *metrics).select_from(window)
+        return query.group_by(key) if grouped else query
 
-    for outcome, reco in pairs:
-        row = {
-            "return_pct": outcome.return_pct,
-            "direction_correct": outcome.direction_correct,
-            "target_hit": outcome.target_hit,
-            "stop_hit": outcome.stop_hit,
-        }
-        flat.append(row)
-        by_conf[_bucket(reco.confidence)].append(row)
-        by_grade[reco.opportunity_grade or "n/a"].append(row)
-        by_horizon[outcome.horizon].append(row)
+    results = db.execute(union_all(
+        aggregate("overall", literal(""), grouped=False),
+        aggregate("confidence", confidence_bucket),
+        aggregate("grade", grade),
+        aggregate("horizon", columns.horizon),
+    )).mappings().all()
 
-    overall = _agg(flat)
+    groups = {name: {} for name in ("overall", "confidence", "grade", "horizon")}
+    for row in results:
+        metrics = {"samples": row["samples"]}
+        for name, output in (("direction_correct", "win_rate"),
+                             ("target_hit", "target_hit_rate"),
+                             ("stop_hit", "stop_hit_rate")):
+            scored = row[name + "_scored"]
+            metrics[output] = round(100 * row[name + "_hits"] / scored, 1) if scored else None
+        avg = row["avg_return_pct"]
+        metrics["avg_return_pct"] = round(float(avg), 4) if avg is not None else None
+        groups[row["dimension"]][row["key"]] = metrics
+
+    overall = groups["overall"][""]
     return {
         "total_recommendations": total,
-        "evaluated_outcomes": len(flat),
+        "evaluated_outcomes": overall["samples"],
         "overall": overall,
         "win_rate": overall["win_rate"],
         "target_hit_rate": overall["target_hit_rate"],
         "stop_hit_rate": overall["stop_hit_rate"],
         "avg_return_pct": overall["avg_return_pct"],
-        "by_confidence": {k: _agg(v) for k, v in sorted(by_conf.items())},
-        "by_grade": {k: _agg(v) for k, v in sorted(by_grade.items())},
-        "by_horizon": {h: _agg(by_horizon.get(h, [])) for h in HORIZONS},
+        "by_confidence": dict(sorted(groups["confidence"].items())),
+        "by_grade": dict(sorted(groups["grade"].items())),
+        "by_horizon": {h: groups["horizon"].get(h, _agg([])) for h in HORIZONS},
     }
