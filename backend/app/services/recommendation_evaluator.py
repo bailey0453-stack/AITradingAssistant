@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import case, func, literal, select, union_all
+from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, load_only
 
 from app.models import MarketSnapshot, Recommendation, RecommendationOutcome
@@ -191,6 +191,54 @@ def evaluate_due(
     db: Session, now: Optional[datetime] = None, limit: int = 200
 ) -> dict:
     now = _aware(now or datetime.now(timezone.utc))
+    empty = {"evaluated": 0, "recommendations_touched": 0, "completed": 0}
+    if limit <= 0:
+        return empty
+
+    # A horizon is only evaluable once a stored price reaches its due
+    # time. In particular, wall-clock time advancing over a closed weekend
+    # must not trigger a price query for every pending horizon on every run.
+    latest_prices = {
+        pair: _aware(latest)
+        for pair, latest in db.execute(
+            select(MarketSnapshot.pair, func.max(MarketSnapshot.created_at))
+            .where(MarketSnapshot.usdmxn.is_not(None))
+            .where(MarketSnapshot.created_at <= now)
+            .group_by(MarketSnapshot.pair)
+        ).all()
+    }
+    eligible_pairs = []
+    for pair, latest in latest_prices.items():
+        last_day_close = latest.replace(
+            hour=_FX_DAY_CLOSE_HOUR, minute=0, second=0, microsecond=0
+        )
+        if last_day_close > latest:
+            last_day_close -= timedelta(days=1)
+        eligible_horizons = []
+        for horizon, seconds in HORIZON_SECONDS.items():
+            # A recommendation created exactly at 21:00 belongs to the next
+            # day's close, hence the strict comparison for end_of_day.
+            due_by_last_price = (
+                Recommendation.created_at < last_day_close
+                if seconds is None else
+                Recommendation.created_at <= latest - timedelta(seconds=seconds)
+            )
+            already_scored = (
+                select(RecommendationOutcome.id)
+                .where(RecommendationOutcome.recommendation_id == Recommendation.id)
+                .where(RecommendationOutcome.horizon == horizon)
+                .exists()
+            )
+            eligible_horizons.append(and_(due_by_last_price, ~already_scored))
+        eligible_pairs.append(and_(
+            Recommendation.pair == pair, or_(*eligible_horizons)
+        ))
+    if not eligible_pairs:
+        return empty
+
+    # Filter before limiting: old rows waiting for unavailable prices must not
+    # consume the whole batch and starve later rows that can actually be scored.
+    # Each selected recommendation has at least one missing, available horizon.
     pending = db.execute(
         select(Recommendation)
         .options(load_only(
@@ -200,8 +248,19 @@ def evaluate_due(
             Recommendation.last_evaluated_at, raiseload=True,
         ))
         .where(Recommendation.evaluation_status != "complete")
-        .order_by(Recommendation.created_at.asc())
+        .where(or_(*eligible_pairs))
+        .order_by(Recommendation.created_at.asc(), Recommendation.id.asc())
+        .limit(limit)
     ).scalars().all()
+    if not pending:
+        return empty
+
+    existing_by_recommendation = {reco.id: set() for reco in pending}
+    for recommendation_id, horizon in db.execute(
+        select(RecommendationOutcome.recommendation_id, RecommendationOutcome.horizon)
+        .where(RecommendationOutcome.recommendation_id.in_(existing_by_recommendation))
+    ).all():
+        existing_by_recommendation[recommendation_id].add(horizon)
 
     evaluated = 0
     touched = 0
@@ -210,13 +269,7 @@ def evaluate_due(
     for reco in pending:
         if evaluated >= limit:
             break
-        existing = set(
-            db.execute(
-                select(RecommendationOutcome.horizon).where(
-                    RecommendationOutcome.recommendation_id == reco.id
-                )
-            ).scalars().all()
-        )
+        existing = existing_by_recommendation[reco.id]
         created = _aware(reco.created_at)
         touched_this = False
         for horizon in HORIZONS:
@@ -225,7 +278,7 @@ def evaluate_due(
             if horizon in existing:
                 continue
             due = horizon_due_time(created, horizon)
-            if now < due:
+            if due > latest_prices[reco.pair]:
                 continue
             ev = _evaluation_price(db, reco.pair, due, now)
             if ev is None:
