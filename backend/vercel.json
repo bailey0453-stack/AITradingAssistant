@@ -16,6 +16,10 @@
   ],
   "crons": [
     {
+      "path": "/jobs/news-watch",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/jobs/intraday-usdmxn-analysis",
       "schedule": "*/5 * * * *"
     },

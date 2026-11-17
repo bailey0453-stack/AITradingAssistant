@@ -13,6 +13,28 @@ It shows BUY USD / SELL MXN NOW, SELL USD / BUY MXN NOW, or WAIT, together with:
 
 The existing 2–4 hour card remains available as a separately labelled view.
 
+## Live news check
+
+The 20-minute card now polls the configured news provider once per minute per
+process. The authenticated `/jobs/news-watch` cron also checks every minute when
+the page is closed and stores real headlines with their original publication
+time and first-seen database timestamp. Mock fallbacks never enter this check.
+Provider delivery latency and subscription entitlements are not established by
+the polling interval; the UI exposes this limit and each article's timestamp.
+
+Headlines from the last 20 minutes can confirm or suspend the price forecast.
+Fed and Banxico rate actions are interpreted separately; conditional headlines
+are not treated as confirmed decisions. Fresh unclear high-impact news,
+conflicting news, missing/future timestamps, an unavailable feed, a missing price
+reaction, or disagreement with the price forecast produce WAIT and suppress the
+numeric target. Duplicate and old articles cannot become fresh catalysts merely
+because they were fetched again. Source links use HTTP(S) and plain text only.
+
+The numeric target and walk-forward results remain price based. News is a
+confirmation/risk layer, not a calibrated estimate of news-driven magnitude.
+The observed change since a pre-headline snapshot does not establish causality.
+No news-conditioned predictive accuracy or publication-speed guarantee is claimed.
+
 ## Evidence and limits
 
 Only live `centroid_fix` market snapshots enter the historical data. Daily
@@ -49,7 +71,7 @@ genuine intraday history and complete live calendar coverage are available.
 
 ## Validation
 
-`pytest -q tests/test_short_term_forecast.py tests/test_dashboard_js_load.py tests/test_customer_sso_auth.py`
+`pytest -q tests/test_short_term_news.py tests/test_short_term_forecast.py tests/test_dashboard_js_load.py tests/test_customer_sso_auth.py`
 
 This checks both quote directions, exact forecast horizon, cost gating,
 non-overlapping samples, walk-forward purging, future-data exclusion, mock/hourly

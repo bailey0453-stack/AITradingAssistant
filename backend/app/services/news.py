@@ -48,12 +48,12 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _epoch_to_iso(epoch) -> str:
+def _epoch_to_iso(epoch) -> str | None:
     """Convert a Unix timestamp (Finnhub `datetime`) to an ISO-8601 string."""
     try:
         return _iso(datetime.fromtimestamp(float(epoch), tz=timezone.utc))
     except (TypeError, ValueError, OverflowError, OSError):
-        return _iso(datetime.now(timezone.utc))
+        return None
 
 
 # Topics that move USD/MXN — used to build the live query and to tag items.
@@ -120,6 +120,8 @@ _RELEVANCE_TERMS = [
     ("treasury", 22), ("yield", 18), ("dxy", 22), ("dollar index", 25),
     ("dollar", 15), ("oil", 18), ("crude", 18), ("wti", 18),
     ("trade deal", 20), ("trade war", 22),
+    ("geopolitical", 25), ("middle east", 25), ("missile", 25),
+    ("military attack", 30), ("sanctions", 25), ("oil embargo", 30),
 ]
 
 
@@ -280,6 +282,9 @@ class NewsAPIProvider(NewsProvider):
             msg = scrub(str(data.get("message", data)), self.settings.news_api_key)
             raise RuntimeError(f"News provider error: {msg}")
 
+        if not isinstance(data, dict) or not isinstance(data.get("articles"), list):
+            raise RuntimeError("News provider returned an invalid article payload.")
+
         articles = (data or {}).get("articles") or []
         items: list[dict] = []
         for art in articles:
@@ -296,14 +301,10 @@ class NewsAPIProvider(NewsProvider):
                     "summary": summary,
                     "source": ((art.get("source") or {}).get("name") or "NewsAPI"),
                     "url": art.get("url") or "",
-                    "published_at": art.get("publishedAt") or _iso(
-                        datetime.now(timezone.utc)
-                    ),
+                    "published_at": art.get("publishedAt") or None,
                     **meta,
                 }
             )
-        if not items:
-            raise RuntimeError("News provider returned no usable articles.")
         items.sort(key=lambda i: i.get("relevance_score", 0), reverse=True)
         return items
 
@@ -347,7 +348,9 @@ class FinnhubNewsProvider(NewsProvider):
                 f"News provider error: "
                 f"{scrub(str(data.get('error')), self.settings.news_api_key)}"
             )
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            raise RuntimeError("News provider returned an invalid article payload.")
+        return data
 
     def get_news(self) -> list[dict]:
         if not self.settings.news_api_key:
@@ -383,8 +386,6 @@ class FinnhubNewsProvider(NewsProvider):
                     **meta,
                 }
             )
-        if not items:
-            raise RuntimeError("News provider returned no relevant articles.")
         items.sort(key=lambda i: i.get("relevance_score", 0), reverse=True)
         return items
 

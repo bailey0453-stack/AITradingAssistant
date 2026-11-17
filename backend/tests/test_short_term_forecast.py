@@ -17,6 +17,7 @@ def fixture(slope=.0008, spread=.0002):
     points = [(NOW - timedelta(minutes=5000 - m), 20 + slope * (m - 5000)) for m in range(0, 5001, 5)]
     fix = {"bid": 20 - spread/2, "ask": 20 + spread/2, "updated_at": NOW.isoformat()}
     payload = {"market_state": {"is_open": True}, "context": {"upcoming_events": []}, "data_sources": {"calendar": "live", "calendar_status": "LIVE"}}
+    payload["news_watch"] = {"status": "LIVE_POLL", "checked_at": NOW.isoformat(), "items": []}
     return points, fix, payload
 
 

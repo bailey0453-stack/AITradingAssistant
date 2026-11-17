@@ -64,6 +64,14 @@ def intraday_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
     return run_intraday_usdmxn_job(db)
 
 
+@router.api_route("/news-watch", methods=["POST", "GET"], dependencies=[Depends(require_cron_auth)])
+def news_watch(db: Session = Depends(get_db)) -> dict:
+    """Watch real headlines independently of whether a dashboard is open."""
+    from app.services.short_term_news import snapshot
+    result = snapshot(db)
+    return {k: v for k, v in result.items() if k != "items"} | {"headline_count": len(result.get("items") or [])}
+
+
 @router.api_route("/hourly-usdmxn-analysis", methods=["POST", "GET"], dependencies=[Depends(require_cron_auth)])
 def hourly_usdmxn_analysis(db: Session = Depends(get_db)) -> dict:
     """Refresh heavier research inputs, then run the compatibility hourly job."""

@@ -324,6 +324,10 @@ DASHBOARD_HTML = """<!doctype html>
       <p id="st_reason" class="tdc-why">Waiting for evidence.</p>
       <p id="st_evidence" class="muted"></p>
       <p id="st_updated" class="muted"></p>
+      <p id="st_news_health" class="muted">Checking headline coverage…</p>
+      <ul id="st_news_headlines"></ul>
+      <p id="st_news_reaction" class="muted"></p>
+      <p class="muted">News can confirm or suspend the price forecast. The numeric target is based on measured price history; a separate news-impact target has not been calibrated.</p>
       <p class="muted">Experimental 20-minute estimate. Range shows the central 80% of similar historical outcomes, not a guaranteed forecast interval. Net assumes the current FIX spread at exit and $40 fees; slippage is excluded.</p>
     </div>
     <div class="card tdc yellow" id="tradeDecisionCard">
@@ -1271,10 +1275,34 @@ DASHBOARD_HTML = """<!doctype html>
       setText('st_reason', (t.wait_reasons || []).join(' ') || '20-minute evidence and estimated costs support this direction.');
       const v = t.validation || {};
       setText('st_evidence', (t.analogs || 0) + ' comparable outcomes · '
-        + (v.samples || 0) + ' earlier walk-forward tests · directional accuracy '
+        + (v.samples || 0) + ' earlier price-only walk-forward tests · directional accuracy '
         + (v.directional_accuracy_pct == null ? 'not established' : v.directional_accuracy_pct + '%')
         + ' · Simulated results; live trading accuracy is not established.');
       setText('st_updated', 'Updated ' + fmtTime(t.generated_at) + ' · Forecast for ' + fmtTime(t.forecast_for));
+      const news = t.news || {};
+      setText('st_news_health', 'News: ' + (news.status || 'UNAVAILABLE')
+        + ' · ' + (news.provider || 'provider unverified') + ' · checked ' + fmtTime(news.checked_at)
+        + ' · polls every 60 seconds; provider delivery delay is unverified');
+      const headlines = $('st_news_headlines');
+      if(headlines){
+        headlines.textContent = '';
+        (news.headlines || []).forEach(function(item){
+          const row = document.createElement('li');
+          const label = (item.source || 'Source') + ' · ' + fmtTime(item.published_at) + ': ' + item.headline;
+          if(item.url && (item.url.startsWith('https://') || item.url.startsWith('http://'))){
+            const link = document.createElement('a');
+            link.href = item.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+            link.textContent = label; row.appendChild(link);
+          } else { row.textContent = label; }
+          headlines.appendChild(row);
+        });
+      }
+      const reaction = news.reaction;
+      setText('st_news_reaction', reaction
+        ? ('Observed USD/MXN change since the pre-headline snapshot: ' + reaction.change_mxn
+          + ' MXN · ' + (reaction.confirmed ? 'agrees with headline-implied direction' : 'not confirmed')
+          + '. This does not establish that the headline caused the move.')
+        : ((news.wait_reasons || []).join(' ') || 'No fresh directional catalyst identified in the checked feed.'));
     }
     function expireShortTerm(message){
       shortTermExpires = 0;
@@ -1283,6 +1311,9 @@ DASHBOARD_HTML = """<!doctype html>
       setText('st_action', 'WAIT');
       setText('st_prediction', '20-minute forecast unavailable');
       setText('st_reason', message);
+      setText('st_news_health', 'News check expired or unavailable.');
+      setText('st_news_headlines', '');
+      setText('st_news_reaction', '');
     }
     async function loadShortTerm(){
       if(shortTermLoading) return;
