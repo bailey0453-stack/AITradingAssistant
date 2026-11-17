@@ -46,10 +46,12 @@ def short_term_now(db: Session = Depends(get_db)) -> dict:
     """Independent, read-only 20-minute view with a fresh executable quote."""
     from app.services import short_term_forecast
     from app.services.market_hours import get_market_state
+    from app.services.short_term_news import snapshot as news_snapshot
 
     payload = {
         **_short_term_calendar(int(time() // 300)),
         "market_state": {"is_open": get_market_state().is_open},
+        "news_watch": news_snapshot(db),
     }
     return short_term_forecast.from_database(db, payload)
 

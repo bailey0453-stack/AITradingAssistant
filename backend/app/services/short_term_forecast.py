@@ -20,6 +20,7 @@ from sqlalchemy import select
 from app.models import MarketSnapshot
 from app.services.hedge_pnl import hedge_pnl_detail
 from app.services.trade_decision_card import _blocking_event
+from app.services.short_term_news import assess as assess_news
 
 MIN_ANALOGS = 30
 MIN_VALIDATION = 30
@@ -140,7 +141,8 @@ def build(points, fix, payload, *, now=None):
         "status": "unavailable", "direction": None, "expected_rate": None,
         "expected_move_mxn": None, "expected_move_cents": None,
         "outcome_range": None, "net_pnl_usd": None, "analogs": 0,
-        "validation": None, "wait_reasons": [], "method": "intraday_neighbors_20m_v1",
+        "validation": None, "wait_reasons": [], "method": "intraday_neighbors_20m_news_gated_v2",
+        "news": {"status": "UNAVAILABLE", "headlines": []},
     }
     def wait(reason):
         out["wait_reasons"].append(reason)
@@ -154,6 +156,10 @@ def build(points, fix, payload, *, now=None):
     if not (payload.get("market_state") or {}).get("is_open"):
         return wait("The FX market is closed or its open status is unverified.")
     points = sorted({at: float(value) for ts, value in points if (at := _time(ts)) and at <= now and _number(value) is not None}.items())
+    out["news"] = assess_news(payload.get("news_watch"), points, fix, now=now)
+    if out["news"]["wait_reasons"]:
+        out["wait_reasons"].extend(out["news"]["wait_reasons"])
+        return out
     # Re-anchor the live features to the executable FIX midpoint.
     features = _features(points, [p[0] for p in points], now, spot)
     if features is None:
@@ -175,6 +181,10 @@ def build(points, fix, payload, *, now=None):
                               "label": "Central 80% of analogous outcomes; uncalibrated forecast range"})
     if direction is None:
         return wait("Comparable outcomes imply no directional move.")
+    if out["news"].get("direction") and out["news"]["direction"] != direction:
+        out.update(direction=None, expected_rate=None, expected_move_mxn=None,
+                   expected_move_cents=None, outcome_range=None)
+        return wait("Fresh news and its observed price reaction oppose the price-analog forecast; target suspended.")
     pricing = {"bid": bid, "ask": ask}
     pnl = hedge_pnl_detail(direction, expected, pricing)
     out["net_pnl_usd"] = pnl["net_pnl_usd"]
