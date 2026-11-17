@@ -311,8 +311,23 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
     </div>
+    <div class="card tdc yellow" id="shortTermCard">
+      <h2>What should I do now? <span class="muted">USD/MXN · next 20 minutes</span></h2>
+      <div class="tdc-action" id="st_action">WAIT</div>
+      <div class="tdc-pred" id="st_prediction">Checking live price and 20-minute evidence…</div>
+      <div class="tdc-grid">
+        <div><div class="k">Live FIX midpoint</div><div class="v" id="st_now">—</div></div>
+        <div><div class="k">Expected rate in 20 min</div><div class="v" id="st_target">—</div></div>
+        <div><div class="k">Analog outcome range</div><div class="v" id="st_range">—</div></div>
+        <div><div class="k">Estimated net / $100K</div><div class="v" id="st_pnl">—</div></div>
+      </div>
+      <p id="st_reason" class="tdc-why">Waiting for evidence.</p>
+      <p id="st_evidence" class="muted"></p>
+      <p id="st_updated" class="muted"></p>
+      <p class="muted">Experimental 20-minute estimate. Range shows the central 80% of similar historical outcomes, not a guaranteed forecast interval. Net assumes the current FIX spread at exit and $40 fees; slippage is excluded.</p>
+    </div>
     <div class="card tdc yellow" id="tradeDecisionCard">
-      <h2>Trade Decision <span class="muted">(decision support only)</span></h2>
+      <h2>Trade Decision <span class="muted">(broader 2–4 hour view)</span></h2>
       <div class="tdc-action" id="tdc_action">—</div>
       <div class="tdc-bias" id="tdc_bias">BIAS: —</div>
       <div class="tdc-pred" id="tdc_pred">PREDICTION: —</div>
@@ -1237,6 +1252,48 @@ DASHBOARD_HTML = """<!doctype html>
     // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
     // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
     function tlGradeLabel(grade){ return (grade != null && grade !== '') ? grade : '—'; }
+    let shortTermExpires = 0;
+    let shortTermLoading = false;
+    function renderShortTerm(t){
+      shortTermExpires = Date.parse(t.expires_at || '') || 0;
+      const active = t.action && t.action !== 'WAIT';
+      $('shortTermCard').className = 'card tdc ' + (active ? 'green' : 'yellow');
+      setText('st_action', t.action || 'WAIT');
+      const move = t.expected_move_mxn;
+      setText('st_prediction', move == null ? '20-minute forecast unavailable'
+        : 'USD/MXN expected ' + (move > 0 ? 'UP ' : move < 0 ? 'DOWN ' : 'UNCHANGED ')
+          + Math.abs(move).toFixed(5) + ' MXN (' + Math.abs(t.expected_move_cents).toFixed(2) + ' Mexican cents) in 20 minutes');
+      setText('st_now', tlRate4(t.spot));
+      setText('st_target', tlRate4(t.expected_rate));
+      const range = t.outcome_range;
+      setText('st_range', range ? tlRate4(range.low) + ' – ' + tlRate4(range.high) : '—');
+      setText('st_pnl', t.net_pnl_usd == null ? '—' : '$' + Number(t.net_pnl_usd).toFixed(2));
+      setText('st_reason', (t.wait_reasons || []).join(' ') || '20-minute evidence and estimated costs support this direction.');
+      const v = t.validation || {};
+      setText('st_evidence', (t.analogs || 0) + ' comparable outcomes · '
+        + (v.samples || 0) + ' earlier walk-forward tests · directional accuracy '
+        + (v.directional_accuracy_pct == null ? 'not established' : v.directional_accuracy_pct + '%')
+        + ' · Simulated results; live trading accuracy is not established.');
+      setText('st_updated', 'Updated ' + fmtTime(t.generated_at) + ' · Forecast for ' + fmtTime(t.forecast_for));
+    }
+    function expireShortTerm(message){
+      shortTermExpires = 0;
+      $('shortTermCard').className = 'card tdc yellow';
+      ['st_now','st_target','st_range','st_pnl','st_evidence'].forEach(function(id){ setText(id,'—'); });
+      setText('st_action', 'WAIT');
+      setText('st_prediction', '20-minute forecast unavailable');
+      setText('st_reason', message);
+    }
+    async function loadShortTerm(){
+      if(shortTermLoading) return;
+      shortTermLoading = true;
+      try { renderShortTerm(await fetchJson('/decision/now')); }
+      catch(e) { expireShortTerm('Live 20-minute forecast could not be refreshed.'); }
+      finally { shortTermLoading = false; }
+    }
+    setInterval(function(){
+      if(shortTermExpires && Date.now() >= shortTermExpires) expireShortTerm('Signal expired. Refreshing the live quote and evidence is required.');
+    }, 1000);
     function renderTradeDecisionCard(d){
       const card = $('tradeDecisionCard'); if(!card) return;
       const t = d.trade_decision_card || {};
@@ -2527,7 +2584,11 @@ DASHBOARD_HTML = """<!doctype html>
     }
     aitaApplyLanguage(document.body);
     aitaLocaleObserver.observe(document.body,{subtree:true,childList:true,characterData:true});
-    aitaBootstrap().then(function(ok){ if(ok) refresh(); });
+    aitaBootstrap().then(function(ok){ if(ok) {
+      refresh();
+      loadShortTerm();
+      setInterval(loadShortTerm, 30000);
+    } });
   </script>
 </body>
 </html>"""
