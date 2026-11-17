@@ -91,7 +91,8 @@ They never widen the original stop. No broker order, protective stop or profit
 order is submitted. The user closes on their trading platform and then records
 the actual exit rate; journal P/L still uses the reference $100K and $40 fees.
 
-The dashboard checks every 15 seconds and expires exit advice after 40 seconds;
+The dashboard checks every 15 seconds. Advice expires no later than 30 seconds
+after its underlying quote, with an additional 40-second assessment cap;
 background checks reuse the existing authenticated minute news cron. Quote
 freshness is at most 30 seconds. Stale data cannot produce a fresh HOLD or
 numeric current P/L; original risk levels remain visible. Observation gaps are

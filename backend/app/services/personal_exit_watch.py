@@ -62,7 +62,8 @@ def assess(trade, fix, prices, payload, *, observations=(), now=None):
         exit_rate = bid if sign == 1 else ask
         profit = sign*(exit_rate-trade.entry_rate)
         out.update(current_exit_rate=round(exit_rate,6),quote_at=at.isoformat(),
-                   move_cents=round(profit*100,3),net_pnl_usd=net_pnl(trade.direction,trade.entry_rate,exit_rate))
+                   move_cents=round(profit*100,3),net_pnl_usd=net_pnl(trade.direction,trade.entry_rate,exit_rate),
+                   expires_at=min(now+timedelta(seconds=40),at+timedelta(seconds=30)).isoformat())
     else:
         out["warnings"].append("Live quote unavailable or stale. Original target and stop still apply; check your trading platform.")
         return out

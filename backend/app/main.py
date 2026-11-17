@@ -2912,7 +2912,7 @@ DASHBOARD_HTML = """<!doctype html>
       loadFlexible();
       loadPersonalWatch();
       loadRelease();
-      setInterval(loadFlexible,30000);
+      setInterval(loadFlexible,15000);
       setInterval(loadPersonalWatch,15000);
       $('legacyShortTerm').addEventListener('toggle',function(){if(this.open) loadShortTerm();});
       setInterval(function(){if($('legacyShortTerm').open) loadShortTerm();},30000);

@@ -111,3 +111,8 @@ def test_observation_gaps_are_reported():
     assert any("gap" in r for r in out["warnings"])
     again=watch.assess(p,fix(18.51,at=NOW+timedelta(seconds=10)),[],payload(),now=NOW+timedelta(seconds=10))
     assert any("gap" in r for r in again["warnings"])
+
+
+def test_exit_advice_cannot_outlive_quote_freshness():
+    out=watch.assess(trade(),fix(18.51,at=NOW-timedelta(seconds=29)),[],payload(),now=NOW)
+    assert datetime.fromisoformat(out["expires_at"])==NOW+timedelta(seconds=1)

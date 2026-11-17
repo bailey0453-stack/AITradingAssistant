@@ -158,7 +158,8 @@ def build(points, fix, payload, *, now=None):
     bid,ask,at = quote
     pricing = {"bid":bid,"ask":ask}
     mid = (bid+ask)/2
-    out.update(spot=round(mid,5),quote_at=at.isoformat(),spread_cents=round((ask-bid)*100,3))
+    out.update(spot=round(mid,5),quote_at=at.isoformat(),spread_cents=round((ask-bid)*100,3),
+               expires_at=min(now+timedelta(seconds=45),at+timedelta(seconds=30)).isoformat())
     clean = {}
     for ts,p in points:
         ts = aware(ts)
@@ -219,8 +220,9 @@ def build(points, fix, payload, *, now=None):
 def current(db, payload):
     from app.services.fix.provider import get_fix_quote
     from app.services.fx_observations import capture, points
-    now = datetime.now(timezone.utc)
     fix = get_fix_quote()
+    now = datetime.now(timezone.utc)
     capture(db,fix,now)
     db.commit()
-    return build(points(db,now),fix,payload,now=now)
+    history = points(db,now)
+    return build(history,fix,payload,now=datetime.now(timezone.utc))

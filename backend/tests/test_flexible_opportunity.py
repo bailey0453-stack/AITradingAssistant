@@ -102,3 +102,10 @@ def test_timeout_gains_do_not_masquerade_as_five_cent_target_hits():
     assert stats["average_net_usd"]==100 and stats["target_first_pct"]==0
     assert stats["target_first_lower_95_pct"]==0
     assert stats["target_hit_minutes_median"] is None
+
+
+def test_opportunity_expires_when_its_underlying_quote_does():
+    points,fix,payload=fixture()
+    fix["updated_at"]=(NOW-timedelta(seconds=29)).isoformat()
+    out=fo.build(points,fix,payload,now=NOW)
+    assert datetime.fromisoformat(out["expires_at"])==NOW+timedelta(seconds=1)
