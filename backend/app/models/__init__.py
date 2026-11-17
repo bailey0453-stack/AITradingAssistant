@@ -8,6 +8,7 @@ from app.models.history import (
     SimilarityMatch,
 )
 from app.models.jobs import JobRun
+from app.models.release_watch import ReleaseWatch
 from app.models.recommendations import Recommendation, RecommendationOutcome
 from app.models.research import ResearchDailyLearning, ResearchMarketSnapshot
 from app.models.research_import import HistoricalImportJob
@@ -28,4 +29,5 @@ __all__ = [
     "RecommendationOutcome",
     "RecommendationExitSimulation",
     "JobRun",
+    "ReleaseWatch",
 ]

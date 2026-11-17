@@ -168,6 +168,8 @@ const $ = id => elements[id] || (elements[id] = {textContent:''});
 const setText = (id, value) => $(id).textContent = String(value);
 const tlRate4 = v => v == null ? '—' : Number(v).toFixed(4);
 const fmtTime = v => v;
+const applyReleaseDecision = () => {};
+const releaseInControl = false;
 let expiryCheck;
 const setInterval = callback => { expiryCheck = callback; };
 let fetchJson = async () => { throw new Error('feed down'); };

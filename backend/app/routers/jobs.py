@@ -69,7 +69,17 @@ def news_watch(db: Session = Depends(get_db)) -> dict:
     """Watch real headlines independently of whether a dashboard is open."""
     from app.services.short_term_news import snapshot
     result = snapshot(db)
-    return {k: v for k, v in result.items() if k != "items"} | {"headline_count": len(result.get("items") or [])}
+    from app.routers.decision import release_watch_now
+    try:
+        release=release_watch_now(db)
+        release_status={k:release.get(k) for k in ("phase","feed_status","provider","error")}
+        if release.get("error"):
+            logger.warning("Release watch: %s: %s",release.get("feed_status"),release["error"])
+    except Exception:
+        db.rollback()
+        logger.exception("Release watch failed; no release action is issued.")
+        release_status={"phase":"UNAVAILABLE"}
+    return {k: v for k, v in result.items() if k != "items"} | {"headline_count": len(result.get("items") or []),"release_watch":release_status}
 
 
 @router.api_route("/hourly-usdmxn-analysis", methods=["POST", "GET"], dependencies=[Depends(require_cron_auth)])

@@ -30,12 +30,13 @@ def _short_term_calendar(five_minute_bucket: int) -> dict:
     calendar = get_calendar_provider()
     try:
         upcoming = calendar.get_upcoming()
+        released = getattr(calendar,"get_recent_released",lambda:[])()
         source = getattr(calendar, "source", "unavailable")
         status = getattr(calendar, "status", "ERROR")
     except Exception:
-        upcoming, source, status = [], "unavailable", "ERROR"
+        upcoming, released, source, status = [], [], "unavailable", "ERROR"
     return {
-        "context": {"upcoming_events": upcoming},
+        "context": {"upcoming_events": upcoming, "released_events": released},
         "data_sources": {"calendar": source, "calendar_status": status},
         "calendar_coverage_gaps": getattr(calendar, "coverage_gaps", []),
     }
@@ -54,6 +55,13 @@ def short_term_now(db: Session = Depends(get_db)) -> dict:
         "news_watch": news_snapshot(db),
     }
     return short_term_forecast.from_database(db, payload)
+
+
+@router.get("/release")
+def release_watch_now(db: Session = Depends(get_db)) -> dict:
+    from app.services.release_watch import current
+    context=_short_term_calendar(int(time() // 300))["context"]
+    return current(db, scheduled=context.get("upcoming_events",[])+context.get("released_events",[]))
 
 _NO_ANALYSIS = {
     "available": False,
