@@ -8,6 +8,9 @@ Read-only views over the latest stored analysis and scored outcomes:
 
 from __future__ import annotations
 
+from functools import lru_cache
+from time import time
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +20,38 @@ from app.models import AnalysisSnapshot
 from app.services import decision_quality
 
 router = APIRouter(prefix="/decision", tags=["decision"])
+
+
+@lru_cache(maxsize=1)
+def _short_term_calendar(five_minute_bucket: int) -> dict:
+    """Reuse calendar coverage for five minutes; never cache live FIX prices."""
+    from app.services.calendar import get_calendar_provider
+
+    calendar = get_calendar_provider()
+    try:
+        upcoming = calendar.get_upcoming()
+        source = getattr(calendar, "source", "unavailable")
+        status = getattr(calendar, "status", "ERROR")
+    except Exception:
+        upcoming, source, status = [], "unavailable", "ERROR"
+    return {
+        "context": {"upcoming_events": upcoming},
+        "data_sources": {"calendar": source, "calendar_status": status},
+        "calendar_coverage_gaps": getattr(calendar, "coverage_gaps", []),
+    }
+
+
+@router.get("/now")
+def short_term_now(db: Session = Depends(get_db)) -> dict:
+    """Independent, read-only 20-minute view with a fresh executable quote."""
+    from app.services import short_term_forecast
+    from app.services.market_hours import get_market_state
+
+    payload = {
+        **_short_term_calendar(int(time() // 300)),
+        "market_state": {"is_open": get_market_state().is_open},
+    }
+    return short_term_forecast.from_database(db, payload)
 
 _NO_ANALYSIS = {
     "available": False,
