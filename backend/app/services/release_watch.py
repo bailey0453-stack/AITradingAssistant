@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import get_settings
 from app.models.release_watch import ReleaseWatch
 from app.services.hedge_pnl import hedge_pnl_detail
+from app.services.five_cent_plan import apply as apply_five_cent_plan, settings as five_cent_settings
 
 _lock = Lock()
 _cache = None
@@ -242,7 +243,7 @@ def assess(rows, data, fix, *, history=(), now=None):
            "error":data.get("error"),"poll_seconds":data.get("poll_seconds",300),"release_time":None,
            "events":[],"scenarios":[],"expected_rate":None,"expected_move_mxn":None,"net_pnl_usd":None,
            "confidence":None,"confidence_label":"Not calibrated", "wait_reasons":[],"history_samples":0,
-           "delivery_latency":"Provider delivery speed is unverified."}
+           "delivery_latency":"Provider delivery speed is unverified.","five_cent_plan":five_cent_settings()}
     if not rows:
         out["phase"] = "FEED_REQUIRED" if data.get("status") != "LIVE_POLL" else "NO_RELEASE"
         return out
@@ -327,6 +328,9 @@ def assess(rows, data, fix, *, history=(), now=None):
         out["wait_reasons"].append("The remaining estimated move does not support this direction after FIX spread and fees.")
     else:
         out.update(action="BUY USD / SELL MXN NOW" if direction=="BUY_USD" else "SELL USD / BUY MXN NOW",phase="EXPERIMENTAL_SIGNAL")
+    apply_five_cent_plan(out,direction,{"bid":price[0],"ask":price[1]})
+    if out["action"]=="WAIT":
+        out["phase"]="REACTION_CONFIRMED"
     return out
 
 
@@ -375,5 +379,6 @@ def current(db, *, scheduled=()):
                 break
         if blocked:
             result["action"]="WAIT"
+            result["five_cent_plan"]["status"]="conditional"
             result["wait_reasons"].extend(blocked)
     return result

@@ -65,8 +65,24 @@ for five minutes per process. A separate, bounded 20-minute tail refreshes on
 each poll, keeping momentum current without repeatedly downloading the full
 historical dataset.
 
-No order is placed. The forecast does not assert that a position exists or
-invent a stop-loss level. The first production run may show WAIT until sufficient
+No order is placed. The forecast does not assert that a position exists. The
+user-selected target and stop are each 0.05 MXN per USD (five Mexican cents)
+from the setup's FIX midpoint, in opposite directions. The card shows the actual
+bid/ask entry side and estimates net P/L at both levels with the captured spread
+and existing fees. Equal price distances do not imply equal net profit and loss.
+The fixed target is separate from the model's expected rate; a smaller remaining
+forecast or a target that cannot cover costs forces WAIT. All existing risk and
+evidence restrictions still apply, including during the release workflow.
+
+Horizon validation does not establish the probability of hitting this target
+before this stop. That probability remains null/uncalibrated, and the UI says so.
+Levels are indicative for the displayed setup, not submitted exit orders or a
+tracked position. Each refreshed quote creates a new setup; a trade entered from
+an earlier setup must retain its original levels and deadline. The exit deadline
+is 20 minutes after generation, or 20 minutes after the scheduled report for the
+release assessment. Expiry and fetch failure clear the displayed exit levels.
+
+The first production run may show WAIT until sufficient
 genuine intraday history and complete live calendar coverage are available.
 
 ## Validation

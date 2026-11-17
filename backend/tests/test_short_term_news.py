@@ -33,7 +33,7 @@ def test_does_not_confuse_us_and_mexican_policy_or_conditional_headlines(headlin
 
 
 def test_confirmed_catalyst_keeps_price_target_and_shows_source():
-    points, fix, payload = fixture()
+    points, fix, payload = fixture(slope=.003, geometric=True)
     payload["news_watch"] = feed()
     out = build(points, fix, payload, now=NOW)
     assert out["action"] == "BUY USD / SELL MXN NOW"
