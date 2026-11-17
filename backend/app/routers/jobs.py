@@ -69,6 +69,19 @@ def news_watch(db: Session = Depends(get_db)) -> dict:
     """Watch real headlines independently of whether a dashboard is open."""
     from app.services.short_term_news import snapshot
     result = snapshot(db)
+    try:
+        from app.services.fix.provider import get_fix_quote
+        from app.services.personal_exit_watch import background
+        from app.services.market_hours import get_market_state
+        from app.routers.decision import _short_term_calendar
+        from time import time
+        payload={**_short_term_calendar(int(time()//300)),"news_watch":result,
+                 "market_state":{"is_open":get_market_state().is_open}}
+        position_status=background(db,get_fix_quote(),payload)
+    except Exception:
+        db.rollback()
+        logger.exception("Personal exit watch failed; no exit order is sent.")
+        position_status={"status":"UNAVAILABLE"}
     from app.routers.decision import release_watch_now
     try:
         release=release_watch_now(db)
@@ -79,7 +92,7 @@ def news_watch(db: Session = Depends(get_db)) -> dict:
         db.rollback()
         logger.exception("Release watch failed; no release action is issued.")
         release_status={"phase":"UNAVAILABLE"}
-    return {k: v for k, v in result.items() if k != "items"} | {"headline_count": len(result.get("items") or []),"release_watch":release_status}
+    return {k: v for k, v in result.items() if k != "items"} | {"headline_count": len(result.get("items") or []),"release_watch":release_status,"exit_watch":position_status}
 
 
 @router.api_route("/hourly-usdmxn-analysis", methods=["POST", "GET"], dependencies=[Depends(require_cron_auth)])
