@@ -57,6 +57,16 @@ def short_term_now(db: Session = Depends(get_db)) -> dict:
     return short_term_forecast.from_database(db, payload)
 
 
+@router.get("/opportunity")
+def flexible_opportunity_now(db: Session = Depends(get_db)) -> dict:
+    from app.services.flexible_opportunity import current
+    from app.services.market_hours import get_market_state
+    from app.services.short_term_news import snapshot
+    payload = {**_short_term_calendar(int(time()//300)),
+               "market_state":{"is_open":get_market_state().is_open},"news_watch":snapshot(db)}
+    return current(db,payload)
+
+
 @router.get("/release")
 def release_watch_now(db: Session = Depends(get_db)) -> dict:
     from app.services.release_watch import current

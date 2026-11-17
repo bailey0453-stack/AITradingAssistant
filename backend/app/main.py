@@ -32,6 +32,7 @@ from app.routers import (
     market,
     news,
     performance,
+    personal_trades,
     recommendations,
     research,
     timeline,
@@ -94,6 +95,7 @@ app.include_router(recommendations.router)
 app.include_router(research.router)
 app.include_router(performance.router)
 app.include_router(decision.router)
+app.include_router(personal_trades.router)
 app.include_router(jobs.router)
 app.include_router(admin_research.router)
 app.include_router(diagnostics.router)
@@ -171,6 +173,14 @@ DASHBOARD_HTML = """<!doctype html>
     @media (max-width:760px){ .tdc-grid { grid-template-columns:1fr 1fr; } }
     .tdc-grid .k { font-size:11px; color:#8aa0c6; text-transform:uppercase; letter-spacing:.04em; }
     .tdc-grid .v { font-size:22px; font-weight:700; margin-top:4px; }
+    #pe_open_form { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    #pe_open_form[hidden], #pe_active[hidden] { display:none; }
+    #personalExitCard input, #personalExitCard select { background:#0b1220; color:#e6edf3; border:1px solid #35476b; border-radius:8px; padding:10px; font-size:14px; max-width:100%; box-sizing:border-box; }
+    #personalExitCard label { color:#a8bad7; font-size:13px; }
+    #personalExitCard button:disabled { opacity:.5; cursor:wait; }
+    #pe_active .tdc-grid { margin:14px 0; }
+    #pe_review { font-size:16px; }
+    #legacyShortTerm > summary { cursor:pointer; color:#8aa0c6; padding:12px 0; }
     .tdc-why { margin-top:14px; font-size:14px; color:#d7e2f5; }
     .tdc-details { margin-top:10px; }
     .tdc-details summary { cursor:pointer; color:#7fd0ff; font-size:13px; }
@@ -311,6 +321,56 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
     </div>
+    <div class="card tdc yellow" id="flexibleCard">
+      <h2>Five-cent opportunity · flexible timing, up to five hours</h2>
+      <div class="tdc-action" id="fo_action">WAIT</div>
+      <p id="fo_reason">Checking live prices and comparable moves…</p>
+      <div class="tdc-grid">
+        <div><div class="k">Live FIX midpoint</div><div class="v" id="fo_spot">—</div></div>
+        <div><div class="k">Entry quote</div><div class="v" id="fo_entry">—</div></div>
+        <div><div class="k">Exit target · 5 cents</div><div class="v" id="fo_target">—</div></div>
+        <div><div class="k">Exit stop · 5 cents</div><div class="v" id="fo_stop">—</div></div>
+        <div><div class="k">Historical time to target</div><div class="v" id="fo_timing">—</div></div>
+        <div><div class="k">Estimated net at target / $100K</div><div class="v" id="fo_net">—</div></div>
+      </div>
+      <p id="fo_evidence" class="muted"></p>
+      <p id="fo_context" class="muted"></p>
+      <ul id="fo_headlines"></ul>
+      <p id="fo_updated" class="muted"></p>
+      <p class="muted">Target and stop use executable entry-to-exit rates. Timing is an estimate from observed historical target hits. Price checks can miss moves between observations. Historical simulations are not calibrated live probabilities. No order is placed.</p>
+    </div>
+    <div class="card tdc yellow" id="personalExitCard">
+      <h2>My position · when should I exit?</h2>
+      <div class="tdc-action" id="pe_action">NO TRADE RECORDED</div>
+      <p id="pe_reason">Record a trade you have already entered to receive exit guidance.</p>
+      <div id="pe_open_form">
+        <label for="pe_direction">Your trade</label>
+        <select id="pe_direction"><option value="BUY_USD">Bought USD / sold MXN</option><option value="SELL_USD">Sold USD / bought MXN</option></select>
+        <label for="pe_entry_input">Actual entry rate</label>
+        <input id="pe_entry_input" type="number" min="0.050001" max="999" step="0.000001" placeholder="e.g. 18.5000" />
+        <button id="pe_record" onclick="recordPersonalEntry()">Record my entry</button>
+      </div>
+      <div id="pe_active" hidden>
+        <div class="tdc-grid">
+          <div><div class="k">Your fixed entry</div><div class="v" id="pe_entry">—</div></div>
+          <div><div class="k">Original target</div><div class="v" id="pe_target">—</div></div>
+          <div><div class="k">Original stop</div><div class="v" id="pe_stop">—</div></div>
+          <div><div class="k">Executable exit quote</div><div class="v" id="pe_exit">—</div></div>
+          <div><div class="k">Gain/loss · Mexican cents</div><div class="v" id="pe_move">—</div></div>
+          <div><div class="k">Estimated net / $100K</div><div class="v" id="pe_net">—</div></div>
+          <div><div class="k">Best observed gain · cents</div><div class="v" id="pe_peak">—</div></div>
+          <div><div class="k">Five-hour review</div><div class="v" id="pe_review">—</div></div>
+        </div>
+        <p id="pe_updated" class="muted"></p>
+        <label for="pe_exit_input">Actual exit rate after you close the trade</label>
+        <input id="pe_exit_input" type="number" min="0.000001" max="999" step="0.000001" placeholder="Your filled exit rate" />
+        <button id="pe_close" onclick="recordPersonalExit()">Record my exit</button>
+      </div>
+      <p id="pe_error" role="status"></p>
+      <p id="pe_warnings" class="muted"></p>
+      <p id="pe_last_closed" class="muted"></p>
+      <p class="muted">Entry and exit buttons only update your private journal. No broker orders are submitted. Original levels stay fixed across refreshes. Exit guidance uses price rules; its profitability has not been validated. Estimates use $100K and $40 fees. Dashboard checks every 15 seconds and background checks about once a minute; a touch between checks can be missed. No push notifications are sent.</p>
+    </div>
     <div class="card tdc yellow" id="releaseWatchCard">
       <h2>Economic release watch · before and after the report</h2>
       <div class="tdc-action" id="rw_action">WAIT</div>
@@ -323,8 +383,9 @@ DASHBOARD_HTML = """<!doctype html>
       <p id="rw_data" class="muted"></p>
       <p class="muted">Before release: conditional scenarios. After release: actual versus expectations captured beforehand, then price confirmation. A numeric target requires genuine same-report 20-minute outcome history. Confidence stays uncalibrated until validated.</p>
     </div>
+    <details id="legacyShortTerm"><summary>20-minute research view</summary>
     <div class="card tdc yellow" id="shortTermCard">
-      <h2>What should I do now? <span class="muted">USD/MXN · next 20 minutes</span></h2>
+      <h2>20-minute research estimate <span class="muted">Separate from your tracked position</span></h2>
       <div class="tdc-action" id="st_action">WAIT</div>
       <div class="tdc-pred" id="st_prediction">Checking live price and 20-minute evidence…</div>
       <div class="tdc-grid">
@@ -352,6 +413,7 @@ DASHBOARD_HTML = """<!doctype html>
       <p class="muted">News can confirm or suspend the price forecast. The numeric target is based on measured price history; a separate news-impact target has not been calibrated.</p>
       <p class="muted">Experimental 20-minute estimate. Range shows the central 80% of similar historical outcomes, not a guaranteed forecast interval. Net assumes the current FIX spread at exit and $40 fees; slippage is excluded.</p>
     </div>
+    </details>
     <div class="card tdc yellow" id="tradeDecisionCard">
       <h2>Trade Decision <span class="muted">(broader 2–4 hour view)</span></h2>
       <div class="tdc-action" id="tdc_action">—</div>
@@ -1199,6 +1261,8 @@ DASHBOARD_HTML = """<!doctype html>
     async function aitaLogout(){
       try { await fetch('/auth/logout', { method:'POST', credentials:'include' }); } catch(e){}
       aitaSession = null;
+      resetPersonalWatch(true);
+      expireFlexible('Sign in to view current opportunities.');
       aitaShowGate('You have been signed out. Return to Border Currency to open AI Trading Assistant.');
     }
     async function aitaBootstrap(){
@@ -1278,6 +1342,147 @@ DASHBOARD_HTML = """<!doctype html>
     // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
     // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
     function tlGradeLabel(grade){ return (grade != null && grade !== '') ? grade : '—'; }
+    // Flexible opportunity and personal exit watch.
+    let flexibleExpires=0, flexibleLoading=false, personalExpires=0, personalLoading=false;
+    let personalTradeId=null, personalBusy=false, entryRequest=null;
+    function expireFlexible(message){
+      flexibleExpires=0;setText('fo_action','WAIT');$('flexibleCard').className='card tdc yellow';
+      ['fo_spot','fo_entry','fo_target','fo_stop','fo_timing','fo_net','fo_evidence','fo_context'].forEach(id=>setText(id,'—'));
+      setText('fo_headlines','');
+      setText('fo_reason',message);
+    }
+    function renderFlexible(t){
+      flexibleExpires=Date.parse(t.expires_at || '') || 0;
+      const active=t.action && t.action!=='WAIT' && !personalTradeId;
+      $('flexibleCard').className='card tdc '+(active?'green':'yellow');
+      setText('fo_action',personalTradeId?'POSITION OPEN':t.action || 'WAIT');
+      setText('fo_reason',(personalTradeId?'Use the exit view for your current trade. These are separate research levels for a new setup. ':'')
+        +((t.wait_reasons || []).join(' ') || 'Comparable five-cent paths and earlier tests support this direction; timing remains uncertain.'));
+      const p=t.setup || {};
+      setText('fo_spot',tlRate4(t.spot));setText('fo_entry',tlRate4(p.entry_rate));
+      setText('fo_target',tlRate4(p.target_rate));setText('fo_stop',tlRate4(p.stop_rate));
+      setText('fo_net',p.target_net_usd==null?'—':'$'+Number(p.target_net_usd).toFixed(2));
+      setText('fo_timing',t.timing?Number(t.timing.median_minutes).toFixed(0)+' min · historical median':'Not established');
+      const h=t.historical || {},v=t.validation || {};
+      setText('fo_evidence',(t.analogs || 0)+' comparable paths · '+(v.samples || 0)+' earlier walk-forward tests'
+        +(h.target_first_pct==null?'':' · historical target-first rate '+h.target_first_pct+'%')
+        +(v.average_net_usd==null?'':' · average simulated net $'+Number(v.average_net_usd).toFixed(2))
+        +' · live accuracy not established.'+(t.news && t.news.coverage_warning?' '+t.news.coverage_warning:''));
+      const momentum=t.momentum_bps || {},news=t.news || {};
+      const changes=['5m','15m','60m'].filter(k=>momentum[k]!=null).map(function(k){
+        const cents=(t.spot-t.spot/(1+momentum[k]/10000))*100;
+        return k+' '+(cents>=0?'+':'')+cents.toFixed(2)+' cents';
+      });
+      setText('fo_context',(changes.length?'Observed price change: '+changes.join(' · ')+'. ':'')
+        +'News: '+(news.status || 'unavailable')+' · checked '+fmtTime(news.checked_at)+' · provider delivery delay unverified.');
+      const list=$('fo_headlines');list.textContent='';
+      (news.headlines || []).slice(0,3).forEach(function(item){
+        const row=document.createElement('li');
+        const label=(item.source || 'Source')+' · '+fmtTime(item.published_at)+': '+item.headline;
+        if(item.url && (item.url.startsWith('https://') || item.url.startsWith('http://'))){
+          const link=document.createElement('a');link.href=item.url;link.target='_blank';link.rel='noopener noreferrer';link.textContent=label;row.appendChild(link);
+        }else{row.textContent=label;}
+        list.appendChild(row);
+      });
+      setText('fo_updated','Quote '+fmtTime(t.quote_at)+' · updated '+fmtTime(t.generated_at)+' · maximum modeled window: five hours');
+      if(!flexibleExpires || flexibleExpires<=Date.now()) expireFlexible('The opportunity assessment expired. Waiting for fresh data.');
+    }
+    async function loadFlexible(){
+      if(flexibleLoading) return;
+      flexibleLoading=true;
+      try{renderFlexible(await fetchJson('/decision/opportunity'));}
+      catch(e){expireFlexible('The live opportunity assessment could not be refreshed.');}
+      finally{flexibleLoading=false;}
+    }
+    function resetPersonalWatch(clearInputs=false){
+      personalTradeId=null;personalExpires=0;entryRequest=null;
+      $('personalExitCard').className='card tdc yellow';
+      if(clearInputs){$('pe_entry_input').value='';$('pe_exit_input').value='';$('pe_direction').value='BUY_USD';}
+      $('pe_active').hidden=true;$('pe_open_form').hidden=false;
+      ['pe_entry','pe_target','pe_stop','pe_exit','pe_move','pe_net','pe_peak','pe_review','pe_updated','pe_last_closed','pe_warnings','pe_error'].forEach(id=>setText(id,''));
+      setText('pe_action','NO TRADE RECORDED');
+      setText('pe_reason','Record a trade you have already entered to receive exit guidance.');
+    }
+    function expirePersonalWatch(message){
+      personalExpires=0;
+      setText('pe_action','CHECK LIVE QUOTE');setText('pe_reason',message);
+      ['pe_exit','pe_move','pe_net'].forEach(id=>setText(id,'—'));
+      $('personalExitCard').className='card tdc yellow';
+      // Retain the position's original entry/target/stop even if the feed fails.
+    }
+    function renderPersonalWatch(data){
+      const p=data.position;
+      personalTradeId=p?p.id:null;
+      $('pe_active').hidden=!p;$('pe_open_form').hidden=!!p;
+      if(!p){resetPersonalWatch();}
+      else{
+        setText('fo_action','POSITION OPEN');$('flexibleCard').className='card tdc yellow';
+        setText('fo_reason','Use the exit view for your current trade. New opportunity levels do not change your original target or stop.');
+        personalExpires=Date.parse(p.expires_at || '') || 0;
+        setText('pe_action',p.action || 'REASSESS');
+        $('personalExitCard').className='card tdc '+(/EXIT/.test(p.action || '')?'red':/HOLD|TAKE PROFIT/.test(p.action || '')?'green':'yellow');
+        setText('pe_reason',p.direction.replaceAll('_',' ')+': '+(p.reason || ''));
+        setText('pe_entry',tlRate4(p.entry_rate));setText('pe_target',tlRate4(p.target_rate));setText('pe_stop',tlRate4(p.stop_rate));
+        setText('pe_exit',tlRate4(p.current_exit_rate));setText('pe_move',p.move_cents==null?'—':Number(p.move_cents).toFixed(2));
+        setText('pe_net',p.net_pnl_usd==null?'—':'$'+Number(p.net_pnl_usd).toFixed(2));
+        setText('pe_peak',p.peak_favorable_cents==null?'—':Number(p.peak_favorable_cents).toFixed(2));
+        setText('pe_review',fmtTime(p.review_at));
+        setText('pe_updated','Entry recorded '+fmtTime(p.opened_at)+' · quote '+fmtTime(p.quote_at)
+          +(p.advice_at?' · exit level observed '+fmtTime(p.advice_at):''));
+        setText('pe_warnings',(p.warnings || []).join(' '));
+        if(!personalExpires || personalExpires<=Date.now()) expirePersonalWatch('The exit assessment expired. Original target and stop remain in place; check your broker.');
+      }
+      if(data.last_closed) setText('pe_last_closed','Last recorded exit: '+tlRate4(data.last_closed.current_exit_rate)
+        +' · estimated net / $100K: $'+Number(data.last_closed.net_pnl_usd).toFixed(2)+' · '+fmtTime(data.last_closed.closed_at));
+    }
+    async function loadPersonalWatch(){
+      if(personalLoading || !aitaSession) return;
+      const user=aitaSession.userId;
+      personalLoading=true;
+      try{
+        const data=await fetchJson('/decision/positions');
+        if(aitaSession && aitaSession.userId===user) renderPersonalWatch(data);
+      }catch(e){if(aitaSession && aitaSession.userId===user) expirePersonalWatch('Your position could not be refreshed. Check your trading platform; no exit order was sent.');}
+      finally{personalLoading=false;}
+    }
+    async function personalMutation(url,body){
+      const response=await fetch(url,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const data=await response.json();
+      if(!response.ok) throw new Error(typeof data.detail==='string'?data.detail:'Could not save the record. Check the rate and refresh your position.');
+      return data;
+    }
+    function setPersonalBusy(value){
+      personalBusy=value;$('pe_record').disabled=value;$('pe_close').disabled=value;
+    }
+    async function recordPersonalEntry(){
+      if(personalBusy || !aitaSession) return;
+      const entry=Number($('pe_entry_input').value),direction=$('pe_direction').value;
+      if(!Number.isFinite(entry) || entry<=.05 || entry>=1000){setText('pe_error','Enter your actual filled USD/MXN entry rate.');return;}
+      const signature=direction+':'+entry;
+      if(!entryRequest || entryRequest.signature!==signature) entryRequest={signature:signature,id:crypto.randomUUID()};
+      setPersonalBusy(true);setText('pe_error','');
+      try{
+        await personalMutation('/decision/positions',{request_id:entryRequest.id,direction:direction,entry_rate:entry});
+        entryRequest=null;await loadPersonalWatch();
+      }catch(e){setText('pe_error',e.message);}
+      finally{setPersonalBusy(false);}
+    }
+    async function recordPersonalExit(){
+      if(personalBusy || !personalTradeId || !aitaSession) return;
+      const exit=Number($('pe_exit_input').value);
+      if(!Number.isFinite(exit) || exit<=0 || exit>=1000){setText('pe_error','Enter your actual filled exit rate after closing the trade.');return;}
+      setPersonalBusy(true);setText('pe_error','');
+      try{
+        await personalMutation('/decision/positions/'+personalTradeId+'/close',{exit_rate:exit});
+        $('pe_exit_input').value='';await loadPersonalWatch();
+      }catch(e){setText('pe_error',e.message);}
+      finally{setPersonalBusy(false);}
+    }
+    setInterval(function(){
+      if(flexibleExpires && Date.now()>=flexibleExpires) expireFlexible('Opportunity expired. Waiting for a fresh quote and assessment.');
+      if(personalExpires && Date.now()>=personalExpires) expirePersonalWatch('Exit guidance expired. Keep your original levels and check your trading platform.');
+    },1000);
+    // End flexible opportunity and personal exit watch.
     let releaseInControl = false, releaseExpires = 0, releaseTime = 0, releaseLast = null;
     function applyReleaseDecision(){
       if(!releaseInControl) return;
@@ -2704,9 +2909,13 @@ DASHBOARD_HTML = """<!doctype html>
     aitaLocaleObserver.observe(document.body,{subtree:true,childList:true,characterData:true});
     aitaBootstrap().then(function(ok){ if(ok) {
       refresh();
-      loadShortTerm();
+      loadFlexible();
+      loadPersonalWatch();
       loadRelease();
-      setInterval(loadShortTerm, 30000);
+      setInterval(loadFlexible,30000);
+      setInterval(loadPersonalWatch,15000);
+      $('legacyShortTerm').addEventListener('toggle',function(){if(this.open) loadShortTerm();});
+      setInterval(function(){if($('legacyShortTerm').open) loadShortTerm();},30000);
     } });
   </script>
 </body>

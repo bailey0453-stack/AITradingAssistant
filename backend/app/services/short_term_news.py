@@ -106,7 +106,7 @@ def snapshot(db=None, *, settings=None):
     return {**data, "history_saved": db is not None}
 
 
-def assess(feed, points, fix, *, now=None):
+def assess(feed, points, fix, *, now=None, require_recent_article=True):
     now = _time(now or datetime.now(timezone.utc))
     out = {"status": "UNAVAILABLE", "provider": (feed or {}).get("provider"),
            "checked_at": (feed or {}).get("checked_at"), "poll_seconds": POLL_SECONDS,
@@ -122,7 +122,11 @@ def assess(feed, points, fix, *, now=None):
     latest = max(published_times, default=None)
     out["latest_published_at"] = latest.isoformat() if latest else None
     if latest and now-latest > timedelta(hours=2):
-        out["wait_reasons"].append("The newest relevant article is over two hours old; a delayed or quiet news feed cannot establish current breaking-news coverage.")
+        reason = "The newest relevant article is over two hours old; a delayed or quiet news feed cannot establish current breaking-news coverage."
+        if require_recent_article:
+            out["wait_reasons"].append(reason)
+        else:
+            out["coverage_warning"] = reason
     seen = set()
     invalid_dates = 0
     for item in feed.get("items") or []:
