@@ -21,6 +21,7 @@ from app.models import MarketSnapshot
 from app.services.hedge_pnl import hedge_pnl_detail
 from app.services.trade_decision_card import _blocking_event
 from app.services.short_term_news import assess as assess_news
+from app.services.five_cent_plan import apply as apply_five_cent_plan, settings as five_cent_settings
 
 MIN_ANALOGS = 30
 MIN_VALIDATION = 30
@@ -143,6 +144,7 @@ def build(points, fix, payload, *, now=None):
         "outcome_range": None, "net_pnl_usd": None, "analogs": 0,
         "validation": None, "wait_reasons": [], "method": "intraday_neighbors_20m_news_gated_v2",
         "news": {"status": "UNAVAILABLE", "headlines": []},
+        "five_cent_plan": five_cent_settings(),
     }
     def wait(reason):
         out["wait_reasons"].append(reason)
@@ -207,7 +209,7 @@ def build(points, fix, payload, *, now=None):
         wait("The current trade thesis has been invalidated.")
     if not out["wait_reasons"]:
         out["action"] = "BUY USD / SELL MXN NOW" if direction == "BUY_USD" else "SELL USD / BUY MXN NOW"
-    return out
+    return apply_five_cent_plan(out, direction, pricing)
 
 
 def from_database(db, payload):

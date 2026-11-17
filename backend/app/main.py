@@ -333,6 +333,16 @@ DASHBOARD_HTML = """<!doctype html>
         <div><div class="k">Analog outcome range</div><div class="v" id="st_range">—</div></div>
         <div><div class="k">Estimated net / $100K</div><div class="v" id="st_pnl">—</div></div>
       </div>
+      <h3>5-cent target · 5-cent stop · up to 20 minutes</h3>
+      <div class="tdc-grid">
+        <div><div class="k">Executable entry quote</div><div class="v" id="st_entry">—</div></div>
+        <div><div class="k">Target midpoint (5 cents in your direction)</div><div class="v" id="st_take_profit">—</div></div>
+        <div><div class="k">Stop midpoint (5 cents against you)</div><div class="v" id="st_stop">—</div></div>
+        <div><div class="k">Exit by</div><div class="v" id="st_deadline">—</div></div>
+        <div><div class="k">Estimated net at target / $100K</div><div class="v" id="st_target_net">—</div></div>
+        <div><div class="k">Estimated net at stop / $100K</div><div class="v" id="st_stop_net">—</div></div>
+      </div>
+      <p id="st_plan_note" class="muted">Waiting for a supported forecast before calculating levels. No exit order is placed.</p>
       <p id="st_reason" class="tdc-why">Waiting for evidence.</p>
       <p id="st_evidence" class="muted"></p>
       <p id="st_updated" class="muted"></p>
@@ -1282,6 +1292,7 @@ DASHBOARD_HTML = """<!doctype html>
       setText('st_pnl',r.net_pnl_usd==null?'—':'$'+Number(r.net_pnl_usd).toFixed(2));
       setText('st_reason',(r.wait_reasons || []).join(' ') || r.error || 'Measured release assessment.');
       setText('st_evidence',(r.history_samples || 0)+' same-report 20-minute outcomes · '+(r.confidence_label || 'Not calibrated'));
+      renderFiveCentPlan(r.five_cent_plan);
     }
     function renderRelease(r){
       releaseLast=r; releaseInControl=!!r.in_control;releaseTime=Date.parse(r.release_time || '') || 0;
@@ -1318,6 +1329,18 @@ DASHBOARD_HTML = """<!doctype html>
     },1000);
     let shortTermExpires = 0;
     let shortTermLoading = false;
+    function renderFiveCentPlan(plan){
+      const p=plan || {};
+      setText('st_entry',tlRate4(p.entry_rate));
+      setText('st_take_profit',tlRate4(p.target_rate));
+      setText('st_stop',tlRate4(p.stop_rate));
+      setText('st_deadline',p.exit_deadline?fmtTime(p.exit_deadline):'—');
+      setText('st_target_net',p.target_net_pnl_usd==null?'—':'$'+Number(p.target_net_pnl_usd).toFixed(2));
+      setText('st_stop_net',p.stop_net_pnl_usd==null?'—':'$'+Number(p.stop_net_pnl_usd).toFixed(2));
+      setText('st_plan_note',(p.target_rate==null?'Waiting for a supported forecast before calculating levels.':
+        (p.status==='signal'?'Current signal levels.':'Conditional levels; the current action is WAIT.')+' '+(p.evidence || '')+' '+(p.cost_basis || ''))
+        +' '+(p.note || 'No exit order is placed.'));
+    }
     function renderShortTerm(t){
       setText('st_target_label','Expected rate in 20 min');
       shortTermExpires = Date.parse(t.expires_at || '') || 0;
@@ -1340,6 +1363,7 @@ DASHBOARD_HTML = """<!doctype html>
         + (v.directional_accuracy_pct == null ? 'not established' : v.directional_accuracy_pct + '%')
         + ' · Simulated results; live trading accuracy is not established.');
       setText('st_updated', 'Updated ' + fmtTime(t.generated_at) + ' · Forecast for ' + fmtTime(t.forecast_for));
+      renderFiveCentPlan(t.five_cent_plan);
       const news = t.news || {};
       setText('st_news_health', 'News: ' + (news.status || 'UNAVAILABLE')
         + ' · ' + (news.provider || 'provider unverified') + ' · checked ' + fmtTime(news.checked_at)
@@ -1370,6 +1394,7 @@ DASHBOARD_HTML = """<!doctype html>
       shortTermExpires = 0;
       $('shortTermCard').className = 'card tdc yellow';
       ['st_now','st_target','st_range','st_pnl','st_evidence'].forEach(function(id){ setText(id,'—'); });
+      renderFiveCentPlan(null);
       setText('st_action', 'WAIT');
       setText('st_prediction', '20-minute forecast unavailable');
       setText('st_reason', message);

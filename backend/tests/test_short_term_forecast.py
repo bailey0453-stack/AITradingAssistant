@@ -13,17 +13,18 @@ from app.services import short_term_forecast as st
 NOW = datetime(2026, 11, 16, 16, 0, tzinfo=timezone.utc)
 
 
-def fixture(slope=.0008, spread=.0002):
-    points = [(NOW - timedelta(minutes=5000 - m), 20 + slope * (m - 5000)) for m in range(0, 5001, 5)]
+def fixture(slope=.0008, spread=.0002, geometric=False):
+    points = [(NOW - timedelta(minutes=5000 - m),
+               20*(1+slope/20)**(m-5000) if geometric else 20+slope*(m-5000)) for m in range(0, 5001, 5)]
     fix = {"bid": 20 - spread/2, "ask": 20 + spread/2, "updated_at": NOW.isoformat()}
     payload = {"market_state": {"is_open": True}, "context": {"upcoming_events": []}, "data_sources": {"calendar": "live", "calendar_status": "LIVE"}}
     payload["news_watch"] = {"status": "LIVE_POLL", "checked_at": NOW.isoformat(), "items": []}
     return points, fix, payload
 
 
-@pytest.mark.parametrize("slope,action,sign", [(.0008, "BUY USD / SELL MXN NOW", 1), (-.0008, "SELL USD / BUY MXN NOW", -1)])
+@pytest.mark.parametrize("slope,action,sign", [(.003, "BUY USD / SELL MXN NOW", 1), (-.003, "SELL USD / BUY MXN NOW", -1)])
 def test_independent_twenty_minute_direction_and_move(slope, action, sign):
-    out = st.build(*fixture(slope), now=NOW)
+    out = st.build(*fixture(slope, geometric=True), now=NOW)
     assert out["action"] == action
     assert out["horizon_minutes"] == 20
     assert out["expected_move_mxn"] * sign > 0
@@ -32,6 +33,15 @@ def test_independent_twenty_minute_direction_and_move(slope, action, sign):
     assert out["validation"]["status"] == "walk_forward_simulation"
     assert out["net_pnl_usd"] > 0
     assert "confidence" not in out
+    assert out["five_cent_plan"]["status"]=="signal"
+    assert out["five_cent_plan"]["target_rate"]==pytest.approx(out["spot"]+sign*.05)
+
+
+def test_positive_but_sub_five_cent_forecast_is_wait():
+    out=st.build(*fixture(),now=NOW)
+    assert 0 < out["expected_move_mxn"] < .05
+    assert out["action"]=="WAIT"
+    assert any("smaller than the five-cent" in r for r in out["wait_reasons"])
 
 
 @pytest.mark.parametrize("change", [{"updated_at": (NOW-timedelta(seconds=31)).isoformat()}, {"updated_at": (NOW+timedelta(seconds=5)).isoformat()}, {"bid": float("nan")}, {"ask": float("inf")}, {"bid": 21, "ask": 20}, {"updated_at": None}])
@@ -176,11 +186,14 @@ let fetchJson = async () => { throw new Error('feed down'); };
 """ + js + """
 (async () => {
   renderShortTerm({action:'BUY USD / SELL MXN NOW', expires_at:new Date(Date.now()+60000).toISOString(),
-    expected_rate:20.02, spot:20, expected_move_mxn:.02, expected_move_cents:2, net_pnl_usd:40});
+    expected_rate:20.06, spot:20, expected_move_mxn:.06, expected_move_cents:6, net_pnl_usd:40,
+    five_cent_plan:{status:'signal',entry_rate:20.001,target_rate:20.05,stop_rate:19.95,exit_deadline:'deadline',target_net_pnl_usd:200,stop_net_pnl_usd:-300}});
   if ($('st_action').textContent !== 'BUY USD / SELL MXN NOW') throw new Error('missing action');
+  if ($('st_take_profit').textContent !== '20.0500' || $('st_stop').textContent !== '19.9500') throw new Error('missing target or stop');
   shortTermExpires = Date.now()-1;
   expiryCheck();
   if ($('st_action').textContent !== 'WAIT' || $('st_target').textContent !== '—') throw new Error('expired action visible');
+  if ($('st_take_profit').textContent !== '—' || $('st_stop').textContent !== '—') throw new Error('expired exit levels visible');
   renderShortTerm({action:'SELL USD / BUY MXN NOW', expires_at:new Date(Date.now()+60000).toISOString(), expected_rate:19.98});
   await loadShortTerm();
   if ($('st_action').textContent !== 'WAIT' || $('st_pnl').textContent !== '—') throw new Error('failed refresh retained signal');

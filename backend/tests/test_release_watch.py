@@ -139,9 +139,14 @@ def test_model_uses_only_genuine_completed_same_report_outcomes():
     now=AT+timedelta(seconds=20)
     history=[record(AT-timedelta(days=31*(i+1)),outcome_20m=.002,outcome_at=AT-timedelta(days=31*(i+1))+timedelta(minutes=20)) for i in range(10)]
     out=rw.assess([record()],data(now),quote(now,18.01),history=history,now=now)
-    assert out["action"]=="BUY USD / SELL MXN NOW"
+    assert out["action"]=="WAIT"  # 2.6 cents left is short of the five-cent target.
     assert out["expected_rate"]==18.036
     assert out["history_samples"]==10 and out["confidence"] is None
+    assert out["five_cent_plan"]["target_rate"]==18.06
+    for row in history: row.outcome_20m=.004
+    out=rw.assess([record()],data(now),quote(now,18.01),history=history,now=now)
+    assert out["action"]=="BUY USD / SELL MXN NOW"
+    assert out["five_cent_plan"]["status"]=="signal"
     history[0].source="sample"
     history[1].consensus_seen_at=history[1].release_time+timedelta(seconds=1)
     history[2].outcome_at=AT+timedelta(minutes=20)
