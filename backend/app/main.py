@@ -311,13 +311,25 @@ DASHBOARD_HTML = """<!doctype html>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
     </div>
+    <div class="card tdc yellow" id="releaseWatchCard">
+      <h2>Economic release watch · before and after the report</h2>
+      <div class="tdc-action" id="rw_action">WAIT</div>
+      <p id="rw_phase">Checking scheduled reports and data access…</p>
+      <p id="rw_countdown" class="muted"></p>
+      <div style="overflow-x:auto"><table><thead><tr><th>Report</th><th>Expected</th><th>Previous</th><th>Actual</th><th>Surprise</th></tr></thead><tbody id="rw_events"></tbody></table></div>
+      <ul id="rw_scenarios"></ul>
+      <p id="rw_reason"></p>
+      <p id="rw_target" class="muted"></p>
+      <p id="rw_data" class="muted"></p>
+      <p class="muted">Before release: conditional scenarios. After release: actual versus expectations captured beforehand, then price confirmation. A numeric target requires genuine same-report 20-minute outcome history. Confidence stays uncalibrated until validated.</p>
+    </div>
     <div class="card tdc yellow" id="shortTermCard">
       <h2>What should I do now? <span class="muted">USD/MXN · next 20 minutes</span></h2>
       <div class="tdc-action" id="st_action">WAIT</div>
       <div class="tdc-pred" id="st_prediction">Checking live price and 20-minute evidence…</div>
       <div class="tdc-grid">
         <div><div class="k">Live FIX midpoint</div><div class="v" id="st_now">—</div></div>
-        <div><div class="k">Expected rate in 20 min</div><div class="v" id="st_target">—</div></div>
+        <div><div class="k" id="st_target_label">Expected rate in 20 min</div><div class="v" id="st_target">—</div></div>
         <div><div class="k">Analog outcome range</div><div class="v" id="st_range">—</div></div>
         <div><div class="k">Estimated net / $100K</div><div class="v" id="st_pnl">—</div></div>
       </div>
@@ -1256,9 +1268,58 @@ DASHBOARD_HTML = """<!doctype html>
     // Topline Rate Forecast — expected USD/MXN path + bailout levels. All
     // projected rates/bailouts are ESTIMATED; current spot uses its provenance.
     function tlGradeLabel(grade){ return (grade != null && grade !== '') ? grade : '—'; }
+    let releaseInControl = false, releaseExpires = 0, releaseTime = 0, releaseLast = null;
+    function applyReleaseDecision(){
+      if(!releaseInControl) return;
+      const r=releaseLast || {};
+      if(Date.now() >= releaseExpires){ expireShortTerm('The release assessment expired; waiting for a fresh result and quote.'); return; }
+      const action=r.action || 'WAIT';
+      $('shortTermCard').className='card tdc '+(action==='WAIT'?'yellow':'green');
+      setText('st_action',action);
+      setText('st_target_label','Rate 20 min after release');
+      setText('st_prediction','Release assessment: '+(r.phase || 'unavailable')+'. Forecast time: '+fmtTime(r.forecast_for));
+      setText('st_now',tlRate4(r.spot));setText('st_target',tlRate4(r.expected_rate));setText('st_range','—');
+      setText('st_pnl',r.net_pnl_usd==null?'—':'$'+Number(r.net_pnl_usd).toFixed(2));
+      setText('st_reason',(r.wait_reasons || []).join(' ') || r.error || 'Measured release assessment.');
+      setText('st_evidence',(r.history_samples || 0)+' same-report 20-minute outcomes · '+(r.confidence_label || 'Not calibrated'));
+    }
+    function renderRelease(r){
+      releaseLast=r; releaseInControl=!!r.in_control;releaseTime=Date.parse(r.release_time || '') || 0;
+      releaseExpires=Date.now()+15000;
+      setText('rw_action',r.action || 'WAIT');setText('rw_phase',(r.phase || 'UNAVAILABLE').replaceAll('_',' ')
+        +(r.surprise_direction==='BUY_USD'?' · Report surprise favors higher USD/MXN':r.surprise_direction==='SELL_USD'?' · Report surprise favors lower USD/MXN':''));
+      const tbody=$('rw_events');tbody.textContent='';
+      (r.events || []).forEach(function(e){
+        const row=document.createElement('tr');
+        [e.event,e.consensus==null?'Unavailable':e.consensus+' '+e.unit,e.previous==null?'—':e.previous+' '+e.unit,e.actual==null?'Awaiting':e.actual+' '+e.unit,e.surprise==null?'—':(e.surprise>0?'+':'')+e.surprise+' '+(e.unit==='%'?'pp':e.unit)].forEach(function(value){const cell=document.createElement('td');cell.textContent=String(value);row.appendChild(cell);});
+        tbody.appendChild(row);
+      });
+      const scenarios=$('rw_scenarios');scenarios.textContent='';
+      (r.scenarios || []).forEach(function(s){const li=document.createElement('li');li.textContent=s.event+': above expectations → '+s.above_consensus+'; below expectations → '+s.below_consensus+'.';scenarios.appendChild(li);});
+      setText('rw_reason',r.error || (r.wait_reasons || []).join(' ') || 'No tracked release is approaching.');
+      setText('rw_target',r.expected_rate==null?'20-minute price target: not established.':('Estimated rate '+tlRate4(r.expected_rate)+' at '+fmtTime(r.forecast_for)+' (20 minutes after release).'));
+      setText('rw_data','Data: '+(r.provider || 'not configured')+' · '+(r.feed_status || 'unavailable')+' · '+(r.confidence_label || 'Not calibrated')+' · provider delivery speed unverified');
+      applyReleaseDecision();
+    }
+    async function loadRelease(){
+      try { renderRelease(await fetchJson('/decision/release')); }
+      catch(e){
+        setText('rw_action','WAIT');setText('rw_phase','Release feed unavailable');
+        releaseExpires=0;applyReleaseDecision();
+      }
+      setTimeout(loadRelease,releaseInControl?5000:60000);
+    }
+    setInterval(function(){
+      if(releaseTime){
+        const seconds=Math.round((releaseTime-Date.now())/1000);
+        setText('rw_countdown','Release: '+fmtTime(new Date(releaseTime).toISOString())+' · '+(seconds>0?Math.floor(seconds/60)+'m '+seconds%60+'s remaining':Math.abs(seconds)+' seconds since release'));
+      }
+      if(releaseInControl && Date.now()>=releaseExpires){setText('rw_action','WAIT');applyReleaseDecision();}
+    },1000);
     let shortTermExpires = 0;
     let shortTermLoading = false;
     function renderShortTerm(t){
+      setText('st_target_label','Expected rate in 20 min');
       shortTermExpires = Date.parse(t.expires_at || '') || 0;
       const active = t.action && t.action !== 'WAIT';
       $('shortTermCard').className = 'card tdc ' + (active ? 'green' : 'yellow');
@@ -1303,6 +1364,7 @@ DASHBOARD_HTML = """<!doctype html>
           + ' MXN · ' + (reaction.confirmed ? 'agrees with headline-implied direction' : 'not confirmed')
           + '. This does not establish that the headline caused the move.')
         : ((news.wait_reasons || []).join(' ') || 'No fresh directional catalyst identified in the checked feed.'));
+      applyReleaseDecision();
     }
     function expireShortTerm(message){
       shortTermExpires = 0;
@@ -1323,7 +1385,7 @@ DASHBOARD_HTML = """<!doctype html>
       finally { shortTermLoading = false; }
     }
     setInterval(function(){
-      if(shortTermExpires && Date.now() >= shortTermExpires) expireShortTerm('Signal expired. Refreshing the live quote and evidence is required.');
+      if(!releaseInControl && shortTermExpires && Date.now() >= shortTermExpires) expireShortTerm('Signal expired. Refreshing the live quote and evidence is required.');
     }, 1000);
     function renderTradeDecisionCard(d){
       const card = $('tradeDecisionCard'); if(!card) return;
@@ -2618,6 +2680,7 @@ DASHBOARD_HTML = """<!doctype html>
     aitaBootstrap().then(function(ok){ if(ok) {
       refresh();
       loadShortTerm();
+      loadRelease();
       setInterval(loadShortTerm, 30000);
     } });
   </script>
