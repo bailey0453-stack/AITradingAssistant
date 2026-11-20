@@ -26,6 +26,22 @@ from app.services.research_import_service import (
 router = APIRouter(prefix="/admin/research", tags=["admin-research"])
 
 
+@router.get('/snapshots/history-status')
+def history_status(db: Session = Depends(get_db)) -> dict:
+    from app.services.fix_history_recorder import status
+    return status(db)
+
+
+@router.get('/snapshots/calendar-status')
+def calendar_status() -> dict:
+    from app.routers.decision import _short_term_calendar
+    from time import time
+    result=_short_term_calendar(int(time()//300))
+    return {'data_sources':result['data_sources'],
+            'coverage_gaps':result['calendar_coverage_gaps'],
+            'upcoming_events':result['context']['upcoming_events']}
+
+
 @router.get('/snapshots/rebound-status')
 def rebound_status(db: Session = Depends(get_db)) -> dict:
     from app.services.rebound_watch import local_status

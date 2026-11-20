@@ -137,6 +137,11 @@ def validate(rows, direction, fix):
 def upcoming_risk(payload, now):
     risks = []
     for event in (payload.get("context") or {}).get("upcoming_events",[]):
+        start,end=aware(event.get('risk_window_start')),aware(event.get('risk_window_end'))
+        if start and end:
+            if now<end and now+timedelta(minutes=15)>=start:
+                risks.append(event.get('event') or 'Release time unannounced')
+            continue
         at = aware(event.get("release_time") or event.get("time") or event.get("date"))
         impact = str(event.get("importance") or event.get("impact") or "").lower()
         if at and timedelta(0) <= at-now <= timedelta(minutes=15) and impact in {"high","3"}:
@@ -166,6 +171,11 @@ def build(points, fix, payload, *, now=None):
         if ts and ts <= now and p and isfinite(p) and p > 0:
             clean[ts] = float(p)
     points = sorted(clean.items())
+    out['history_progress']={'observations':len(points),
+        'first_at':points[0][0].isoformat() if points else None,
+        'last_at':points[-1][0].isoformat() if points else None,
+        'required_comparable_paths':MIN_ANALOGS,'required_validation_paths':MIN_VALIDATION,
+        'note':'Continuous broker history is collected with the dashboard closed. Missing intervals are excluded; daily or hourly backfills cannot establish five-cent target/stop order.'}
     f = features(points,[p[0] for p in points],now,mid)
     out["news"] = assess_news(payload.get("news_watch"),points,fix,now=now,require_recent_article=False)
     out["wait_reasons"].extend(out["news"]["wait_reasons"])
@@ -174,6 +184,7 @@ def build(points, fix, payload, *, now=None):
     sources = payload.get("data_sources") or {}
     if sources.get("calendar") not in {"live","official"} or sources.get("calendar_status") != "LIVE" or payload.get("calendar_coverage_gaps"):
         out["wait_reasons"].append("Economic-calendar risk coverage is incomplete.")
+        out['calendar_issues']=payload.get('calendar_coverage_gaps') or []
     for event in upcoming_risk(payload,now):
         out["wait_reasons"].append(f"Reassess after the approaching report: {event}.")
     if f is None:

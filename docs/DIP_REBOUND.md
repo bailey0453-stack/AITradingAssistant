@@ -61,6 +61,23 @@ stay on the web app. Delivery remains best effort; no retries or orders are sent
 
 ## Validation before any live recommendation
 
+The persistent FIX worker also records one fresh executable USD/MXN quote each
+minute in `observed_fix_quotes`, independently of dashboard requests and the
+rebound paper switch. It requires Postgres and retries storage failures without
+inventing missing prices. `/admin/research/snapshots/history-status` reports
+collection health. The five-cent card reports stored observation count and date
+range; it still requires 30 independent comparable paths and 30 earlier validation
+paths. Recording starts now and does not reconstruct missed historical minutes.
+
+Official schedule coverage uses FRED, the Fed, Banxico, INEGI and TreasuryDirect's
+current upcoming-auctions feed. Treasury competitive close times come from the
+publisher and use Eastern timezone rules, including holiday changes. Unannounced
+times remain date-only events with an explicit full-day risk window. FRED release
+pages are paginated and 8:30 a.m. Eastern releases respect daylight saving time.
+Missing subfeeds remain PARTIAL with the cause exposed, and no data subscription
+is purchased. These official schedules do not supply missing consensus/actual
+access for the separate structured release watcher.
+
 `dip_rebound.replay(quotes)` accepts chronological broker bid/ask observations
 with `symbol`, `source`, and `updated_at`. It uses exactly the causal live rules;
 no future low is used to enter. Quote gaps make affected plans unresolved.

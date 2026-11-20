@@ -13,6 +13,7 @@ from calendar import month_name
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
+from threading import RLock
 
 import httpx
 
@@ -24,8 +25,7 @@ logger = logging.getLogger(__name__)
 FRED_RELEASES_DATES_URL = "https://api.stlouisfed.org/fred/releases/dates"
 FED_CALENDAR_MONTH_URL = "https://www.federalreserve.gov/newsevents/{year}-{month}.htm"
 TREASURY_UPCOMING_AUCTIONS_URL = (
-    "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
-    "/v1/accounting/od/upcoming_auctions"
+    "https://www.treasurydirect.gov/TA_WS/securities/upcoming"
 )
 EASTERN = ZoneInfo("America/New_York")
 MEXICO_CITY = ZoneInfo("America/Mexico_City")
@@ -87,6 +87,8 @@ def _iso(dt): return dt.astimezone(timezone.utc).isoformat()
 def _event_status(release_time, now): return "released" if release_time <= now else "upcoming"
 def _parse_day(day, hour=13, minute=30):
     return datetime.strptime(day[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=hour, minute=minute)
+def _eastern_release(day, hour=8, minute=30):
+    return datetime.strptime(day[:10], "%Y-%m-%d").replace(tzinfo=EASTERN,hour=hour,minute=minute).astimezone(timezone.utc)
 def _next_month(dt):
     return dt.replace(year=dt.year+1, month=1, day=1) if dt.month == 12 else dt.replace(month=dt.month+1, day=1)
 
@@ -164,7 +166,18 @@ class FREDEconomicCalendarProvider:
         if not key: raise RuntimeError("FRED_API_KEY is not configured.")
         now=datetime.now(timezone.utc)
         params={"api_key":key,"file_type":"json","realtime_start":(now-timedelta(days=7)).date().isoformat(),"realtime_end":(now+timedelta(days=45)).date().isoformat(),"include_release_dates_with_no_data":"true","limit":1000,"sort_order":"asc"}
-        try: r=httpx.get(FRED_RELEASES_DATES_URL,params=params,timeout=self.timeout); r.raise_for_status(); rows=(r.json() or {}).get("release_dates") or []
+        try:
+            rows=[]
+            for offset in range(0,20000,1000):
+                r=httpx.get(FRED_RELEASES_DATES_URL,params={**params,'offset':offset},timeout=self.timeout)
+                r.raise_for_status(); body=r.json(); page=body.get('release_dates')
+                if not isinstance(page,list): raise ValueError('missing release_dates')
+                rows.extend(page)
+                count=body.get('count')
+                if len(page)<1000 or (count is not None and len(rows)>=int(count)):
+                    break
+            else:
+                raise ValueError('release calendar pagination limit reached; coverage incomplete')
         except Exception as exc: raise RuntimeError(f"FRED release calendar failed: {scrub(str(exc),key)}") from None
         events=[]; seen=set()
         for row in rows:
@@ -172,7 +185,7 @@ class FREDEconomicCalendarProvider:
             if not name or not day: continue
             low=name.lower(); mapped=next((x for x in _FRED_RELEASE_MAP if x[0] in low),None)
             if not mapped: continue
-            _,display,country,currency,importance,hour,minute=mapped; dt=_parse_day(day,hour,minute)
+            _,display,country,currency,importance,_,_=mapped; dt=_eastern_release(day)
             if (display,day) in seen: continue
             seen.add((display,day)); events.append(_event(display,country,currency,importance,dt,"FRED"))
         if not events: raise RuntimeError("FRED release calendar returned no USD/MXN-relevant releases.")
@@ -183,16 +196,38 @@ class TreasuryAuctionCalendarProvider:
     source="treasury"
     def __init__(self,settings): self.settings=settings; self.timeout=settings.http_timeout_seconds
     def get_events(self):
-        now=datetime.now(timezone.utc); params={"filter":f"auction_date:gte:{now.date().isoformat()},auction_date:lte:{(now+timedelta(days=45)).date().isoformat()}","sort":"auction_date","page[size]":100}
-        try: r=httpx.get(TREASURY_UPCOMING_AUCTIONS_URL,params=params,timeout=self.timeout); r.raise_for_status(); rows=(r.json() or {}).get("data") or []
+        now=datetime.now(timezone.utc)
+        try:
+            r=httpx.get(TREASURY_UPCOMING_AUCTIONS_URL,params={'format':'json'},timeout=self.timeout)
+            r.raise_for_status(); rows=r.json()
+            if not isinstance(rows,list) or not rows: raise ValueError('No upcoming TreasuryDirect rows; coverage unverified')
         except Exception as exc: raise RuntimeError(f"Treasury auction calendar failed: {exc}") from None
         events=[]
         for row in rows:
-            day=(row.get("auction_date") or "").strip(); typ=(row.get("security_type") or "Treasury").strip(); term=(row.get("security_term") or "").strip()
-            if not day: continue
+            day=(row.get('competitiveAuctionCloseDate') or '').strip()
+            clock=(row.get('competitiveAuctionCloseTime') or '').strip()
+            typ=(row.get('securityType') or 'Treasury').strip(); term=(row.get('securityTerm') or '').strip()
+            if not day: raise RuntimeError('Treasury auction row lacks a close date; coverage unverified')
             imp="high" if typ.lower() in {"note","bond"} or "10-year" in term.lower() else "medium"
-            events.append(_event(f"US Treasury {term} {typ} Auction","US","USD",imp,_parse_day(day,15,30),"U.S. Treasury"))
-        if not events: raise RuntimeError("Treasury auction calendar returned no upcoming auctions.")
+            # Use the publisher's competitive close, never a universal UTC hour.
+            match=re.fullmatch(r'(\d{1,2}):(\d{2})\s*(AM|PM)',clock,re.I)
+            if not match:
+                if clock:
+                    raise RuntimeError('Unrecognized Treasury auction time; coverage unverified')
+                start=datetime.strptime(day[:10],'%Y-%m-%d').replace(tzinfo=EASTERN)
+                end=start+timedelta(days=1)
+                events.append({'event':f'US Treasury {term} {typ} Auction — time unannounced',
+                    'country':'US','currency_impact':'USD','importance':'high',
+                    'release_time':None,'release_date':day[:10],'time_precision':'date',
+                    'risk_window_start':_iso(start),'risk_window_end':_iso(end),
+                    'status':'released' if now>=end else 'upcoming',
+                    'source':'U.S. Treasury','forecast':None,'actual':None,'previous':None,
+                    'note':'Competitive close time not yet announced; conservatively block new entries for the entire auction day.'})
+                continue
+            hour=int(match[1])%12+(12 if match[3].upper()=='PM' else 0)
+            dt=_eastern_release(day,hour,int(match[2]))
+            events.append(_event(f"US Treasury {term} {typ} Auction","US","USD",imp,dt,"U.S. Treasury",'TreasuryDirect competitive close; America/New_York timezone.'))
+        if not events: raise RuntimeError("Treasury auction calendar returned no usable auctions.")
         return events
 
 
@@ -242,11 +277,17 @@ class CompositeOfficialCalendarProvider:
         self.settings=settings
         self._providers=(FederalReserveCalendarProvider(settings),FREDEconomicCalendarProvider(settings),TreasuryAuctionCalendarProvider(settings),BanxicoCalendarProvider(settings),INEGICalendarProvider(settings))
         self._status="ERROR"; self._errors=[]; self._cache=None
+        self._lock=RLock()
     @property
     def status(self): return self._status
     @property
-    def coverage_gaps(self): return _coverage_gaps()
+    def coverage_gaps(self):
+        return _coverage_gaps()+[{'event':'Official calendar feed unavailable','source':error.split(':',1)[0],
+            'status':'unavailable','note':error} for error in self._errors]
     def get_events(self):
+        with self._lock:
+            return self._load_events()
+    def _load_events(self):
         if self._cache is not None: return self._cache
         events=[]; errors=[]
         for provider in self._providers:
@@ -257,7 +298,7 @@ class CompositeOfficialCalendarProvider:
         self._status="LIVE" if events and not errors and not self.coverage_gaps else ("PARTIAL" if events else "ERROR")
         self._cache=events; return events
     def get_upcoming(self,limit=None):
-        rows=[e for e in self.get_events() if e.get("status")=="upcoming"]; rows.sort(key=lambda e:e.get("release_time") or ""); return rows[:limit] if limit else rows
+        rows=[e for e in self.get_events() if e.get("status")=="upcoming"]; rows.sort(key=lambda e:e.get("release_time") or e.get('risk_window_start') or ""); return rows[:limit] if limit else rows
     def get_recent_released(self,limit=None):
         rows=[e for e in self.get_events() if e.get("status")=="released"]; rows.sort(key=lambda e:e.get("release_time") or "",reverse=True); return rows[:limit] if limit else rows
 
@@ -265,7 +306,7 @@ class CompositeOfficialCalendarProvider:
 def _dedupe_events(events):
     seen=set(); out=[]
     for ev in events:
-        key=((ev.get("event") or "").strip(),(ev.get("release_time") or "")[:10])
+        key=((ev.get("event") or "").strip(),(ev.get("release_time") or ev.get('release_date') or "")[:10])
         if key in seen: continue
         seen.add(key); out.append(ev)
     return out

@@ -114,7 +114,7 @@ def test_production_refuses_ephemeral_storage(api,monkeypatch):
 def test_only_genuine_fresh_quotes_are_saved_once_per_minute(api):
     _,engine=api
     now=datetime.now(timezone.utc)
-    quote={"bid":18.5,"ask":18.5002,"updated_at":now.isoformat()}
+    quote={"symbol":"USDMXN.r","source":"centroid_fix","bid":18.5,"ask":18.5002,"updated_at":now.isoformat()}
     with Session(engine) as db:
         capture(db,quote,now);capture(db,quote,now)
         capture(db,dict(quote,updated_at=(now-timedelta(minutes=2)).isoformat()),now)
