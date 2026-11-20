@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,49 @@ router = APIRouter(prefix="/admin/research", tags=["admin-research"])
 def rebound_status(db: Session = Depends(get_db)) -> dict:
     from app.services.rebound_watch import local_status
     return local_status(db)
+
+
+@router.post('/rebound-alert')
+def rebound_alert(request: Request, event: dict, db: Session = Depends(get_db)) -> dict:
+    """Deliver a worker event to the already configured Telegram destination."""
+    import hmac
+    import math
+    from datetime import datetime, timezone
+    from app.config import get_settings
+    from app.services.dip_rebound import utc
+    from app.services.rebound_watch import message, persist
+    from app.services.telegram_alerts import send_message
+
+    settings = get_settings()
+    expected = settings.rebound_alert_relay_secret
+    provided = request.headers.get('X-Rebound-Secret', '')
+    if not expected or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail='Invalid relay credentials')
+    if not settings.telegram_configured:
+        raise HTTPException(status_code=503, detail='Telegram unavailable')
+    try:
+        if event['stage'] not in {'DIP','ENTRY','TARGET','STOP','TIMEOUT','COVERAGE_GAP'}:
+            raise ValueError('stage')
+        if not isinstance(event['key'], str) or not 1 <= len(event['key']) <= 110:
+            raise ValueError('key')
+        age = (datetime.now(timezone.utc)-utc(event['at'])).total_seconds()
+        if not -2 <= age <= 30:
+            raise ValueError('age')
+        if event['stage']=='ENTRY':
+            for key in ('entry_ask','target_bid','stop_bid','target_net_usd','stop_net_usd'):
+                if not math.isfinite(float(event[key])):
+                    raise ValueError('level')
+            utc(event['deadline'])
+        text = message(event)
+        if len(text) > 3500:
+            raise ValueError('size')
+    except (ValueError, TypeError, KeyError, OverflowError):
+        raise HTTPException(status_code=422, detail='Invalid or stale paper event')
+    # Separate key works whether or not worker and web app share the database.
+    delivery_event = {**event, 'key':'alert:'+event['key']}
+    if not persist(db, [delivery_event]):
+        return {'delivered':False, 'duplicate':True}
+    return {'delivered':send_message(text), 'duplicate':False}
 
 
 class FullImportRequest(BaseModel):

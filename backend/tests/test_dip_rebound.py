@@ -178,3 +178,56 @@ def test_local_and_http_status_report_disabled_without_fabricated_plan():
         assert not response.json()['live_execution']
     finally:
         app.dependency_overrides.pop(get_db,None)
+
+
+def test_authenticated_relay_rejects_stale_events_and_deduplicates(monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.config import get_settings
+    from app.database import get_db
+    from app.main import app
+    from app.services import telegram_alerts
+    engine=create_engine('sqlite://',connect_args={'check_same_thread':False},
+                         poolclass=__import__('sqlalchemy').pool.StaticPool)
+    Base.metadata.create_all(engine)
+    def db_session():
+        with Session(engine) as db:
+            yield db
+    settings=get_settings()
+    monkeypatch.setattr(settings,'rebound_alert_relay_secret','test-relay-secret')
+    monkeypatch.setattr(settings,'telegram_bot_token','test-bot')
+    monkeypatch.setattr(settings,'telegram_chat_id','test-chat')
+    sent=[]
+    monkeypatch.setattr(telegram_alerts,'send_message',lambda text:sent.append(text) or True)
+    app.dependency_overrides[get_db]=db_session
+    client=TestClient(app)
+    headers={'X-Rebound-Secret':'test-relay-secret'}
+    event={'key':'test:dip','stage':'DIP','at':datetime.now(timezone.utc).isoformat()}
+    try:
+        assert client.post('/admin/research/rebound-alert',json=event).status_code==401
+        assert not sent
+        old={**event,'at':START.isoformat()}
+        assert client.post('/admin/research/rebound-alert',json=old,headers=headers).status_code==422
+        assert client.post('/admin/research/rebound-alert',json=event,headers=headers).json()['delivered']
+        assert client.post('/admin/research/rebound-alert',json=event,headers=headers).json()['duplicate']
+        assert len(sent)==1 and 'PAPER RESEARCH ONLY' in sent[0]
+    finally:
+        app.dependency_overrides.pop(get_db,None)
+
+
+def test_worker_relay_sends_only_structured_event_and_does_not_follow_redirects(monkeypatch):
+    from app.config import Settings
+    from app.services import rebound_watch as worker
+    import httpx
+    settings=Settings(_env_file=None,telegram_bot_token=None,telegram_chat_id=None,
+        rebound_alert_relay_url='https://example.invalid/admin/research/rebound-alert',
+        rebound_alert_relay_secret='test-relay-secret')
+    monkeypatch.setattr(worker,'get_settings',lambda:settings)
+    calls=[]
+    def post(url,**kwargs):
+        calls.append((url,kwargs))
+        return httpx.Response(200,json={'delivered':True},request=httpx.Request('POST',url))
+    monkeypatch.setattr(httpx,'post',post)
+    event={'key':'test:dip','stage':'DIP','at':START.isoformat()}
+    assert worker.deliver(event)
+    assert calls[0][1]['json']==event
+    assert calls[0][1]['follow_redirects'] is False
