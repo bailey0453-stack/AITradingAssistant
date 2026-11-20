@@ -49,6 +49,24 @@ def message(event):
     return '\n'.join(lines)
 
 
+def deliver(event):
+    """Use local Telegram credentials or the authenticated web-app relay."""
+    settings = get_settings()
+    if settings.telegram_configured:
+        from app.services.telegram_alerts import send_message
+        return send_message(message(event))
+    if settings.rebound_alert_relay_url and settings.rebound_alert_relay_secret:
+        import httpx
+        response = httpx.post(
+            settings.rebound_alert_relay_url,
+            headers={'X-Rebound-Secret': settings.rebound_alert_relay_secret},
+            json=event, timeout=8.0, follow_redirects=False,
+        )
+        response.raise_for_status()
+        return bool(response.json().get('delivered'))
+    return False
+
+
 def _run():
     global _error
     settings = get_settings()
@@ -65,13 +83,17 @@ def _run():
                 with SessionLocal() as db:
                     events = persist(db, events)
                 if settings.rebound_paper_alerts:
-                    from app.services.telegram_alerts import send_message
                     for event in events:
                         if event['stage']=='DIP':
                             if monotonic()-last_dip_alert < 300:
                                 continue
                             last_dip_alert = monotonic()
-                        send_message(message(event))
+                        try:
+                            if not deliver(event):
+                                logger.warning('Rebound paper alert not delivered')
+                        except Exception:
+                            # Delivery failure must not invalidate a valid paper plan.
+                            logger.warning('Rebound paper alert delivery failed')
             _error = None
         except Exception:
             logger.exception('Rebound paper monitor failed')
@@ -111,7 +133,9 @@ def local_status(db):
         out.update(status='ERROR', reason=_error, setup=None)
     rows = db.execute(select(ReboundEvent).order_by(ReboundEvent.at.desc()).limit(30)).scalars().all()
     return {**out, 'running':running, 'poll_seconds':1,
-            'alerts_configured':get_settings().rebound_paper_alerts and get_settings().telegram_configured,
+            'alerts_configured':get_settings().rebound_paper_alerts and bool(
+                get_settings().telegram_configured or
+                (get_settings().rebound_alert_relay_url and get_settings().rebound_alert_relay_secret)),
             'recent_events':[row.payload for row in rows],
             'delivery_note':'Best-effort Telegram after persistence; failed delivery is not retried. Events remain available here.'}
 

@@ -52,6 +52,13 @@ minutes. New troughs may generate fresh research events. Run one monitor worker
 process; event keys suppress duplicate persisted events across processes, but
 pattern history is intentionally process-local.
 
+If Telegram credentials are held only by the web app, set a new random
+`REBOUND_ALERT_RELAY_SECRET` on both services and set the worker's
+`REBOUND_ALERT_RELAY_URL` to the web app's `/admin/research/rebound-alert` endpoint.
+The relay accepts authenticated events at most 30 seconds old, deduplicates them
+durably, and uses only the web app's existing Telegram destination. Bot credentials
+stay on the web app. Delivery remains best effort; no retries or orders are sent.
+
 ## Validation before any live recommendation
 
 `dip_rebound.replay(quotes)` accepts chronological broker bid/ask observations
