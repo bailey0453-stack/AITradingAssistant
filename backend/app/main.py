@@ -63,7 +63,10 @@ async def lifespan(app: FastAPI):
         logger.exception("Centroid FIX MD startup failed; continuing without FIX feed.")
     from app.services.rebound_watch import start as start_rebound, stop as stop_rebound
     start_rebound()
+    from app.services.fix_history_recorder import start as start_history, stop as stop_history
+    start_history()
     yield
+    stop_history()
     stop_rebound()
     if fix_session:
         try:
@@ -1378,6 +1381,9 @@ DASHBOARD_HTML = """<!doctype html>
         +(h.target_first_pct==null?'':' · historical target-first rate '+h.target_first_pct+'%')
         +(v.average_net_usd==null?'':' · average simulated net $'+Number(v.average_net_usd).toFixed(2))
         +' · live accuracy not established.'+(t.news && t.news.coverage_warning?' '+t.news.coverage_warning:''));
+      const hp=t.history_progress;
+      if(hp) setText('fo_evidence',$('fo_evidence').textContent+' History: '+hp.observations+' observations since '+fmtTime(hp.first_at)+'. Records with the dashboard closed.');
+      if(t.calendar_issues && t.calendar_issues.length) setText('fo_reason',$('fo_reason').textContent+' Calendar: '+t.calendar_issues.map(x=>x.note || x.event).join('; '));
       const momentum=t.momentum_bps || {},news=t.news || {};
       const changes=['5m','15m','60m'].filter(k=>momentum[k]!=null).map(function(k){
         const cents=(t.spot-t.spot/(1+momentum[k]/10000))*100;

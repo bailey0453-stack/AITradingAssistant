@@ -31,6 +31,8 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from time import time
 
 import httpx
 
@@ -474,6 +476,13 @@ class ResilientCalendarProvider(CalendarProvider):
         return events
 
 
+@lru_cache(maxsize=2)
+def _official_provider(api_key, timeout, bucket):
+    from app.services.official_calendar import CompositeOfficialCalendarProvider
+    return CompositeOfficialCalendarProvider(Settings(use_mock_data=False,
+        fred_api_key=api_key,http_timeout_seconds=timeout))
+
+
 def get_calendar_provider(settings: Settings | None = None) -> CalendarProvider:
     settings = settings or get_settings()
     provider_name = (settings.calendar_provider or "auto").lower()
@@ -491,9 +500,7 @@ def get_calendar_provider(settings: Settings | None = None) -> CalendarProvider:
         return ResilientCalendarProvider(settings, fallback_to_mock=False)
 
     if settings.fred_api_key and provider_name not in ("mock", "csv"):
-        from app.services.official_calendar import CompositeOfficialCalendarProvider
-
-        return CompositeOfficialCalendarProvider(settings)
+        return _official_provider(settings.fred_api_key,settings.http_timeout_seconds,int(time()//300))
 
     if settings.calendar_api_key:
         return ResilientCalendarProvider(settings, fallback_to_mock=False)

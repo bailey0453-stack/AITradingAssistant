@@ -91,6 +91,13 @@ def _blocking_event(payload):
         status = str(ev.get("status") or "upcoming").lower()
         if status in {"released", "past", "completed"}:
             continue
+        window_start=_parse_event_time(ev.get('risk_window_start'))
+        window_end=_parse_event_time(ev.get('risk_window_end'))
+        if window_start and window_end:
+            if now<window_end and (window_start-now).total_seconds()<=_EVENT_BLOCK_WINDOW_HOURS*3600:
+                candidates.append({'name':_event_name(ev),'release_time':None,
+                    'hours_away':max(0,(window_start-now).total_seconds()/3600),'importance':'high'})
+            continue
         when = _parse_event_time(ev.get("release_time") or ev.get("time") or ev.get("datetime"))
         if when is None:
             malformed.append(ev)

@@ -34,19 +34,23 @@ def usable_quote(fix, now):
 
 
 def capture(db, fix, now):
+    # Never label another pair, indicative feed or simulated quote as broker history.
+    if not isinstance(fix, dict) or fix.get('source') != 'centroid_fix' or str(fix.get('symbol','')).upper().replace('/','').split('.')[0] != 'USDMXN':
+        return False
     quote = usable_quote(fix, now)
     if not quote:
-        return
+        return False
     bid, ask, at = quote
     minute = at.replace(second=0, microsecond=0)
     if db.execute(select(ObservedFixQuote.id).where(ObservedFixQuote.minute == minute)).first():
-        return
+        return False
     try:
         with db.begin_nested():
             db.add(ObservedFixQuote(minute=minute, quote_at=at, bid=bid, ask=ask, seen_at=now))
             db.flush()
+        return True
     except IntegrityError:
-        pass  # A concurrent request already retained this minute.
+        return False  # A concurrent request already retained this minute.
 
 
 def _queries(since):
