@@ -86,14 +86,14 @@ def test_treasury_bad_response_never_becomes_complete_coverage(monkeypatch,rows)
 def test_fred_paginates_and_converts_eastern_daylight_time(monkeypatch):
     calls=[]
     def get(url,params,**kwargs):
-        calls.append(params['offset'])
-        if not params['offset']:
-            return response({'count':1001,'release_dates':[{'release_name':'irrelevant','date':'2026-07-01'}]*1000})
-        return response({'count':1001,'release_dates':[{'release_name':'Consumer Price Index','date':'2026-07-14'}]})
+        calls.append((params['release_id'],params['offset']))
+        if params['release_id']==10 and not params['offset']:
+            return response({'count':101,'release_dates':[{'date':'2026-07-01'}]*100})
+        return response({'count':101 if params['release_id']==10 else 1,'release_dates':[{'date':'2026-07-14'}]})
     monkeypatch.setattr(cal.httpx,'get',get)
     events=cal.FREDEconomicCalendarProvider(Settings(fred_api_key='test')).get_events()
-    assert calls==[0,1000]
-    assert events[0]['release_time']=='2026-07-14T12:30:00+00:00'
+    assert {c[0] for c in calls}=={10,50,53,54,46,9} and (10,100) in calls
+    assert any(e['event']=='US CPI' and e['release_time']=='2026-07-14T12:30:00+00:00' for e in events)
 
 
 def test_composite_exposes_failed_feed_without_weakening_status():

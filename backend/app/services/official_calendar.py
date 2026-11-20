@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 from threading import RLock
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
@@ -23,6 +24,7 @@ from app.services.secrets import scrub
 logger = logging.getLogger(__name__)
 
 FRED_RELEASES_DATES_URL = "https://api.stlouisfed.org/fred/releases/dates"
+FRED_RELEASE_DATES_URL = "https://api.stlouisfed.org/fred/release/dates"
 FED_CALENDAR_MONTH_URL = "https://www.federalreserve.gov/newsevents/{year}-{month}.htm"
 TREASURY_UPCOMING_AUCTIONS_URL = (
     "https://www.treasurydirect.gov/TA_WS/securities/upcoming"
@@ -165,29 +167,35 @@ class FREDEconomicCalendarProvider:
         key=self.settings.fred_api_key
         if not key: raise RuntimeError("FRED_API_KEY is not configured.")
         now=datetime.now(timezone.utc)
-        params={"api_key":key,"file_type":"json","realtime_start":(now-timedelta(days=7)).date().isoformat(),"realtime_end":(now+timedelta(days=45)).date().isoformat(),"include_release_dates_with_no_data":"true","limit":1000,"sort_order":"asc"}
-        try:
+        params={"api_key":key,"file_type":"json","realtime_start":(now-timedelta(days=7)).date().isoformat(),"realtime_end":(now+timedelta(days=45)).date().isoformat(),"include_release_dates_with_no_data":"true","limit":100,"sort_order":"asc"}
+        def fetch(spec):
+            release_id,mapped=spec
             rows=[]
-            for offset in range(0,20000,1000):
-                r=httpx.get(FRED_RELEASES_DATES_URL,params={**params,'offset':offset},timeout=self.timeout)
+            for offset in range(0,1000,100):
+                r=httpx.get(FRED_RELEASE_DATES_URL,params={**params,'release_id':release_id,'offset':offset},timeout=self.timeout)
                 r.raise_for_status(); body=r.json(); page=body.get('release_dates')
-                if not isinstance(page,list): raise ValueError('missing release_dates')
+                if not isinstance(page,list): raise ValueError(f'release {release_id}: missing release_dates')
                 rows.extend(page)
                 count=body.get('count')
-                if len(page)<1000 or (count is not None and len(rows)>=int(count)):
+                if len(page)<100 or (count is not None and len(rows)>=int(count)):
                     break
             else:
-                raise ValueError('release calendar pagination limit reached; coverage incomplete')
+                raise ValueError(f'release {release_id}: pagination incomplete')
+            events=[]
+            for row in rows:
+                day=(row.get('date') or '').strip()
+                if not day: raise ValueError(f'release {release_id}: missing date')
+                _,display,country,currency,importance,_,_=mapped
+                events.append(_event(display,country,currency,importance,_eastern_release(day),'FRED'))
+            if not events: raise ValueError(f'release {release_id}: dates unavailable')
+            return events
+        try:
+            # Small per-release requests avoid the slow all-releases endpoint.
+            # Every tracked release must succeed; missing coverage still blocks.
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                groups=list(pool.map(fetch,zip((10,50,53,54,46,9),_FRED_RELEASE_MAP)))
+            events=_dedupe_events([e for group in groups for e in group])
         except Exception as exc: raise RuntimeError(f"FRED release calendar failed: {scrub(str(exc),key)}") from None
-        events=[]; seen=set()
-        for row in rows:
-            name=(row.get("release_name") or "").strip(); day=(row.get("date") or "").strip()
-            if not name or not day: continue
-            low=name.lower(); mapped=next((x for x in _FRED_RELEASE_MAP if x[0] in low),None)
-            if not mapped: continue
-            _,display,country,currency,importance,_,_=mapped; dt=_eastern_release(day)
-            if (display,day) in seen: continue
-            seen.add((display,day)); events.append(_event(display,country,currency,importance,dt,"FRED"))
         if not events: raise RuntimeError("FRED release calendar returned no USD/MXN-relevant releases.")
         return events
 
