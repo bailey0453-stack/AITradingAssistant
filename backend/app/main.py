@@ -61,7 +61,10 @@ async def lifespan(app: FastAPI):
             fix_session = True
     except Exception:  # noqa: BLE001
         logger.exception("Centroid FIX MD startup failed; continuing without FIX feed.")
+    from app.services.rebound_watch import start as start_rebound, stop as stop_rebound
+    start_rebound()
     yield
+    stop_rebound()
     if fix_session:
         try:
             from app.services.fix.provider import stop_fix_session
@@ -320,6 +323,13 @@ DASHBOARD_HTML = """<!doctype html>
       <b>Market data unavailable.</b>
       <span id="mkt_unavail_msg">Live market data unavailable and no recent cached real quote exists.</span>
       No actionable trade recommendation is shown.
+    </div>
+    <div class="card tdc yellow" id="reboundCard">
+      <h2>Dip and rebound · paper research</h2>
+      <div class="tdc-action" id="rb_status">CHECKING</div>
+      <p id="rb_reason">Checking persistent broker-feed monitor…</p>
+      <p id="rb_plan"></p><p id="rb_meta" class="muted"></p>
+      <p class="muted">Unvalidated rules; no accuracy claim or live orders. Levels stay fixed for each paper setup. Broker quotes checked about once a second; touches between observations may be missed.</p>
     </div>
     <div class="card tdc yellow" id="flexibleCard">
       <h2>Five-cent opportunity · flexible timing, up to five hours</h2>
@@ -1386,6 +1396,16 @@ DASHBOARD_HTML = """<!doctype html>
       });
       setText('fo_updated','Quote '+fmtTime(t.quote_at)+' · updated '+fmtTime(t.generated_at)+' · maximum modeled window: five hours');
       if(!flexibleExpires || flexibleExpires<=Date.now()) expireFlexible('The opportunity assessment expired. Waiting for fresh data.');
+    }
+    async function loadRebound(){
+      try{
+        const r=await fetchJson('/decision/rebound'),p=r.setup;
+        setText('rb_status',r.status);setText('rb_reason',r.reason);
+        setText('rb_plan',p?'Paper BUY at ask '+p.entry_ask+' · target bid '+p.target_bid+' · stop bid '+p.stop_bid
+          +' · target net $'+p.target_net_usd+' / stop net $'+p.stop_net_usd+' per $100K after $40 fees.':'No current paper entry.');
+        setText('rb_meta','Quote '+fmtTime(r.quote_at)+' · '+(r.completed_minutes||0)+' completed minutes · phone alerts '+(r.alerts_configured?'configured':'off')
+          +(p?' · original deadline '+fmtTime(p.deadline):''));
+      }catch(e){setText('rb_status','UNAVAILABLE');setText('rb_reason','Worker status could not be retrieved.');setText('rb_plan','');}
     }
     async function loadFlexible(){
       if(flexibleLoading) return;
@@ -2912,6 +2932,7 @@ DASHBOARD_HTML = """<!doctype html>
       loadFlexible();
       loadPersonalWatch();
       loadRelease();
+      loadRebound();setInterval(loadRebound,5000);
       setInterval(loadFlexible,15000);
       setInterval(loadPersonalWatch,15000);
       $('legacyShortTerm').addEventListener('toggle',function(){if(this.open) loadShortTerm();});

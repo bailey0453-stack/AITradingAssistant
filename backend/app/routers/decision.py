@@ -22,6 +22,12 @@ from app.services import decision_quality
 router = APIRouter(prefix="/decision", tags=["decision"])
 
 
+@router.get('/rebound')
+def rebound_watch(db: Session = Depends(get_db)) -> dict:
+    from app.services.rebound_watch import current
+    return current(db)
+
+
 @lru_cache(maxsize=1)
 def _short_term_calendar(five_minute_bucket: int) -> dict:
     """Reuse calendar coverage for five minutes; never cache live FIX prices."""

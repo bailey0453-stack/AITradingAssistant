@@ -10,6 +10,7 @@ from app.models.history import (
 from app.models.jobs import JobRun
 from app.models.personal_trades import PersonalTrade, ObservedFixQuote
 from app.models.release_watch import ReleaseWatch
+from app.models.rebound import ReboundEvent
 from app.models.recommendations import Recommendation, RecommendationOutcome
 from app.models.research import ResearchDailyLearning, ResearchMarketSnapshot
 from app.models.research_import import HistoricalImportJob

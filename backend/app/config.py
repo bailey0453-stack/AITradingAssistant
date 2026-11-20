@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     market_holidays: Optional[List[str]] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    rebound_paper_enabled: bool = False
+    rebound_paper_alerts: bool = False
 
     centroid_md_host: Optional[str] = None
     centroid_md_port: Optional[int] = None

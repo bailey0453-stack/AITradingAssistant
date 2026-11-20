@@ -29,6 +29,6 @@ jobs:
       - name: Run production macro regression tests
         run: pytest -q tests/test_no_mock_macro_production.py
       - name: Run FX opportunity and personal exit regressions
-        run: pytest -q tests/test_flexible_opportunity.py tests/test_personal_exit_watch.py tests/test_personal_trades_api.py tests/test_flexible_dashboard.py tests/test_short_term_forecast.py tests/test_short_term_news.py tests/test_five_cent_plan.py tests/test_release_watch.py tests/test_dashboard_js_load.py
+        run: pytest -q tests/test_dip_rebound.py tests/test_flexible_opportunity.py tests/test_personal_exit_watch.py tests/test_personal_trades_api.py tests/test_flexible_dashboard.py tests/test_short_term_forecast.py tests/test_short_term_news.py tests/test_five_cent_plan.py tests/test_release_watch.py tests/test_dashboard_js_load.py
       - name: Check customer SSO
         run: python -m tests.test_customer_sso_auth

@@ -26,6 +26,12 @@ from app.services.research_import_service import (
 router = APIRouter(prefix="/admin/research", tags=["admin-research"])
 
 
+@router.get('/snapshots/rebound-status')
+def rebound_status(db: Session = Depends(get_db)) -> dict:
+    from app.services.rebound_watch import local_status
+    return local_status(db)
+
+
 class FullImportRequest(BaseModel):
     force: bool = False
 
